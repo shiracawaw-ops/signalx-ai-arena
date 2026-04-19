@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // ─── Packaged Electron Smoke Test ─────────────────────────────────────────────
-// Launches the packaged Windows build of SignalX AI Arena, waits for the
-// BrowserWindow to load, and asserts the sign-in UI is actually rendered.
+// Launches the packaged SignalX AI Arena build (Windows .exe, macOS .app, or
+// Linux unpacked binary), waits for the BrowserWindow to load, and asserts the
+// sign-in UI is actually rendered.
 //
 // Catches the kinds of bugs that the jsdom routing test (task #33) cannot:
 //   - preload.js failing inside a real Chromium process
@@ -23,10 +24,6 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { _electron: electron } = require('playwright-core');
 
-const UNPACKED_DIR = join(process.cwd(), 'dist-electron', 'win-unpacked');
-const EXE_NAME     = 'SignalX AI Arena.exe';
-const EXE_PATH     = join(UNPACKED_DIR, EXE_NAME);
-
 const LOAD_TIMEOUT_MS = 60_000;
 const TEXT_TIMEOUT_MS = 30_000;
 
@@ -39,10 +36,43 @@ function info(msg) {
   console.log(`[smoke-test] ${msg}`);
 }
 
+// Resolve the packaged binary across Windows / macOS / Linux. The path can be
+// supplied explicitly via --exe=<path> or the SMOKE_TEST_EXE env var; otherwise
+// we auto-detect based on electron-builder's per-platform output layout.
+function resolveExePath() {
+  const cliArg = process.argv.slice(2).find(a => a.startsWith('--exe='));
+  const explicit = cliArg ? cliArg.slice('--exe='.length) : process.env.SMOKE_TEST_EXE;
+  if (explicit) return explicit;
+
+  const distDir = join(process.cwd(), 'dist-electron');
+  if (process.platform === 'win32') {
+    return join(distDir, 'win-unpacked', 'SignalX AI Arena.exe');
+  }
+  if (process.platform === 'darwin') {
+    // electron-builder writes to mac/, mac-arm64/, or other arch-suffixed
+    // directories under dist-electron/. Glob any sibling `mac*` directory
+    // that contains the .app bundle so future arch suffixes don't break us.
+    if (existsSync(distDir)) {
+      const macDirs = readdirSync(distDir).filter(name => name.startsWith('mac'));
+      for (const dir of macDirs) {
+        const candidate = join(distDir, dir, 'SignalX AI Arena.app', 'Contents', 'MacOS', 'SignalX AI Arena');
+        if (existsSync(candidate)) return candidate;
+      }
+    }
+    return join(distDir, 'mac', 'SignalX AI Arena.app', 'Contents', 'MacOS', 'SignalX AI Arena');
+  }
+  // linux — electron-builder lowercases + dash-separates productName for the
+  // unpacked binary (e.g. "SignalX AI Arena" → "signalx-ai-arena").
+  return join(distDir, 'linux-unpacked', 'signalx-ai-arena');
+}
+
+const EXE_PATH     = resolveExePath();
+const UNPACKED_DIR = join(EXE_PATH, '..');
+
 if (!existsSync(EXE_PATH)) {
-  console.error(`[smoke-test] expected packaged exe at: ${EXE_PATH}`);
+  console.error(`[smoke-test] expected packaged binary at: ${EXE_PATH}`);
   if (existsSync(UNPACKED_DIR)) {
-    console.error('[smoke-test] win-unpacked contains:');
+    console.error(`[smoke-test] ${UNPACKED_DIR} contains:`);
     for (const entry of readdirSync(UNPACKED_DIR)) console.error('  -', entry);
   }
   process.exit(1);
