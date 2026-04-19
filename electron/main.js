@@ -1,12 +1,11 @@
 // ─── SignalX AI Arena — Electron Main Process ─────────────────────────────────
-// Spawns the bundled Express API server, then opens a BrowserWindow
-// loading the Vite-built frontend. Works on Windows 10/11 (x64 / arm64).
+// Uses utilityProcess.fork() (Electron 22+) to embed the Express API server
+// without needing a separate node.exe binary — works in packaged Windows EXE.
 
-const { app, BrowserWindow, shell, dialog } = require('electron');
-const path  = require('path');
-const fs    = require('fs');
-const http  = require('http');
-const { spawn } = require('child_process');
+const { app, BrowserWindow, shell, dialog, utilityProcess } = require('electron');
+const path = require('path');
+const fs   = require('fs');
+const http = require('http');
 
 // ── Paths ──────────────────────────────────────────────────────────────────────
 const IS_PACKAGED = app.isPackaged;
@@ -17,76 +16,81 @@ function resourcePath(...parts) {
     : path.join(__dirname, '..', ...parts);
 }
 
-const FRONTEND_DIR   = IS_PACKAGED
+// Packaged: resources/frontend/ — Unpackaged: the electron Vite build output
+const FRONTEND_DIR = IS_PACKAGED
   ? resourcePath('frontend')
-  : path.join(__dirname, '..', 'artifacts', 'signalx-arena', 'dist');
+  : path.join(__dirname, '..', 'artifacts', 'signalx-arena', 'dist-electron');
 
-const API_ENTRY      = IS_PACKAGED
+// Packaged: resources/api-server/dist/index.mjs — Unpackaged: dev build
+const API_ENTRY = IS_PACKAGED
   ? resourcePath('api-server', 'dist', 'index.mjs')
   : path.join(__dirname, '..', 'artifacts', 'api-server', 'dist', 'index.mjs');
 
-const API_PORT       = 18080;   // dedicated port to avoid collision with dev workflow
+const API_PORT = 18080;
 
-// ── API-server child process ────────────────────────────────────────────────────
+// ── API server via utilityProcess ─────────────────────────────────────────────
+// utilityProcess.fork() runs a Node.js script inside Electron's process model
+// without requiring a separate node.exe binary — safe in packaged apps.
 let apiProc = null;
 
 function startApiServer() {
   if (!fs.existsSync(API_ENTRY)) {
-    console.warn('[electron] API server bundle not found at', API_ENTRY);
+    console.warn('[electron] API entry not found:', API_ENTRY);
     return;
   }
 
-  const nodeExe = process.execPath.replace(/electron(\.exe)?$/i, 'node$1');
-  const nodeCmd  = fs.existsSync(nodeExe) ? nodeExe : 'node';
-
-  apiProc = spawn(nodeCmd, ['--enable-source-maps', API_ENTRY], {
+  apiProc = utilityProcess.fork(API_ENTRY, [], {
     env: {
       ...process.env,
       PORT:     String(API_PORT),
       NODE_ENV: 'production',
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
+    stdio: 'pipe',
   });
 
-  apiProc.stdout.on('data', d => process.stdout.write('[api] ' + d));
-  apiProc.stderr.on('data', d => process.stderr.write('[api] ' + d));
+  apiProc.stdout?.on('data', d => process.stdout.write('[api] ' + d));
+  apiProc.stderr?.on('data', d => process.stderr.write('[api] ' + d));
 
   apiProc.on('exit', code => {
     if (code && code !== 0) {
       console.error('[electron] API server exited with code', code);
     }
+    apiProc = null;
   });
 }
 
-// ── Wait for API server to be ready ────────────────────────────────────────────
+// ── Wait for API server to respond ────────────────────────────────────────────
 function waitForApi(retries, callback) {
-  http.get(`http://localhost:${API_PORT}/api/healthz`, res => {
+  http.get(`http://localhost:${API_PORT}/api/healthz`, () => {
     callback(null);
   }).on('error', () => {
-    if (retries <= 0) { callback(new Error('API server did not start')); return; }
+    if (retries <= 0) {
+      callback(new Error('API server did not start within timeout'));
+      return;
+    }
     setTimeout(() => waitForApi(retries - 1, callback), 400);
   });
 }
 
-// ── BrowserWindow ───────────────────────────────────────────────────────────────
+// ── BrowserWindow ─────────────────────────────────────────────────────────────
 let mainWindow = null;
 
 function createWindow() {
+  const iconPath = path.join(__dirname, 'icon.png');
+
   mainWindow = new BrowserWindow({
-    width:          1440,
-    height:         900,
-    minWidth:       1024,
-    minHeight:      640,
+    width:           1440,
+    height:          900,
+    minWidth:        1024,
+    minHeight:       640,
     backgroundColor: '#09090b',
-    show:           false,
-    title:          'SignalX AI Arena',
-    icon:           path.join(__dirname, 'icon.ico'),
+    show:            false,
+    title:           'SignalX AI Arena',
+    icon:            fs.existsSync(iconPath) ? iconPath : undefined,
     webPreferences: {
-      preload:          path.join(__dirname, 'preload.js'),
-      nodeIntegration:  false,
-      contextIsolation: true,
-      // Inject the API port so the frontend knows where to connect
+      preload:             path.join(__dirname, 'preload.js'),
+      nodeIntegration:     false,
+      contextIsolation:    true,
       additionalArguments: [`--api-port=${API_PORT}`],
     },
   });
@@ -95,8 +99,9 @@ function createWindow() {
   if (fs.existsSync(indexHtml)) {
     mainWindow.loadFile(indexHtml);
   } else {
-    // Fallback to dev server (unpackaged dev run)
+    // Fallback for unpackaged dev run without a prior build
     mainWindow.loadURL('http://localhost:24952');
+    console.warn('[electron] index.html not found at', indexHtml, '— falling back to dev server');
   }
 
   mainWindow.once('ready-to-show', () => {
@@ -104,7 +109,6 @@ function createWindow() {
     mainWindow.focus();
   });
 
-  // Open external links in the OS browser, not inside Electron
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('http')) shell.openExternal(url);
     return { action: 'deny' };
@@ -113,15 +117,15 @@ function createWindow() {
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
-// ── App lifecycle ───────────────────────────────────────────────────────────────
+// ── App lifecycle ─────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
   startApiServer();
 
-  waitForApi(40, err => {
+  waitForApi(50, err => {
     if (err) {
       dialog.showErrorBox(
         'SignalX — Startup Error',
-        'The local API server failed to start.\n\nThe app will run in demo mode only.',
+        'The local API server failed to start.\n\nThe app will open in demo mode — real trading will be unavailable.',
       );
     }
     createWindow();
@@ -140,8 +144,8 @@ app.on('window-all-closed', () => {
 app.on('before-quit', killApi);
 
 function killApi() {
-  if (apiProc && !apiProc.killed) {
-    apiProc.kill('SIGTERM');
+  if (apiProc) {
+    try { apiProc.kill(); } catch {}
     apiProc = null;
   }
 }

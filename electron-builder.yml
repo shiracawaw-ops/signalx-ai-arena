@@ -10,7 +10,7 @@ copyright:   Copyright © 2024 SignalX
 
 # ── Source (electron main process files) ───────────────────────────────────────
 directories:
-  output:         dist-electron
+  output:         artifacts/electron/dist-app
   buildResources: electron
 
 main: electron/main.js
@@ -19,13 +19,13 @@ files:
   - electron/main.js
   - electron/preload.js
 
-# Extra resources bundled outside the asar archive (can be read by Node.js)
+# Extra resources bundled outside the asar archive (readable by Node.js at runtime)
 extraResources:
   # Built Vite frontend → resources/frontend/
   - from: "artifacts/signalx-arena/dist-electron"
     to:   "frontend"
     filter: ["**/*"]
-  # Built api-server bundle → resources/api-server/dist/
+  # Built API server bundle → resources/api-server/dist/
   - from: "artifacts/api-server/dist"
     to:   "api-server/dist"
     filter: ["**/*.mjs", "**/*.mjs.map"]
@@ -38,7 +38,7 @@ win:
       arch:   [x64]
     - target: portable
       arch:   [x64]
-  artifactName: "SignalX-AI-Arena-${name}-${version}.${ext}"
+  artifactName: "SignalX-AI-Arena-${version}-Setup.${ext}"
 
 nsis:
   oneClick:          false
@@ -50,7 +50,7 @@ nsis:
   installerHeaderIcon: electron/icon.png
 
 portable:
-  artifactName: "SignalX-AI-Arena-Portable-${version}.exe"
+  artifactName: "SignalX-AI-Arena-${version}-Portable.exe"
 
 # ── macOS ──────────────────────────────────────────────────────────────────────
 mac:
