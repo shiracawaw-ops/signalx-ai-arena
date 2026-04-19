@@ -155,6 +155,11 @@ function showErrorPage(reason) {
 // ── BrowserWindow ─────────────────────────────────────────────────────────────
 let mainWindow = null;
 
+// Per-session renderer crash counter. The first render-process-gone triggers a
+// silent reload; the second (or later) shows the error fallback. Reset to 0
+// whenever the bundle finishes loading successfully.
+let rendererCrashCount = 0;
+
 function createWindow(startupError) {
   const iconPath = path.join(__dirname, 'icon.png');
 
@@ -216,7 +221,15 @@ function createWindow(startupError) {
 
   mainWindow.on('closed', () => { mainWindow = null; });
 
+  // Reset the per-session crash counter once the bundle loads successfully so a
+  // future crash also gets one silent retry.
+  mainWindow.webContents.on('did-finish-load', () => {
+    rendererCrashCount = 0;
+  });
+
   // ── Renderer load failures → show the error fallback page ──────────────────
+  // did-fail-load (the bundle itself failed) always goes straight to the error
+  // screen — retrying a broken bundle would just loop.
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     if (!isMainFrame) return;          // ignore subframe/asset failures
     if (errorCode === -3) return;      // ERR_ABORTED — usually a user/nav cancel
@@ -228,7 +241,23 @@ function createWindow(startupError) {
     );
   });
 
+  // First render-process-gone of the session → silently re-create the window.
+  // Second (or later) → fall through to the error screen.
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    rendererCrashCount += 1;
+
+    if (rendererCrashCount === 1) {
+      console.warn(
+        '[electron] renderer crashed (reason=' + (details?.reason || 'unknown') +
+        ', exitCode=' + (details?.exitCode ?? 'n/a') + ') — silently reloading once',
+      );
+      try { mainWindow.removeAllListeners('closed'); } catch { /* ignore */ }
+      try { mainWindow.destroy(); } catch { /* ignore */ }
+      mainWindow = null;
+      createWindow(null);
+      return;
+    }
+
     showErrorPage(
       `The application window crashed.\n\n` +
       `Reason:    ${details?.reason || 'unknown'}\n` +
