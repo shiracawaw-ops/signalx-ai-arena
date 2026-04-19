@@ -730,7 +730,7 @@ export default function ExchangePage() {
                     )}
                     <div className="flex items-start gap-2 p-2.5 rounded-lg bg-amber-500/5 border border-amber-500/20 text-[10px] text-amber-400">
                       <Lock size={11} className="flex-shrink-0 mt-0.5" />
-                      Keys are stored in browser localStorage only. Never share your secret key.
+                      Keys are kept in memory for this session only — never written to disk. Only a masked hint (e.g. abcd***wxyz) is persisted so the UI can show "previously connected" after a restart. Never share your secret key.
                     </div>
                   </>
                 )}
