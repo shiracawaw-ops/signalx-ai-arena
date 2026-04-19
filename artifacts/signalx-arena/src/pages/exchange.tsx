@@ -181,6 +181,7 @@ export default function ExchangePage() {
       if (balRes.ok) {
         const bals = (balRes.data as { balances: typeof liveBalances }).balances ?? [];
         setLiveBalances(bals);
+        exMode.update({ balanceFetched: true });
         if (bals.length === 0) {
           setBalError('No assets found. Make sure your API key has read permission and funds exist in any account type.');
         }
@@ -285,6 +286,7 @@ export default function ExchangePage() {
       // 4. Update global engine state — credentials stay in React state only
       exMode.update({
         mode,
+        networkUp:    true,
         apiValidated: true,
         permissions:  perms,
         connectedAt:  Date.now(),
@@ -810,11 +812,12 @@ export default function ExchangePage() {
             <CardHeader className="py-3 px-4"><CardTitle className="text-sm flex items-center gap-2"><Activity size={13} /> Execution Readiness — {selectedEx.name}</CardTitle></CardHeader>
             <CardContent className="p-4 space-y-2">
               {[
-                { label: 'Live Mode',         ok: !!ready['liveMode'],         note: ready['liveMode'] ? '' : 'Switch to Live in Connection tab' },
-                { label: 'API Validated',      ok: !!ready['apiValidated'],     note: ready['apiValidated'] ? '' : 'Connect with real API keys' },
-                { label: 'Trade Permission',   ok: !!ready['tradePermission'],  note: ready['tradePermission'] ? '' : 'API key must have trade permission' },
-                { label: 'Trading Armed',      ok: !!ready['tradingArmed'],     note: ready['tradingArmed'] ? '' : 'Toggle arm below' },
-                { label: 'Exchange Selected',  ok: !!ready['exchangeSelected'], note: '' },
+                { label: 'Live Mode',         ok: !!ready['liveMode'],        note: ready['liveMode'] ? '' : 'Switch to Real in Connection tab' },
+                { label: 'Network Up',         ok: !!ready['networkUp'],       note: ready['networkUp'] ? '' : 'Connect to exchange first' },
+                { label: 'API Validated',      ok: !!ready['apiValidated'],    note: ready['apiValidated'] ? '' : 'Connect with real API keys' },
+                { label: 'Balance Fetched',    ok: !!ready['balanceFetched'],  note: ready['balanceFetched'] ? '' : 'Fetch balances after connecting' },
+                { label: 'Trade Permission',   ok: !!ready['tradePermission'], note: ready['tradePermission'] ? '' : 'API key must have trade permission' },
+                { label: 'Trading Armed',      ok: !!ready['tradingArmed'],    note: ready['tradingArmed'] ? '' : 'Toggle arm below' },
               ].map(r => (
                 <div key={r.label} className="flex items-center gap-3 py-1.5 border-b border-zinc-800/30 last:border-0">
                   <StatusDot ok={r.ok} />

@@ -3,6 +3,7 @@ import { hmacSHA256Base64, safeFetch, stubSymbolRules, toUsdtPair } from './base
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE = 'https://www.okx.com';
+// OKX paper/simulated trading uses the same domain with x-simulated-trading: 1 header
 
 function sign(secret: string, ts: string, method: string, path: string, body = ''): string {
   return hmacSHA256Base64(secret, ts + method + path + body);
@@ -137,10 +138,20 @@ export class OkxAdapter implements ExchangeAdapter {
     const ts   = new Date().toISOString();
     const path = '/api/v5/trade/order';
     const sig  = sign(creds.secretKey, ts, 'POST', path, body);
-    const r = await safeFetch(`${BASE}${path}`, { method: 'POST', headers: headers(creds, ts, sig), body }, 'okx');
+    const hdrs: Record<string, string> = { ...headers(creds, ts, sig) };
+    if (order.testnet) hdrs['x-simulated-trading'] = '1';  // OKX paper trading header
+    const r = await safeFetch(`${BASE}${path}`, { method: 'POST', headers: hdrs, body }, 'okx');
     if (!r.ok) throw new Error(`OKX order failed: ${r.error?.message}`);
     const d   = ((r.data as Record<string, unknown[]>)?.['data']?.[0] ?? {}) as Record<string, unknown>;
     return { orderId: String(d['ordId'] ?? ''), clientId: String(d['clOrdId'] ?? ''), symbol: sym, side: order.side, type: order.type, status: 'open', quantity: order.quantity, filledQty: 0, price: order.price ?? 0, avgPrice: 0, fee: 0, feeCurrency: 'USDT', timestamp: Date.now(), exchange: 'okx', raw: d };
+  }
+
+  async getPrice(symbol: string): Promise<number> {
+    const sym = this.normalizeSymbol(symbol);
+    const r = await safeFetch(`${BASE}/api/v5/market/ticker?instId=${sym}`, {}, 'okx');
+    if (!r.ok) throw new Error(`OKX getPrice failed: ${r.error?.message}`);
+    const item = ((r.data as Record<string, unknown[]>)?.['data']?.[0] ?? {}) as Record<string, string>;
+    return parseFloat(item['last'] ?? '0');
   }
 
   async cancelOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<boolean> {

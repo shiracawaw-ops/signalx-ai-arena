@@ -64,10 +64,10 @@ function ModeBadge() {
   useEffect(() => exchangeMode.subscribe(s => setMode(s.mode)), []);
   const label = modeLabel(mode);
   const color =
-    mode === 'real'    ? 'text-red-400 border-red-600/40 bg-red-600/10'    :
-    mode === 'testnet' ? 'text-amber-400 border-amber-600/40 bg-amber-600/10' :
-    mode === 'paper'   ? 'text-blue-400 border-blue-600/40 bg-blue-600/10' :
-                         'text-purple-400 border-zinc-700 bg-zinc-900/70';
+    mode === 'real'    ? 'text-red-400    border-red-600/40    bg-red-600/10'    :
+    mode === 'testnet' ? 'text-orange-400 border-orange-600/40 bg-orange-600/10' :
+    mode === 'paper'   ? 'text-yellow-400 border-yellow-600/40 bg-yellow-600/10' :
+                         'text-blue-400   border-blue-600/40   bg-blue-600/10';
   return (
     <div className={`flex items-center gap-1 px-2 h-7 rounded border flex-shrink-0 ${color}`}>
       <Shield size={10} className="flex-shrink-0" />

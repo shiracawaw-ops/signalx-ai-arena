@@ -141,7 +141,16 @@ export class HtxAdapter implements ExchangeAdapter {
     };
   }
 
+  async getPrice(symbol: string): Promise<number> {
+    const sym = this.normalizeSymbol(symbol).toLowerCase();
+    const r = await safeFetch(`${BASE}/market/detail/merged?symbol=${sym}`, {}, 'htx');
+    if (!r.ok) throw new Error(`HTX getPrice failed: ${r.error?.message}`);
+    const tick = (r.data as Record<string, Record<string, number>>)?.['tick'] ?? {};
+    return tick['close'] ?? 0;
+  }
+
   async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
+    if (order.testnet) throw new Error('HTX does not support testnet mode. Use DEMO or PAPER mode for simulated trading.');
     const acctId = await this.getAccountId(creds);
     const sym    = this.normalizeSymbol(order.symbol);
     const side   = `${order.side}-${order.type}`;

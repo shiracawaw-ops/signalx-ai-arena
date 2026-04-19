@@ -2,7 +2,8 @@
 import { hmacSHA256Base64, safeFetch, stubSymbolRules, toUsdtPair } from './base-adapter.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
-const BASE = 'https://api.kucoin.com';
+const BASE         = 'https://api.kucoin.com';
+const TESTNET_BASE = 'https://openapi-sandbox.kucoin.com';
 
 function sign(secret: string, ts: number, method: string, path: string, body = ''): string {
   return hmacSHA256Base64(secret, `${ts}${method}${path}${body}`);
@@ -137,6 +138,7 @@ export class KuCoinAdapter implements ExchangeAdapter {
   }
 
   async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
+    const base   = order.testnet ? TESTNET_BASE : BASE;
     const sym    = this.normalizeSymbol(order.symbol);
     const body   = JSON.stringify({
       clientOid: order.clientId ?? `sx_${Date.now()}`,
@@ -150,10 +152,18 @@ export class KuCoinAdapter implements ExchangeAdapter {
     const path  = '/api/v1/orders';
     const sig   = sign(creds.secretKey, ts, 'POST', path, body);
     const ppSig = encryptPassphrase(creds.secretKey, creds.passphrase ?? '');
-    const r = await safeFetch(`${BASE}${path}`, { method: 'POST', headers: headers(creds, ts, sig, ppSig), body }, 'kucoin');
+    const r = await safeFetch(`${base}${path}`, { method: 'POST', headers: headers(creds, ts, sig, ppSig), body }, 'kucoin');
     if (!r.ok) throw new Error(`KuCoin order failed: ${r.error?.message}`);
     const d = (r.data as Record<string, Record<string, unknown>>)?.['data'] ?? {};
     return { orderId: String(d['orderId'] ?? ''), symbol: sym, side: order.side, type: order.type, status: 'open', quantity: order.quantity, filledQty: 0, price: order.price ?? 0, avgPrice: 0, fee: 0, feeCurrency: 'USDT', timestamp: Date.now(), exchange: 'kucoin', raw: d };
+  }
+
+  async getPrice(symbol: string): Promise<number> {
+    const sym = this.normalizeSymbol(symbol);
+    const r = await safeFetch(`${BASE}/api/v1/market/orderbook/level1?symbol=${sym}`, {}, 'kucoin');
+    if (!r.ok) throw new Error(`KuCoin getPrice failed: ${r.error?.message}`);
+    const price = (r.data as Record<string, Record<string, string>>)?.['data']?.['price'] ?? '0';
+    return parseFloat(price);
   }
 
   async cancelOrder(creds: ExchangeCredentials, orderId: string): Promise<boolean> {

@@ -104,7 +104,15 @@ export class MexcAdapter implements ExchangeAdapter {
     };
   }
 
+  async getPrice(symbol: string): Promise<number> {
+    const sym = this.normalizeSymbol(symbol);
+    const r = await safeFetch(`${BASE}/api/v3/ticker/price?symbol=${sym}`, {}, 'mexc');
+    if (!r.ok) throw new Error(`MEXC getPrice failed: ${r.error?.message}`);
+    return parseFloat(String((r.data as Record<string, string>)['price'] ?? '0'));
+  }
+
   async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
+    if (order.testnet) throw new Error('MEXC does not support testnet mode. Use DEMO or PAPER mode for simulated trading.');
     const sym = this.normalizeSymbol(order.symbol);
     const params: Record<string, string | number> = {
       symbol: sym, side: order.side.toUpperCase(),

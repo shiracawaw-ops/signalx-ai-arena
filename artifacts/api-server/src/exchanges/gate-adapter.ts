@@ -112,7 +112,16 @@ export class GateAdapter implements ExchangeAdapter {
     };
   }
 
+  async getPrice(symbol: string): Promise<number> {
+    const sym = this.normalizeSymbol(symbol);
+    const r = await safeFetch(`${BASE}/spot/tickers?currency_pair=${sym}`, {}, 'gate');
+    if (!r.ok) throw new Error(`Gate getPrice failed: ${r.error?.message}`);
+    const arr = r.data as Array<Record<string, string>>;
+    return parseFloat(arr[0]?.['last'] ?? '0');
+  }
+
   async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
+    if (order.testnet) throw new Error('Gate.io does not support testnet mode. Use DEMO or PAPER mode for simulated trading.');
     const sym  = this.normalizeSymbol(order.symbol);
     const body = JSON.stringify({
       currency_pair: sym, side: order.side,

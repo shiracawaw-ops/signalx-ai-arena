@@ -165,6 +165,18 @@ router.post('/exchange/:exchange/order/get', async (req, res) => {
   } catch (e) { serverError(res, ex, e); }
 });
 
+// GET /api/exchange/:exchange/price/:symbol — public ticker price (no auth required)
+router.get('/exchange/:exchange/price/:symbol', async (req, res) => {
+  const ex      = requireExchange(req, res); if (!ex) return;
+  const symbol  = String(req.params['symbol'] ?? '');
+  if (!symbol) return badRequest(res, 'Missing symbol');
+  const adapter = getAdapter(ex)!;
+  try {
+    const price = await adapter.getPrice(symbol);
+    res.json({ ok: true, exchange: ex, symbol, price });
+  } catch (e) { serverError(res, ex, e); }
+});
+
 // POST /api/exchange/:exchange/symbol/rules — get symbol trading rules
 router.post('/exchange/:exchange/symbol/rules', async (req, res) => {
   const ex      = requireExchange(req, res); if (!ex) return;

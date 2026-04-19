@@ -89,7 +89,8 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
 
   // Stale price guard
   if (isPriceStale(signal)) {
-    return reject(signal, exchange, mode, REJECT.STALE_PRICE, `Signal price is stale (>${STALE_PRICE_MS / 1000}s old). Refusing to execute.`);
+    const ageS = ((Date.now() - signal.ts) / 1000).toFixed(1);
+    return reject(signal, exchange, mode, REJECT.STALE_PRICE, `Signal price is ${ageS}s old (limit: ${STALE_PRICE_MS / 1000}s). Refusing to execute.`);
   }
 
   // ── DEMO MODE ─────────────────────────────────────────────────────────────
@@ -112,9 +113,19 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
   }
 
   // ── PAPER MODE ────────────────────────────────────────────────────────────
-  // Simulated fill at current price — no order sent to exchange.
+  // Simulated fill at live market price — no order sent to exchange.
   if (mode === 'paper') {
-    const qty = config.tradeAmountUSD / signal.price;
+    let fillPrice = signal.price;
+    try {
+      const priceRes = await apiClient.getPrice(exchange, signal.symbol);
+      if (priceRes.ok && (priceRes.data as { price: number }).price > 0) {
+        fillPrice = (priceRes.data as { price: number }).price;
+        console.log(`[engine][paper] Live price fetched for ${signal.symbol}: $${fillPrice}`);
+      }
+    } catch {
+      console.warn(`[engine][paper] Could not fetch live price, using signal price $${signal.price}`);
+    }
+    const qty = config.tradeAmountUSD / fillPrice;
     const logEntry = executionLog.add({
       mode:      'paper',
       exchange,
@@ -122,13 +133,13 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       side:      signal.side,
       orderType: config.orderType,
       quantity:  qty,
-      price:     signal.price,
+      price:     fillPrice,
       amountUSD: config.tradeAmountUSD,
       status:    'executed',
       orderId:   `paper_${Date.now()}`,
       signalId:  signal.id,
     });
-    console.log(`[engine][paper] Paper trade logged (no real order): ${signal.side} ${signal.symbol} @ $${signal.price}`);
+    console.log(`[engine][paper] Paper trade logged (no real order): ${signal.side} ${signal.symbol} @ $${fillPrice}`);
     return { ok: true, orderId: logEntry.orderId, logId: logEntry.id, demo: true };
   }
 

@@ -12,14 +12,16 @@ export interface ExchangeCredentials {
 }
 
 export interface ExchangeModeState {
-  mode:          ExchangeMode;
-  exchange:      string;   // currently selected exchange id
-  armed:         boolean;  // Trading Armed — must be true for real orders
-  apiValidated:  boolean;
-  permissions:   { read: boolean; trade: boolean; withdraw: boolean; futures: boolean };
-  uid?:          string;
-  connectedAt?:  number;
-  latency?:      number;
+  mode:            ExchangeMode;
+  exchange:        string;   // currently selected exchange id
+  armed:           boolean;  // Trading Armed — must be true for real orders
+  apiValidated:    boolean;
+  balanceFetched:  boolean;  // true after at least one successful balance fetch
+  networkUp:       boolean;  // true after backend reachability confirmed
+  permissions:     { read: boolean; trade: boolean; withdraw: boolean; futures: boolean };
+  uid?:            string;
+  connectedAt?:    number;
+  latency?:        number;
 }
 
 type Listener = (state: ExchangeModeState) => void;
@@ -28,11 +30,13 @@ const STORAGE_KEY = 'sx_exchange_mode_v1';
 
 function defaultState(): ExchangeModeState {
   return {
-    mode:         'demo',
-    exchange:     'binance',
-    armed:        false,
-    apiValidated: false,
-    permissions:  { read: false, trade: false, withdraw: false, futures: false },
+    mode:           'demo',
+    exchange:       'binance',
+    armed:          false,
+    apiValidated:   false,
+    balanceFetched: false,
+    networkUp:      false,
+    permissions:    { read: false, trade: false, withdraw: false, futures: false },
   };
 }
 
@@ -96,10 +100,12 @@ class ExchangeModeManager {
     // Switching mode clears all sensitive state
     this.update({
       mode,
-      armed:        false,
-      apiValidated: false,
-      permissions:  { read: false, trade: false, withdraw: false, futures: false },
-      uid:          undefined,
+      armed:          false,
+      apiValidated:   false,
+      balanceFetched: false,
+      networkUp:      false,
+      permissions:    { read: false, trade: false, withdraw: false, futures: false },
+      uid:            undefined,
     });
   }
 
@@ -107,12 +113,14 @@ class ExchangeModeManager {
     // Switching exchange clears connection state
     this.update({
       exchange,
-      armed:        false,
-      apiValidated: false,
-      permissions:  { read: false, trade: false, withdraw: false, futures: false },
-      uid:          undefined,
-      connectedAt:  undefined,
-      latency:      undefined,
+      armed:          false,
+      apiValidated:   false,
+      balanceFetched: false,
+      networkUp:      false,
+      permissions:    { read: false, trade: false, withdraw: false, futures: false },
+      uid:            undefined,
+      connectedAt:    undefined,
+      latency:        undefined,
     });
   }
 
@@ -126,37 +134,42 @@ class ExchangeModeManager {
   isReal():   boolean { return this.state.mode === 'real'; }
   isSimulated(): boolean { return this.state.mode === 'demo' || this.state.mode === 'paper'; }
 
-  // Full readiness: all conditions must be true for real trading
+  // Full readiness: 6 conditions must be true for real trading
   isExecutionReady(): boolean {
     const s = this.state;
     return (
-      s.mode          === 'real' &&
-      s.apiValidated  === true   &&
-      s.armed         === true   &&
-      s.permissions.trade        === true
+      s.mode            === 'real' &&
+      s.networkUp       === true   &&
+      s.apiValidated    === true   &&
+      s.balanceFetched  === true   &&
+      s.permissions.trade          === true &&
+      s.armed           === true
     );
   }
 
   readinessReport(): Record<string, boolean | string> {
     const s = this.state;
     return {
-      liveMode:        s.mode === 'real',
-      apiValidated:    s.apiValidated,
-      tradingArmed:    s.armed,
-      tradePermission: s.permissions.trade,
-      exchangeSelected: !!s.exchange,
-      ready:           this.isExecutionReady(),
+      liveMode:         s.mode === 'real',
+      networkUp:        s.networkUp,
+      apiValidated:     s.apiValidated,
+      balanceFetched:   s.balanceFetched,
+      tradePermission:  s.permissions.trade,
+      tradingArmed:     s.armed,
+      ready:            this.isExecutionReady(),
     };
   }
 
   disconnect() {
     this.update({
-      armed:        false,
-      apiValidated: false,
-      permissions:  { read: false, trade: false, withdraw: false, futures: false },
-      uid:          undefined,
-      connectedAt:  undefined,
-      latency:      undefined,
+      armed:          false,
+      apiValidated:   false,
+      balanceFetched: false,
+      networkUp:      false,
+      permissions:    { read: false, trade: false, withdraw: false, futures: false },
+      uid:            undefined,
+      connectedAt:    undefined,
+      latency:        undefined,
     });
   }
 }
@@ -169,6 +182,6 @@ export function modeLabel(mode: ExchangeMode): string {
     case 'demo':    return 'DEMO';
     case 'paper':   return 'PAPER';
     case 'testnet': return 'TESTNET';
-    case 'real':    return 'REAL';
+    case 'real':    return 'REAL TRADING';
   }
 }

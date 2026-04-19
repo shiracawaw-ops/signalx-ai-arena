@@ -2,7 +2,8 @@
 import { hmacSHA256, safeFetch, stubSymbolRules } from './base-adapter.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
-const BASE = 'https://api.coinbase.com';
+const BASE         = 'https://api.coinbase.com';
+const TESTNET_BASE = 'https://api-sandbox.coinbase.com';
 
 function sign(secret: string, ts: string, method: string, path: string, body = ''): string {
   return hmacSHA256(secret, ts + method + path + body);
@@ -116,6 +117,7 @@ export class CoinbaseAdapter implements ExchangeAdapter {
   }
 
   async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
+    const base = order.testnet ? TESTNET_BASE : BASE;
     const sym  = this.normalizeSymbol(order.symbol);
     const conf = order.type === 'market'
       ? { market_market_ioc: { base_size: String(order.quantity) } }
@@ -124,10 +126,18 @@ export class CoinbaseAdapter implements ExchangeAdapter {
     const ts   = String(Math.floor(Date.now() / 1000));
     const path = '/api/v3/brokerage/orders';
     const sig  = sign(creds.secretKey, ts, 'POST', path, body);
-    const r    = await safeFetch(`${BASE}${path}`, { method: 'POST', headers: headers(creds, ts, sig), body }, 'coinbase');
+    const r    = await safeFetch(`${base}${path}`, { method: 'POST', headers: headers(creds, ts, sig), body }, 'coinbase');
     if (!r.ok) throw new Error(`Coinbase order failed: ${r.error?.message}`);
     const d = (r.data as Record<string, Record<string, unknown>>)?.['success_response'] ?? {};
     return { orderId: String(d['order_id'] ?? ''), symbol: sym, side: order.side, type: order.type, status: 'open', quantity: order.quantity, filledQty: 0, price: order.price ?? 0, avgPrice: 0, fee: 0, feeCurrency: 'USD', timestamp: Date.now(), exchange: 'coinbase', raw: d };
+  }
+
+  async getPrice(symbol: string): Promise<number> {
+    const sym = this.normalizeSymbol(symbol);
+    const r = await safeFetch(`${BASE}/api/v3/brokerage/products/${sym}`, {}, 'coinbase');
+    if (!r.ok) throw new Error(`Coinbase getPrice failed: ${r.error?.message}`);
+    const d = r.data as Record<string, string>;
+    return parseFloat(d['price'] ?? d['quote_min_size'] ?? '0');
   }
 
   async cancelOrder(creds: ExchangeCredentials, orderId: string): Promise<boolean> {

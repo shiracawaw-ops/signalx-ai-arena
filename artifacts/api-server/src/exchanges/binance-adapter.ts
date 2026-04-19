@@ -2,7 +2,8 @@
 import { hmacSHA256, safeFetch, stubBalance, stubPermission, stubOrder, stubSymbolRules, toUsdtPair, maskKey } from './base-adapter.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
-const BASE = 'https://api.binance.com';
+const BASE         = 'https://api.binance.com';
+const TESTNET_BASE = 'https://testnet.binance.vision';
 
 function sign(secret: string, query: string): string {
   return hmacSHA256(secret, query);
@@ -137,6 +138,7 @@ export class BinanceAdapter implements ExchangeAdapter {
   }
 
   async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
+    const base = order.testnet ? TESTNET_BASE : BASE;
     const sym = this.normalizeSymbol(order.symbol);
     const params: Record<string, string | number> = {
       symbol:    sym,
@@ -152,12 +154,19 @@ export class BinanceAdapter implements ExchangeAdapter {
     if (order.clientId) params['newClientOrderId'] = order.clientId;
 
     const q = signedQs(params, creds.secretKey);
-    const r = await safeFetch(`${BASE}/api/v3/order?${q}`, {
+    const r = await safeFetch(`${base}/api/v3/order?${q}`, {
       method: 'POST',
       headers: authHeaders(creds.apiKey),
     }, 'binance');
     if (!r.ok) throw new Error(`Binance order failed: ${r.error?.message}`);
     return parseOrder(r.data as Record<string, unknown>);
+  }
+
+  async getPrice(symbol: string): Promise<number> {
+    const sym = this.normalizeSymbol(symbol);
+    const r = await safeFetch(`${BASE}/api/v3/ticker/price?symbol=${sym}`, {}, 'binance');
+    if (!r.ok) throw new Error(`Binance getPrice failed: ${r.error?.message}`);
+    return parseFloat(String((r.data as Record<string, string>)['price'] ?? '0'));
   }
 
   async cancelOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<boolean> {

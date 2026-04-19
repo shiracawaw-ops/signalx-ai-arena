@@ -3,17 +3,18 @@
 import { safeFetch, stubSymbolRules } from './base-adapter.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
-const BASE = 'https://www.deribit.com/api/v2';
+const BASE         = 'https://www.deribit.com/api/v2';
+const TESTNET_BASE = 'https://test.deribit.com/api/v2';
 
 // Token cache (server-side only, per-request lifecycle is OK for proxy)
 const tokenCache = new Map<string, { token: string; expires: number }>();
 
-async function getToken(apiKey: string, secret: string): Promise<string> {
-  const cacheKey = `${apiKey.slice(0, 8)}`;
+async function getToken(apiKey: string, secret: string, base = BASE): Promise<string> {
+  const cacheKey = `${apiKey.slice(0, 8)}:${base.includes('test') ? 'test' : 'prod'}`;
   const cached   = tokenCache.get(cacheKey);
   if (cached && cached.expires > Date.now() + 30_000) return cached.token;
 
-  const r = await safeFetch(`${BASE}/public/auth?client_id=${encodeURIComponent(apiKey)}&client_secret=${encodeURIComponent(secret)}&grant_type=client_credentials`, {}, 'deribit');
+  const r = await safeFetch(`${base}/public/auth?client_id=${encodeURIComponent(apiKey)}&client_secret=${encodeURIComponent(secret)}&grant_type=client_credentials`, {}, 'deribit');
   if (!r.ok) throw new Error(`Deribit auth failed: ${r.error?.message}`);
   const d = ((r.data as Record<string, Record<string, unknown>>)?.['result'] ?? {});
   const token   = String(d['access_token'] ?? '');
@@ -128,7 +129,8 @@ export class DeribitAdapter implements ExchangeAdapter {
   }
 
   async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
-    const token = await getToken(creds.apiKey, creds.secretKey);
+    const base  = order.testnet ? TESTNET_BASE : BASE;
+    const token = await getToken(creds.apiKey, creds.secretKey, base);
     const sym   = this.normalizeSymbol(order.symbol);
     const ep    = order.side === 'buy' ? 'buy' : 'sell';
     const body  = JSON.stringify({
@@ -138,12 +140,20 @@ export class DeribitAdapter implements ExchangeAdapter {
       ...(order.type === 'limit' && order.price ? { price: order.price } : {}),
       ...(order.clientId ? { label: order.clientId } : {}),
     });
-    const r = await safeFetch(`${BASE}/private/${ep}`, {
+    const r = await safeFetch(`${base}/private/${ep}`, {
       method: 'POST', headers: authHeaders(token), body,
     }, 'deribit');
     if (!r.ok) throw new Error(`Deribit order failed: ${r.error?.message}`);
     const d = ((r.data as Record<string, Record<string, unknown>>)?.['result']?.['order'] ?? {}) as Record<string, unknown>;
     return parseOrder(d);
+  }
+
+  async getPrice(symbol: string): Promise<number> {
+    const sym = this.normalizeSymbol(symbol);
+    const r = await safeFetch(`${BASE}/public/ticker?instrument_name=${sym}`, {}, 'deribit');
+    if (!r.ok) throw new Error(`Deribit getPrice failed: ${r.error?.message}`);
+    const result = (r.data as Record<string, Record<string, unknown>>)?.['result'] ?? {};
+    return parseFloat(String(result['last_price'] ?? result['mark_price'] ?? '0'));
   }
 
   async cancelOrder(creds: ExchangeCredentials, orderId: string): Promise<boolean> {

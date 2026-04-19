@@ -275,6 +275,13 @@ export const apiClient = {
     });
   },
 
+  async getPrice(
+    exchange: string,
+    symbol: string,
+  ): Promise<ApiResult<{ price: number }>> {
+    return request(`${BACKEND}/exchange/${exchange}/price/${encodeURIComponent(symbol)}`);
+  },
+
   async listExchanges(): Promise<string[]> {
     const r = await request<{ exchanges: string[] }>(`${BACKEND}/exchange`);
     return r.ok ? (r.data.exchanges ?? []) : [];

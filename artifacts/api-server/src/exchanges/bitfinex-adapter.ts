@@ -105,7 +105,16 @@ export class BitfinexAdapter implements ExchangeAdapter {
     return stubSymbolRules(this.normalizeSymbol(symbol));
   }
 
+  async getPrice(symbol: string): Promise<number> {
+    const sym = this.normalizeSymbol(symbol);
+    const r = await safeFetch(`https://api-pub.bitfinex.com/v2/ticker/${sym}`, {}, 'bitfinex');
+    if (!r.ok) throw new Error(`Bitfinex getPrice failed: ${r.error?.message}`);
+    const arr = r.data as number[];
+    return arr[6] ?? 0;
+  }
+
   async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
+    if (order.testnet) throw new Error('Bitfinex does not support testnet mode. Use DEMO or PAPER mode for simulated trading.');
     const sym  = this.normalizeSymbol(order.symbol);
     const qty  = order.side === 'sell' ? -order.quantity : order.quantity;
     const body = JSON.stringify({

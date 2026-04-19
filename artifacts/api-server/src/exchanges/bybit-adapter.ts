@@ -2,8 +2,9 @@
 import { hmacSHA256, safeFetch, stubSymbolRules, toUsdtPair } from './base-adapter.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
-const BASE       = 'https://api.bybit.com';
-const RECV_WIN   = 5000;
+const BASE         = 'https://api.bybit.com';
+const TESTNET_BASE = 'https://api-testnet.bybit.com';
+const RECV_WIN     = 5000;
 
 function sign(apiKey: string, secret: string, ts: number, body: string): string {
   return hmacSHA256(secret, `${ts}${apiKey}${RECV_WIN}${body}`);
@@ -123,6 +124,7 @@ export class BybitAdapter implements ExchangeAdapter {
   }
 
   async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
+    const base = order.testnet ? TESTNET_BASE : BASE;
     const sym  = this.normalizeSymbol(order.symbol);
     const body = JSON.stringify({
       category: 'spot', symbol: sym,
@@ -134,10 +136,19 @@ export class BybitAdapter implements ExchangeAdapter {
     });
     const ts  = Date.now();
     const sig = sign(creds.apiKey, creds.secretKey, ts, body);
-    const r   = await safeFetch(`${BASE}/v5/order/create`, { method: 'POST', headers: headers(creds, ts, sig), body }, 'bybit');
+    const r   = await safeFetch(`${base}/v5/order/create`, { method: 'POST', headers: headers(creds, ts, sig), body }, 'bybit');
     if (!r.ok) throw new Error(`Bybit order failed: ${r.error?.message}`);
     const d = (r.data as Record<string, Record<string, unknown>>)?.['result'] ?? {};
     return { orderId: String(d['orderId'] ?? ''), clientId: String(d['orderLinkId'] ?? ''), symbol: sym, side: order.side, type: order.type, status: 'open', quantity: order.quantity, filledQty: 0, price: order.price ?? 0, avgPrice: 0, fee: 0, feeCurrency: 'USDT', timestamp: Date.now(), exchange: 'bybit', raw: d };
+  }
+
+  async getPrice(symbol: string): Promise<number> {
+    const sym = this.normalizeSymbol(symbol);
+    const r = await safeFetch(`${BASE}/v5/market/tickers?category=spot&symbol=${sym}`, {}, 'bybit');
+    if (!r.ok) throw new Error(`Bybit getPrice failed: ${r.error?.message}`);
+    const list = (r.data as Record<string, Record<string, unknown[]>>)?.['result']?.['list'] ?? [];
+    const item = (list[0] ?? {}) as Record<string, string>;
+    return parseFloat(item['lastPrice'] ?? '0');
   }
 
   async cancelOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<boolean> {

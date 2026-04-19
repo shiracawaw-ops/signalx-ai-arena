@@ -107,7 +107,16 @@ export class BitgetAdapter implements ExchangeAdapter {
     };
   }
 
+  async getPrice(symbol: string): Promise<number> {
+    const sym = this.normalizeSymbol(symbol);
+    const r = await safeFetch(`${BASE}/api/v2/spot/market/tickers?symbol=${sym}`, {}, 'bitget');
+    if (!r.ok) throw new Error(`Bitget getPrice failed: ${r.error?.message}`);
+    const item = ((r.data as Record<string, unknown[]>)?.['data']?.[0] ?? {}) as Record<string, string>;
+    return parseFloat(item['lastPr'] ?? item['close'] ?? '0');
+  }
+
   async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
+    if (order.testnet) throw new Error('Bitget does not support testnet mode. Use DEMO or PAPER mode for simulated trading.');
     const sym  = this.normalizeSymbol(order.symbol);
     const body = JSON.stringify({
       symbol:    sym,

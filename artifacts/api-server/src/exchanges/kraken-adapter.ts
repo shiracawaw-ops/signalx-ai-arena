@@ -113,7 +113,17 @@ export class KrakenAdapter implements ExchangeAdapter {
     return stubSymbolRules(this.normalizeSymbol(symbol));
   }
 
+  async getPrice(symbol: string): Promise<number> {
+    const sym = this.normalizeSymbol(symbol);
+    const r = await safeFetch(`${BASE}/0/public/Ticker?pair=${sym}`, {}, 'kraken');
+    if (!r.ok) throw new Error(`Kraken getPrice failed: ${r.error}`);
+    const result = (r.data as Record<string, Record<string, Record<string, string[]>>>)?.['result'] ?? {};
+    const pair   = Object.values(result)[0];
+    return parseFloat(pair?.['c']?.[0] ?? '0');
+  }
+
   async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
+    if (order.testnet) throw new Error('Kraken does not support testnet mode. Use DEMO or PAPER mode for simulated trading.');
     const r = await this.privatePost(creds, 'AddOrder', {
       pair:      this.normalizeSymbol(order.symbol),
       type:      order.side,
