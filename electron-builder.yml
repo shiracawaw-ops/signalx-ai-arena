@@ -13,7 +13,8 @@ directories:
   output:         artifacts/electron/dist-app
   buildResources: electron
 
-main: electron/main.js
+# Note: the electron entry point is declared in package.json's "main" field,
+# not here (electron-builder doesn't accept "main" at the root of its config).
 
 files:
   - electron/main.js
