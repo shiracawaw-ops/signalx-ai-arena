@@ -7,9 +7,10 @@ export type ExchangeMode = 'demo' | 'paper' | 'testnet' | 'real';
 
 // Credentials passed per-request (never stored server-side)
 export interface ExchangeCredentials {
-  apiKey:     string;
-  secretKey:  string;
-  passphrase?: string; // KuCoin, OKX, Bitget, Coinbase
+  apiKey:      string;
+  secretKey:   string;
+  passphrase?: string;  // KuCoin, OKX, Bitget, Coinbase
+  testnet?:    boolean; // route to exchange sandbox endpoint for all calls
 }
 
 export interface Balance {
@@ -92,6 +93,7 @@ export interface ExchangeAdapter {
   cancelOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<boolean>;
   getOrderHistory(creds: ExchangeCredentials, symbol?: string, limit?: number): Promise<OrderResult[]>;
   getOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<OrderResult | null>;
+  getPrice(symbol: string): Promise<number>;  // public ticker price (no auth required)
   normalizeSymbol(symbol: string): string;  // e.g. "BTC" → "BTCUSDT" for Binance
   ping(): Promise<number>;  // latency ms
 }

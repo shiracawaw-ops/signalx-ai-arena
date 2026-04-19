@@ -74,8 +74,9 @@ export class DeribitAdapter implements ExchangeAdapter {
 
   async validateCredentials(creds: ExchangeCredentials): Promise<ConnectResult> {
     try {
-      const token = await getToken(creds.apiKey, creds.secretKey);
-      const r     = await safeFetch(`${BASE}/private/get_account_summary?currency=BTC&extended=false`, {
+      const base  = creds.testnet ? TESTNET_BASE : BASE;
+      const token = await getToken(creds.apiKey, creds.secretKey, base);
+      const r     = await safeFetch(`${base}/private/get_account_summary?currency=BTC&extended=false`, {
         headers: authHeaders(token),
       }, 'deribit');
       if (!r.ok) return { success: false, permissions: { read: false, trade: false, withdraw: false, futures: false }, error: r.error?.message };
@@ -90,11 +91,12 @@ export class DeribitAdapter implements ExchangeAdapter {
   }
 
   async getBalances(creds: ExchangeCredentials): Promise<Balance[]> {
-    const token   = await getToken(creds.apiKey, creds.secretKey);
+    const base    = creds.testnet ? TESTNET_BASE : BASE;
+    const token   = await getToken(creds.apiKey, creds.secretKey, base);
     const currencies = ['BTC', 'ETH', 'USDC', 'USDT'];
     const results: Balance[] = [];
     for (const ccy of currencies) {
-      const r = await safeFetch(`${BASE}/private/get_account_summary?currency=${ccy}&extended=false`, {
+      const r = await safeFetch(`${base}/private/get_account_summary?currency=${ccy}&extended=false`, {
         headers: authHeaders(token),
       }, 'deribit');
       if (r.ok) {
@@ -113,8 +115,9 @@ export class DeribitAdapter implements ExchangeAdapter {
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {
+    const base = _creds.testnet ? TESTNET_BASE : BASE;
     const sym = this.normalizeSymbol(symbol);
-    const r   = await safeFetch(`${BASE}/public/get_instrument?instrument_name=${sym}`, {}, 'deribit');
+    const r   = await safeFetch(`${base}/public/get_instrument?instrument_name=${sym}`, {}, 'deribit');
     if (!r.ok) return stubSymbolRules(sym);
     const d = (r.data as Record<string, Record<string, unknown>>)?.['result'] ?? {};
     return {
@@ -157,18 +160,20 @@ export class DeribitAdapter implements ExchangeAdapter {
   }
 
   async cancelOrder(creds: ExchangeCredentials, orderId: string): Promise<boolean> {
-    const token = await getToken(creds.apiKey, creds.secretKey);
+    const base  = creds.testnet ? TESTNET_BASE : BASE;
+    const token = await getToken(creds.apiKey, creds.secretKey, base);
     const body  = JSON.stringify({ order_id: orderId });
-    const r     = await safeFetch(`${BASE}/private/cancel`, {
+    const r     = await safeFetch(`${base}/private/cancel`, {
       method: 'POST', headers: authHeaders(token), body,
     }, 'deribit');
     return r.ok;
   }
 
   async getOrderHistory(creds: ExchangeCredentials, symbol?: string, limit = 50): Promise<OrderResult[]> {
-    const token = await getToken(creds.apiKey, creds.secretKey);
+    const base  = creds.testnet ? TESTNET_BASE : BASE;
+    const token = await getToken(creds.apiKey, creds.secretKey, base);
     const sym   = symbol ? this.normalizeSymbol(symbol) : 'BTC-PERPETUAL';
-    const r     = await safeFetch(`${BASE}/private/get_order_history_by_instrument?instrument_name=${sym}&count=${limit}`, {
+    const r     = await safeFetch(`${base}/private/get_order_history_by_instrument?instrument_name=${sym}&count=${limit}`, {
       headers: authHeaders(token),
     }, 'deribit');
     if (!r.ok) return [];
@@ -176,8 +181,9 @@ export class DeribitAdapter implements ExchangeAdapter {
   }
 
   async getOrder(creds: ExchangeCredentials, orderId: string): Promise<OrderResult | null> {
-    const token = await getToken(creds.apiKey, creds.secretKey);
-    const r     = await safeFetch(`${BASE}/private/get_order_state?order_id=${orderId}`, {
+    const base  = creds.testnet ? TESTNET_BASE : BASE;
+    const token = await getToken(creds.apiKey, creds.secretKey, base);
+    const r     = await safeFetch(`${base}/private/get_order_state?order_id=${orderId}`, {
       headers: authHeaders(token),
     }, 'deribit');
     if (!r.ok) return null;

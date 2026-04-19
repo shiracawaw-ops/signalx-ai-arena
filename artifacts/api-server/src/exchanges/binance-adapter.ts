@@ -67,9 +67,10 @@ export class BinanceAdapter implements ExchangeAdapter {
   }
 
   async validateCredentials(creds: ExchangeCredentials): Promise<ConnectResult> {
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const params = { timestamp: Date.now() };
     const q = signedQs(params, creds.secretKey);
-    const r = await safeFetch(`${BASE}/api/v3/account?${q}`, {
+    const r = await safeFetch(`${base}/api/v3/account?${q}`, {
       headers: authHeaders(creds.apiKey),
     }, 'binance');
 
@@ -95,8 +96,9 @@ export class BinanceAdapter implements ExchangeAdapter {
   }
 
   async getBalances(creds: ExchangeCredentials): Promise<Balance[]> {
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const q = signedQs({ timestamp: Date.now() }, creds.secretKey);
-    const r = await safeFetch(`${BASE}/api/v3/account?${q}`, {
+    const r = await safeFetch(`${base}/api/v3/account?${q}`, {
       headers: authHeaders(creds.apiKey),
     }, 'binance');
     if (!r.ok) throw new Error(r.error?.message ?? 'Balance fetch failed');
@@ -113,8 +115,9 @@ export class BinanceAdapter implements ExchangeAdapter {
   }
 
   async getSymbolRules(creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const sym = this.normalizeSymbol(symbol);
-    const r = await safeFetch(`${BASE}/api/v3/exchangeInfo?symbol=${sym}`, {}, 'binance');
+    const r = await safeFetch(`${base}/api/v3/exchangeInfo?symbol=${sym}`, {}, 'binance');
     if (!r.ok) return stubSymbolRules(sym);
     const d = r.data as Record<string, unknown>;
     const symbols = (d['symbols'] as Array<Record<string, unknown>>) ?? [];
@@ -171,9 +174,10 @@ export class BinanceAdapter implements ExchangeAdapter {
 
   async cancelOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<boolean> {
     if (!symbol) return false;
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const sym = this.normalizeSymbol(symbol);
     const q = signedQs({ symbol: sym, orderId, timestamp: Date.now() }, creds.secretKey);
-    const r = await safeFetch(`${BASE}/api/v3/order?${q}`, {
+    const r = await safeFetch(`${base}/api/v3/order?${q}`, {
       method: 'DELETE',
       headers: authHeaders(creds.apiKey),
     }, 'binance');
@@ -181,9 +185,10 @@ export class BinanceAdapter implements ExchangeAdapter {
   }
 
   async getOrderHistory(creds: ExchangeCredentials, symbol?: string, limit = 50): Promise<OrderResult[]> {
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const sym = symbol ? this.normalizeSymbol(symbol) : 'BTCUSDT';
     const q = signedQs({ symbol: sym, limit, timestamp: Date.now() }, creds.secretKey);
-    const r = await safeFetch(`${BASE}/api/v3/allOrders?${q}`, {
+    const r = await safeFetch(`${base}/api/v3/allOrders?${q}`, {
       headers: authHeaders(creds.apiKey),
     }, 'binance');
     if (!r.ok) return [];
@@ -192,9 +197,10 @@ export class BinanceAdapter implements ExchangeAdapter {
 
   async getOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<OrderResult | null> {
     if (!symbol) return null;
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const sym = this.normalizeSymbol(symbol);
     const q = signedQs({ symbol: sym, orderId, timestamp: Date.now() }, creds.secretKey);
-    const r = await safeFetch(`${BASE}/api/v3/order?${q}`, {
+    const r = await safeFetch(`${base}/api/v3/order?${q}`, {
       headers: authHeaders(creds.apiKey),
     }, 'binance');
     if (!r.ok) return null;

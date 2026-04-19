@@ -37,7 +37,7 @@ function makeSeedVer(count: number, balance: number) { return `${SEED_VER_PREFIX
 export interface HealEvent {
   id:        string;
   timestamp: number;
-  type:      'replace_weak' | 'activate_standby' | 'load_shed' | 'watchdog_restart' | 'refill_standby';
+  type:      'replace_weak' | 'activate_standby' | 'load_shed' | 'watchdog_restart' | 'refill_standby' | 'pause_critical';
   botId:     string;
   botName:   string;
   reason:    string;

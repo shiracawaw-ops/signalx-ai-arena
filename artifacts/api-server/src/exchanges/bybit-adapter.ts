@@ -63,9 +63,10 @@ export class BybitAdapter implements ExchangeAdapter {
   }
 
   async validateCredentials(creds: ExchangeCredentials): Promise<ConnectResult> {
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const ts  = Date.now();
     const sig = sign(creds.apiKey, creds.secretKey, ts, '');
-    const r   = await safeFetch(`${BASE}/v5/user/query-api`, {
+    const r   = await safeFetch(`${base}/v5/user/query-api`, {
       headers: headers(creds, ts, sig),
     }, 'bybit');
     if (!r.ok) return { success: false, permissions: { read: false, trade: false, withdraw: false, futures: false }, error: r.error?.message };
@@ -87,10 +88,11 @@ export class BybitAdapter implements ExchangeAdapter {
   }
 
   async getBalances(creds: ExchangeCredentials): Promise<Balance[]> {
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const ts   = Date.now();
     const body = ''; // GET request, no body
     const sig  = sign(creds.apiKey, creds.secretKey, ts, 'accountType=UNIFIED');
-    const r    = await safeFetch(`${BASE}/v5/account/wallet-balance?accountType=UNIFIED`, {
+    const r    = await safeFetch(`${base}/v5/account/wallet-balance?accountType=UNIFIED`, {
       headers: headers(creds, ts, sig),
     }, 'bybit');
     if (!r.ok) throw new Error(r.error?.message);
@@ -106,8 +108,9 @@ export class BybitAdapter implements ExchangeAdapter {
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {
+    const base = _creds.testnet ? TESTNET_BASE : BASE;
     const sym = this.normalizeSymbol(symbol);
-    const r   = await safeFetch(`${BASE}/v5/market/instruments-info?category=spot&symbol=${sym}`, {}, 'bybit');
+    const r   = await safeFetch(`${base}/v5/market/instruments-info?category=spot&symbol=${sym}`, {}, 'bybit');
     if (!r.ok) return stubSymbolRules(sym);
     const info = ((r.data as Record<string, Record<string, unknown[]>>)?.['result']?.['list']?.[0] ?? {}) as Record<string, Record<string, string>>;
     const lot  = info['lotSizeFilter'] ?? {};
@@ -153,30 +156,33 @@ export class BybitAdapter implements ExchangeAdapter {
 
   async cancelOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<boolean> {
     if (!symbol) return false;
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const body = JSON.stringify({ category: 'spot', symbol: this.normalizeSymbol(symbol), orderId });
     const ts   = Date.now();
     const sig  = sign(creds.apiKey, creds.secretKey, ts, body);
-    const r    = await safeFetch(`${BASE}/v5/order/cancel`, { method: 'POST', headers: headers(creds, ts, sig), body }, 'bybit');
+    const r    = await safeFetch(`${base}/v5/order/cancel`, { method: 'POST', headers: headers(creds, ts, sig), body }, 'bybit');
     return r.ok;
   }
 
   async getOrderHistory(creds: ExchangeCredentials, symbol?: string, limit = 50): Promise<OrderResult[]> {
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const sym = symbol ? this.normalizeSymbol(symbol) : '';
     const qs  = `category=spot${sym ? `&symbol=${sym}` : ''}&limit=${limit}`;
     const ts  = Date.now();
     const sig = sign(creds.apiKey, creds.secretKey, ts, qs);
-    const r   = await safeFetch(`${BASE}/v5/order/history?${qs}`, { headers: headers(creds, ts, sig) }, 'bybit');
+    const r   = await safeFetch(`${base}/v5/order/history?${qs}`, { headers: headers(creds, ts, sig) }, 'bybit');
     if (!r.ok) return [];
     return (((r.data as Record<string, Record<string, unknown[]>>)?.['result']?.['list']) ?? []).map(o => parseOrder(o as Record<string, unknown>));
   }
 
   async getOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<OrderResult | null> {
     if (!symbol) return null;
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const sym = this.normalizeSymbol(symbol);
     const qs  = `category=spot&symbol=${sym}&orderId=${orderId}`;
     const ts  = Date.now();
     const sig = sign(creds.apiKey, creds.secretKey, ts, qs);
-    const r   = await safeFetch(`${BASE}/v5/order/history?${qs}`, { headers: headers(creds, ts, sig) }, 'bybit');
+    const r   = await safeFetch(`${base}/v5/order/history?${qs}`, { headers: headers(creds, ts, sig) }, 'bybit');
     if (!r.ok) return null;
     const list = (r.data as Record<string, Record<string, unknown[]>>)?.['result']?.['list'] ?? [];
     const o    = list[0];

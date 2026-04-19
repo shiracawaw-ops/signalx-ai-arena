@@ -4,6 +4,7 @@
 // and are passed per-request as request headers to the backend.
 // Keys are masked in all console logs.
 
+import { exchangeMode } from './exchange-mode.js';
 import type { ExchangeCredentials } from './exchange-mode.js';
 
 // ── Backend URL detection ─────────────────────────────────────────────────────
@@ -55,10 +56,12 @@ function credHeaders(
   creds: ExchangeCredentials,
   extra?: Record<string, string>,
 ): Record<string, string> {
+  const isTestnet = exchangeMode.get().mode === 'testnet';
   return {
     'x-api-key':    creds.apiKey,
     'x-secret-key': creds.secretKey,
     ...(creds.passphrase ? { 'x-passphrase': creds.passphrase } : {}),
+    ...(isTestnet ? { 'x-testnet': '1' } : {}),
     'Content-Type': 'application/json',
     ...extra,
   };

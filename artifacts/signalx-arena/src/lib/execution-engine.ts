@@ -157,6 +157,17 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     return reject(signal, exchange, mode, REJECT.LIVE_DISABLED, `Mode "${mode}" does not support live execution.`);
   }
 
+  // 1b. REAL-mode strict gate: all 6 readiness conditions must be met atomically
+  if (mode === 'real' && !exchangeMode.isExecutionReady()) {
+    const report  = exchangeMode.readinessReport();
+    const missing = Object.entries(report)
+      .filter(([k, v]) => k !== 'ready' && v === false)
+      .map(([k]) => k)
+      .join(', ');
+    return reject(signal, exchange, mode, REJECT.ADAPTER_NOT_READY,
+      `Real trading not fully ready. Missing conditions: [${missing}].`);
+  }
+
   // 2. Trading Armed (required for real; testnet is also gated by arm for safety)
   if (!modeState.armed) {
     return reject(signal, exchange, mode, REJECT.BOT_NOT_ARMED, 'Trading is not armed. Enable "Trading Armed" in Live Status tab.');

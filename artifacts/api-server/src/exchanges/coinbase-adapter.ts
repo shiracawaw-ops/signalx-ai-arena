@@ -67,10 +67,11 @@ export class CoinbaseAdapter implements ExchangeAdapter {
   }
 
   async validateCredentials(creds: ExchangeCredentials): Promise<ConnectResult> {
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const ts   = String(Math.floor(Date.now() / 1000));
     const path = '/api/v3/brokerage/accounts?limit=5';
     const sig  = sign(creds.secretKey, ts, 'GET', path);
-    const r    = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig) }, 'coinbase');
+    const r    = await safeFetch(`${base}${path}`, { headers: headers(creds, ts, sig) }, 'coinbase');
     if (!r.ok) return { success: false, permissions: { read: false, trade: false, withdraw: false, futures: false }, error: r.error?.message };
     return { success: true, permissions: { read: true, trade: true, withdraw: false, futures: false } };
   }
@@ -80,10 +81,11 @@ export class CoinbaseAdapter implements ExchangeAdapter {
   }
 
   async getBalances(creds: ExchangeCredentials): Promise<Balance[]> {
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const ts   = String(Math.floor(Date.now() / 1000));
     const path = '/api/v3/brokerage/accounts';
     const sig  = sign(creds.secretKey, ts, 'GET', path);
-    const r    = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig) }, 'coinbase');
+    const r    = await safeFetch(`${base}${path}`, { headers: headers(creds, ts, sig) }, 'coinbase');
     if (!r.ok) throw new Error(r.error?.message);
     const accounts = ((r.data as Record<string, unknown[]>)?.['accounts'] ?? []) as Array<Record<string, unknown>>;
     return accounts
@@ -101,8 +103,9 @@ export class CoinbaseAdapter implements ExchangeAdapter {
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {
+    const base = _creds.testnet ? TESTNET_BASE : BASE;
     const sym = this.normalizeSymbol(symbol);
-    const r   = await safeFetch(`${BASE}/api/v3/brokerage/products/${sym}`, {}, 'coinbase');
+    const r   = await safeFetch(`${base}/api/v3/brokerage/products/${sym}`, {}, 'coinbase');
     if (!r.ok) return stubSymbolRules(sym);
     const d = r.data as Record<string, string>;
     return {
@@ -141,29 +144,32 @@ export class CoinbaseAdapter implements ExchangeAdapter {
   }
 
   async cancelOrder(creds: ExchangeCredentials, orderId: string): Promise<boolean> {
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const body = JSON.stringify({ order_ids: [orderId] });
     const ts   = String(Math.floor(Date.now() / 1000));
     const path = '/api/v3/brokerage/orders/batch_cancel';
     const sig  = sign(creds.secretKey, ts, 'POST', path, body);
-    const r    = await safeFetch(`${BASE}${path}`, { method: 'POST', headers: headers(creds, ts, sig), body }, 'coinbase');
+    const r    = await safeFetch(`${base}${path}`, { method: 'POST', headers: headers(creds, ts, sig), body }, 'coinbase');
     return r.ok;
   }
 
   async getOrderHistory(creds: ExchangeCredentials, symbol?: string, limit = 50): Promise<OrderResult[]> {
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const sym  = symbol ? this.normalizeSymbol(symbol) : '';
     const path = `/api/v3/brokerage/orders/historical/batch?limit=${limit}${sym ? `&product_id=${sym}` : ''}`;
     const ts   = String(Math.floor(Date.now() / 1000));
     const sig  = sign(creds.secretKey, ts, 'GET', path);
-    const r    = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig) }, 'coinbase');
+    const r    = await safeFetch(`${base}${path}`, { headers: headers(creds, ts, sig) }, 'coinbase');
     if (!r.ok) return [];
     return ((r.data as Record<string, unknown[]>)?.['orders'] ?? []).map(o => parseOrder(o as Record<string, unknown>));
   }
 
   async getOrder(creds: ExchangeCredentials, orderId: string): Promise<OrderResult | null> {
+    const base = creds.testnet ? TESTNET_BASE : BASE;
     const path = `/api/v3/brokerage/orders/historical/${orderId}`;
     const ts   = String(Math.floor(Date.now() / 1000));
     const sig  = sign(creds.secretKey, ts, 'GET', path);
-    const r    = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig) }, 'coinbase');
+    const r    = await safeFetch(`${base}${path}`, { headers: headers(creds, ts, sig) }, 'coinbase');
     if (!r.ok) return null;
     const d = (r.data as Record<string, Record<string, unknown>>)?.['order'];
     return d ? parseOrder(d) : null;

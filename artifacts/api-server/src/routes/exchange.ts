@@ -12,11 +12,12 @@ const router: IRouter = Router();
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function extractCreds(req: Request): ExchangeCredentials | null {
-  const apiKey    = String(req.headers['x-api-key']    ?? req.body?.apiKey    ?? '');
-  const secretKey = String(req.headers['x-secret-key'] ?? req.body?.secretKey ?? '');
+  const apiKey     = String(req.headers['x-api-key']    ?? req.body?.apiKey    ?? '');
+  const secretKey  = String(req.headers['x-secret-key'] ?? req.body?.secretKey ?? '');
   const passphrase = String(req.headers['x-passphrase'] ?? req.body?.passphrase ?? '');
   if (!apiKey || !secretKey) return null;
-  return { apiKey, secretKey, ...(passphrase ? { passphrase } : {}) };
+  const testnet = req.headers['x-testnet'] === '1';
+  return { apiKey, secretKey, ...(passphrase ? { passphrase } : {}), ...(testnet ? { testnet } : {}) };
 }
 
 function isTestnetRequest(req: Request): boolean {

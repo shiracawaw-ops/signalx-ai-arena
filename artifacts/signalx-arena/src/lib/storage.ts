@@ -24,6 +24,7 @@ export interface Trade {
   timestamp: number;
   pnl: number;
   indicators: string;
+  fee?: number;
 }
 
 const BOTS_KEY = 'signalx_bots';

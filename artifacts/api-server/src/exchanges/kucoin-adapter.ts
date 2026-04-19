@@ -71,11 +71,12 @@ export class KuCoinAdapter implements ExchangeAdapter {
   }
 
   async validateCredentials(creds: ExchangeCredentials): Promise<ConnectResult> {
+    const base  = creds.testnet ? TESTNET_BASE : BASE;
     const ts    = Date.now();
     const path  = '/api/v1/sub/user';
     const sig   = sign(creds.secretKey, ts, 'GET', path);
     const ppSig = encryptPassphrase(creds.secretKey, creds.passphrase ?? '');
-    const r = await safeFetch(`${BASE}${path}`, {
+    const r = await safeFetch(`${base}${path}`, {
       headers: headers(creds, ts, sig, ppSig),
     }, 'kucoin');
     if (!r.ok) return { success: false, permissions: { read: false, trade: false, withdraw: false, futures: false }, error: r.error?.message };
@@ -88,11 +89,12 @@ export class KuCoinAdapter implements ExchangeAdapter {
 
   async getBalances(creds: ExchangeCredentials): Promise<Balance[]> {
     // Fetch ALL account types (main + trade + margin) so we never miss funds
+    const base  = creds.testnet ? TESTNET_BASE : BASE;
     const path  = '/api/v1/accounts';
     const ts    = Date.now();
     const sig   = sign(creds.secretKey, ts, 'GET', path);
     const ppSig = encryptPassphrase(creds.secretKey, creds.passphrase ?? '');
-    const r = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig, ppSig) }, 'kucoin');
+    const r = await safeFetch(`${base}${path}`, { headers: headers(creds, ts, sig, ppSig) }, 'kucoin');
     if (!r.ok) throw new Error(r.error?.message ?? 'KuCoin balance fetch failed');
     const list = ((r.data as Record<string, unknown[]>)?.['data'] ?? []) as Array<Record<string, unknown>>;
 
@@ -120,8 +122,9 @@ export class KuCoinAdapter implements ExchangeAdapter {
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {
+    const base = _creds.testnet ? TESTNET_BASE : BASE;
     const sym = this.normalizeSymbol(symbol);
-    const r   = await safeFetch(`${BASE}/api/v2/symbols/${sym}`, {}, 'kucoin');
+    const r   = await safeFetch(`${base}/api/v2/symbols/${sym}`, {}, 'kucoin');
     if (!r.ok) return stubSymbolRules(sym);
     const d = (r.data as Record<string, Record<string, unknown>>)?.['data'] ?? {};
     return {
@@ -167,32 +170,35 @@ export class KuCoinAdapter implements ExchangeAdapter {
   }
 
   async cancelOrder(creds: ExchangeCredentials, orderId: string): Promise<boolean> {
+    const base  = creds.testnet ? TESTNET_BASE : BASE;
     const ts    = Date.now();
     const path  = `/api/v1/orders/${orderId}`;
     const sig   = sign(creds.secretKey, ts, 'DELETE', path);
     const ppSig = encryptPassphrase(creds.secretKey, creds.passphrase ?? '');
-    const r = await safeFetch(`${BASE}${path}`, { method: 'DELETE', headers: headers(creds, ts, sig, ppSig) }, 'kucoin');
+    const r = await safeFetch(`${base}${path}`, { method: 'DELETE', headers: headers(creds, ts, sig, ppSig) }, 'kucoin');
     return r.ok;
   }
 
   async getOrderHistory(creds: ExchangeCredentials, symbol?: string, limit = 50): Promise<OrderResult[]> {
+    const base  = creds.testnet ? TESTNET_BASE : BASE;
     const sym   = symbol ? this.normalizeSymbol(symbol) : '';
     const path  = `/api/v1/orders?status=done${sym ? `&symbol=${sym}` : ''}&pageSize=${limit}`;
     const ts    = Date.now();
     const sig   = sign(creds.secretKey, ts, 'GET', path);
     const ppSig = encryptPassphrase(creds.secretKey, creds.passphrase ?? '');
-    const r = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig, ppSig) }, 'kucoin');
+    const r = await safeFetch(`${base}${path}`, { headers: headers(creds, ts, sig, ppSig) }, 'kucoin');
     if (!r.ok) return [];
     const items = ((r.data as Record<string, Record<string, unknown[]>>)?.['data']?.['items'] ?? []);
     return (items as Array<Record<string, unknown>>).map(parseOrder);
   }
 
   async getOrder(creds: ExchangeCredentials, orderId: string): Promise<OrderResult | null> {
+    const base  = creds.testnet ? TESTNET_BASE : BASE;
     const ts    = Date.now();
     const path  = `/api/v1/orders/${orderId}`;
     const sig   = sign(creds.secretKey, ts, 'GET', path);
     const ppSig = encryptPassphrase(creds.secretKey, creds.passphrase ?? '');
-    const r = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig, ppSig) }, 'kucoin');
+    const r = await safeFetch(`${base}${path}`, { headers: headers(creds, ts, sig, ppSig) }, 'kucoin');
     if (!r.ok) return null;
     const d = (r.data as Record<string, Record<string, unknown>>)?.['data'];
     return d ? parseOrder(d) : null;

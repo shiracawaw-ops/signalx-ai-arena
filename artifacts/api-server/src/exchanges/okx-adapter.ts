@@ -9,13 +9,14 @@ function sign(secret: string, ts: string, method: string, path: string, body = '
   return hmacSHA256Base64(secret, ts + method + path + body);
 }
 
-function headers(creds: ExchangeCredentials, ts: string, signature: string) {
+function headers(creds: ExchangeCredentials, ts: string, signature: string, testnet = false) {
   return {
-    'OK-ACCESS-KEY':       creds.apiKey,
-    'OK-ACCESS-SIGN':      signature,
-    'OK-ACCESS-TIMESTAMP': ts,
+    'OK-ACCESS-KEY':        creds.apiKey,
+    'OK-ACCESS-SIGN':       signature,
+    'OK-ACCESS-TIMESTAMP':  ts,
     'OK-ACCESS-PASSPHRASE': creds.passphrase ?? '',
-    'Content-Type':        'application/json',
+    'Content-Type':         'application/json',
+    ...(testnet ? { 'x-simulated-trading': '1' } : {}),
   };
 }
 
@@ -69,7 +70,7 @@ export class OkxAdapter implements ExchangeAdapter {
     const path = '/api/v5/account/config';
     const sig  = sign(creds.secretKey, ts, 'GET', path);
     const r = await safeFetch(`${BASE}${path}`, {
-      headers: headers(creds, ts, sig),
+      headers: headers(creds, ts, sig, !!creds.testnet),
     }, 'okx');
     if (!r.ok) return { success: false, permissions: { read: false, trade: false, withdraw: false, futures: false }, error: r.error?.message };
     const d = (r.data as Record<string, unknown[]>)?.['data']?.[0] as Record<string, unknown> ?? {};
@@ -95,7 +96,7 @@ export class OkxAdapter implements ExchangeAdapter {
     const ts   = new Date().toISOString();
     const path = '/api/v5/account/balance';
     const sig  = sign(creds.secretKey, ts, 'GET', path);
-    const r = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig) }, 'okx');
+    const r = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig, !!creds.testnet) }, 'okx');
     if (!r.ok) throw new Error(r.error?.message ?? 'Balance fetch failed');
     const details = ((r.data as Record<string, unknown[]>)?.['data']?.[0] as Record<string, unknown[]>)?.['details'] ?? [];
     return (details as Array<Record<string, unknown>>)
@@ -138,9 +139,7 @@ export class OkxAdapter implements ExchangeAdapter {
     const ts   = new Date().toISOString();
     const path = '/api/v5/trade/order';
     const sig  = sign(creds.secretKey, ts, 'POST', path, body);
-    const hdrs: Record<string, string> = { ...headers(creds, ts, sig) };
-    if (order.testnet) hdrs['x-simulated-trading'] = '1';  // OKX paper trading header
-    const r = await safeFetch(`${BASE}${path}`, { method: 'POST', headers: hdrs, body }, 'okx');
+    const r = await safeFetch(`${BASE}${path}`, { method: 'POST', headers: headers(creds, ts, sig, !!order.testnet), body }, 'okx');
     if (!r.ok) throw new Error(`OKX order failed: ${r.error?.message}`);
     const d   = ((r.data as Record<string, unknown[]>)?.['data']?.[0] ?? {}) as Record<string, unknown>;
     return { orderId: String(d['ordId'] ?? ''), clientId: String(d['clOrdId'] ?? ''), symbol: sym, side: order.side, type: order.type, status: 'open', quantity: order.quantity, filledQty: 0, price: order.price ?? 0, avgPrice: 0, fee: 0, feeCurrency: 'USDT', timestamp: Date.now(), exchange: 'okx', raw: d };
@@ -161,7 +160,7 @@ export class OkxAdapter implements ExchangeAdapter {
     const ts   = new Date().toISOString();
     const path = '/api/v5/trade/cancel-order';
     const sig  = sign(creds.secretKey, ts, 'POST', path, body);
-    const r = await safeFetch(`${BASE}${path}`, { method: 'POST', headers: headers(creds, ts, sig), body }, 'okx');
+    const r = await safeFetch(`${BASE}${path}`, { method: 'POST', headers: headers(creds, ts, sig, !!creds.testnet), body }, 'okx');
     return r.ok;
   }
 
@@ -170,7 +169,7 @@ export class OkxAdapter implements ExchangeAdapter {
     const path = `/api/v5/trade/orders-history?instType=SPOT${sym ? `&instId=${sym}` : ''}&limit=${limit}`;
     const ts   = new Date().toISOString();
     const sig  = sign(creds.secretKey, ts, 'GET', path);
-    const r = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig) }, 'okx');
+    const r = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig, !!creds.testnet) }, 'okx');
     if (!r.ok) return [];
     return ((r.data as Record<string, unknown[]>)?.['data'] ?? []).map(o => parseOrder(o as Record<string, unknown>));
   }
@@ -181,7 +180,7 @@ export class OkxAdapter implements ExchangeAdapter {
     const path = `/api/v5/trade/order?instId=${sym}&ordId=${orderId}`;
     const ts   = new Date().toISOString();
     const sig  = sign(creds.secretKey, ts, 'GET', path);
-    const r = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig) }, 'okx');
+    const r = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig, !!creds.testnet) }, 'okx');
     if (!r.ok) return null;
     const d = (r.data as Record<string, unknown[]>)?.['data']?.[0];
     return d ? parseOrder(d as Record<string, unknown>) : null;
