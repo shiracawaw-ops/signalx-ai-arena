@@ -25,6 +25,22 @@ jobs:
         env: { NODE_ENV: production }
       - run: npx electron-builder --win --config electron-builder.yml
         env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}", NODE_ENV: production }
+      - name: Verify packaged frontend assets
+        shell: pwsh
+        run: |
+          $unpacked = "dist-electron/win-unpacked/resources/frontend"
+          if (-not (Test-Path "$unpacked/index.html")) {
+            Write-Error "Missing $unpacked/index.html"; exit 1
+          }
+          $assets = Get-ChildItem "$unpacked/assets" -Filter "index-*.js" -ErrorAction SilentlyContinue
+          if (-not $assets) {
+            Write-Error "Missing $unpacked/assets/index-*.js"; exit 1
+          }
+          $html = Get-Content "$unpacked/index.html" -Raw
+          if ($html -match "serviceWorker\.register|/sw\.js|/registerSW\.js") {
+            Write-Error "index.html unexpectedly contains a service worker registration"; exit 1
+          }
+          Write-Host "Frontend assets OK: index.html + $($assets.Count) entry chunk(s)"
       - uses: actions/upload-artifact@v4
         with:
           name: SignalX-AI-Arena-Windows
