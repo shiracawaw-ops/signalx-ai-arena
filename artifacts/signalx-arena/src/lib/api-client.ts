@@ -103,7 +103,30 @@ async function safeParseJson(res: Response): Promise<unknown> {
 
 // ── Core fetch wrapper ────────────────────────────────────────────────────────
 
-type ApiResult<T> = { ok: true; data: T } | { ok: false; error: string; status?: number };
+export type ExchangeErrorCode =
+  | 'network'
+  | 'auth'
+  | 'permission'
+  | 'rate_limit'
+  | 'account_type'
+  | 'empty'
+  | 'unknown';
+
+type ApiResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; status?: number; code?: ExchangeErrorCode; retryAfterMs?: number };
+
+// Parse a `Retry-After` header value (seconds-int or HTTP-date) into ms.
+// Returns undefined when the header is missing or unparseable.
+function parseRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const secs = Number(value);
+  if (Number.isFinite(secs) && secs >= 0) return Math.floor(secs * 1000);
+  const dateMs = Date.parse(value);
+  if (!Number.isFinite(dateMs)) return undefined;
+  const delta = dateMs - Date.now();
+  return delta > 0 ? delta : 0;
+}
 
 const FETCH_TIMEOUT_MS = 15_000;
 
@@ -132,11 +155,37 @@ async function request<T = unknown>(url: string, init: RequestInit = {}): Promis
     }
 
     if (!res.ok) {
+      const obj = (data as Record<string, unknown> | null) ?? null;
       const errMsg =
-        (data as Record<string, string> | null)?.['error'] ??
-        (data as Record<string, string> | null)?.['message'] ??
+        (obj?.['error'] as string | undefined) ??
+        (obj?.['message'] as string | undefined) ??
         `Server returned HTTP ${res.status}`;
-      return { ok: false, error: errMsg, status: res.status };
+      const code = obj?.['code'] as ExchangeErrorCode | undefined;
+      const retryAfterMs =
+        parseRetryAfter(res.headers.get('Retry-After')) ??
+        (typeof obj?.['retryAfter'] === 'number' ? Math.floor((obj['retryAfter'] as number) * 1000) : undefined);
+      return {
+        ok: false, error: errMsg, status: res.status,
+        ...(code ? { code } : {}),
+        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      };
+    }
+
+    // The backend may return a 200 with `{ ok: false, code, error }` for
+    // structured exchange errors. Surface those as ApiResult failures so the
+    // caller doesn't have to special-case them.
+    if (data && typeof data === 'object' && (data as Record<string, unknown>)['ok'] === false) {
+      const obj = data as Record<string, unknown>;
+      const errMsg = (obj['error'] as string | undefined) ?? (obj['message'] as string | undefined) ?? 'Exchange error';
+      const code   = obj['code']  as ExchangeErrorCode | undefined;
+      const retryAfterMs =
+        parseRetryAfter(res.headers.get('Retry-After')) ??
+        (typeof obj['retryAfter'] === 'number' ? Math.floor((obj['retryAfter'] as number) * 1000) : undefined);
+      return {
+        ok: false, error: errMsg, status: res.status,
+        ...(code ? { code } : {}),
+        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      };
     }
 
     return { ok: true, data: (data ?? {}) as T };
@@ -145,15 +194,17 @@ async function request<T = unknown>(url: string, init: RequestInit = {}): Promis
     clearTimeout(timer);
     const err = e as Error;
 
-    // Friendly error messages for common network failures
+    // Friendly error messages for common network failures.
+    // Note: never tell the user we are "switching to demo" — we do not.
+    // Demo is only entered on explicit user action.
     if (err.name === 'AbortError') {
-      return { ok: false, error: 'Request timed out — check your connection or try again.' };
+      return { ok: false, error: 'Request timed out — check your connection or try again.', code: 'network' };
     }
     if (err.message?.toLowerCase().includes('failed to fetch') ||
         err.message?.toLowerCase().includes('network')) {
-      return { ok: false, error: 'Cannot reach the API server. Switching to demo mode.' };
+      return { ok: false, error: 'Cannot reach the API server.', code: 'network' };
     }
-    return { ok: false, error: err.message ?? 'Network error' };
+    return { ok: false, error: err.message ?? 'Network error', code: 'network' };
   }
 }
 

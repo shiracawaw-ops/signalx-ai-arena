@@ -8,6 +8,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ArenaProvider } from "@/context/arena-context";
 import { UserProvider, useUser } from "@/context/user-context";
 import { AppShell } from "@/components/app-shell";
+import { ErrorBoundary } from "@/components/error-boundary";
 import AutoPilotPage      from "@/pages/autopilot";
 import ArenaPage          from "@/pages/arena";
 import BotDoctorPage      from "@/pages/bot-doctor";
@@ -95,19 +96,21 @@ function Router() {
 
   return (
     <AppShell alerts={2}>
-      <Switch>
-        <Route path="/"         component={AutoPilotPage} />
-        <Route path="/arena"    component={ArenaPage}     />
-        <Route path="/doctor"   component={BotDoctorPage} />
-        <Route path="/reports"  component={ReportsPage}   />
-        <Route path="/exchange" component={ExchangePage}  />
-        <Route path="/wallet"   component={WalletPage}    />
-        <Route path="/risk"     component={RiskPage}      />
-        <Route path="/profile"  component={ProfilePage}   />
-        <Route path="/status"   component={StatusPage}    />
-        {isAdmin && <Route path="/admin" component={AdminPage} />}
-        <Route component={IS_ELECTRON ? NoRouteFallback : NotFound} />
-      </Switch>
+      <ErrorBoundary label="page">
+        <Switch>
+          <Route path="/"         component={AutoPilotPage} />
+          <Route path="/arena"    component={ArenaPage}     />
+          <Route path="/doctor"   component={BotDoctorPage} />
+          <Route path="/reports"  component={ReportsPage}   />
+          <Route path="/exchange" component={ExchangePage}  />
+          <Route path="/wallet"   component={WalletPage}    />
+          <Route path="/risk"     component={RiskPage}      />
+          <Route path="/profile"  component={ProfilePage}   />
+          <Route path="/status"   component={StatusPage}    />
+          {isAdmin && <Route path="/admin" component={AdminPage} />}
+          <Route component={IS_ELECTRON ? NoRouteFallback : NotFound} />
+        </Switch>
+      </ErrorBoundary>
     </AppShell>
   );
 }
@@ -119,15 +122,17 @@ function App() {
         <TooltipProvider>
           <UserProvider>
             <ArenaProvider>
-              {IS_ELECTRON ? (
-                <WouterRouter hook={useHashLocation} base="">
-                  <Router />
-                </WouterRouter>
-              ) : (
-                <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-                  <Router />
-                </WouterRouter>
-              )}
+              <ErrorBoundary label="root">
+                {IS_ELECTRON ? (
+                  <WouterRouter hook={useHashLocation} base="">
+                    <Router />
+                  </WouterRouter>
+                ) : (
+                  <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+                    <Router />
+                  </WouterRouter>
+                )}
+              </ErrorBoundary>
             </ArenaProvider>
           </UserProvider>
           <Toaster />

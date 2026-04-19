@@ -1,5 +1,6 @@
 // ─── Bitget REST Adapter (v2) ─────────────────────────────────────────────────
 import { hmacSHA256Base64, safeFetch, stubSymbolRules, toUsdtPair } from './base-adapter.js';
+import { classifyHttpFailure, check200Error, withUsdtValue, assertArray, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE = 'https://api.bitget.com';
@@ -79,16 +80,23 @@ export class BitgetAdapter implements ExchangeAdapter {
     const path = '/api/v2/spot/account/assets';
     const sig  = sign(creds.secretKey, ts, 'GET', path);
     const r    = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig) }, 'bitget');
-    if (!r.ok) throw new Error(r.error?.message);
-    const list = ((r.data as Record<string, unknown[]>)?.['data'] ?? []) as Array<Record<string, unknown>>;
-    return list
+    if (!r.ok) throw classifyHttpFailure('bitget', r.status, r.error?.message);
+    check200Error('bitget', r.data, 'code', 'msg', ['00000', 0, '0']);
+    const list = assertArray('bitget', (r.data as Record<string, unknown>)?.['data'] ?? [], '/spot/account/assets#data') as Array<Record<string, unknown>>;
+    const balances = list
       .filter(a => parseFloat(String(a['available'] ?? '0')) + parseFloat(String(a['frozen'] ?? '0')) > 0)
-      .map(a => ({
-        asset:     String(a['coin'] ?? ''),
-        available: parseFloat(String(a['available'] ?? '0')),
-        hold:      parseFloat(String(a['frozen'] ?? '0')),
-        total:     parseFloat(String(a['available'] ?? '0')) + parseFloat(String(a['frozen'] ?? '0')),
-      }));
+      .map(a => {
+        const availN = parseFloat(String(a['available'] ?? '0'));
+        const holdN  = parseFloat(String(a['frozen']    ?? '0'));
+        const available = Number.isFinite(availN) ? availN : 0;
+        const hold      = Number.isFinite(holdN)  ? holdN  : 0;
+        return withUsdtValue({
+          asset:     String(a['coin'] ?? ''),
+          available, hold,
+          total:     available + hold,
+        });
+      });
+    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

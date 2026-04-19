@@ -58,11 +58,12 @@ describe('GET /api/exchange/:exchange/ping', () => {
     expect(res.body.error).toMatch(/Unsupported exchange/);
   });
 
-  it('returns 502 when the adapter throws', async () => {
+  it('returns 503 when the adapter throws a network error', async () => {
     mockAdapter.ping.mockRejectedValue(new Error('network timeout'));
     const res = await request(app).get('/api/exchange/binance/ping');
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(503);
     expect(res.body.ok).toBe(false);
+    expect(res.body.code).toBe('network');
     expect(res.body.error).toBe('network timeout');
   });
 });
@@ -127,12 +128,13 @@ describe('POST /api/exchange/:exchange/balances', () => {
     expect(res.body.ok).toBe(false);
   });
 
-  it('returns 502 when the adapter throws', async () => {
+  it('returns 429 when the adapter throws a rate-limit error', async () => {
     mockAdapter.getBalances.mockRejectedValue(new Error('rate limit'));
     const res = await request(app)
       .post('/api/exchange/binance/balances')
       .set(VALID_CREDS);
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(429);
+    expect(res.body.code).toBe('rate_limit');
     expect(res.body.error).toBe('rate limit');
   });
 });
@@ -263,12 +265,13 @@ describe('POST /api/exchange/:exchange/permissions', () => {
     expect(res.body.ok).toBe(false);
   });
 
-  it('returns 502 when the adapter throws', async () => {
+  it('returns 403 when the adapter throws a permission error', async () => {
     mockAdapter.getPermissions.mockRejectedValue(new Error('forbidden'));
     const res = await request(app)
       .post('/api/exchange/binance/permissions')
       .set(VALID_CREDS);
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('permission');
     expect(res.body.error).toBe('forbidden');
   });
 });

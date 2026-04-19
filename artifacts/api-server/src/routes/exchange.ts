@@ -5,6 +5,7 @@ import { Router, type IRouter, type Request, type Response } from 'express';
 import { getAdapter, listAdapters, isSupported } from '../exchanges/registry.js';
 import { maskKey } from '../exchanges/base-adapter.js';
 import type { ExchangeCredentials, OrderRequest } from '../exchanges/types.js';
+import { classifyError } from '../exchanges/exchange-error.js';
 import { logger } from '../lib/logger.js';
 
 const router: IRouter = Router();
@@ -32,10 +33,32 @@ function badRequest(res: Response, msg: string) {
   res.status(400).json({ ok: false, error: msg });
 }
 
+// Default Retry-After hint (seconds) we surface for rate_limit responses when
+// the upstream exchange did not give us a more specific value. The frontend
+// uses this to schedule a single auto-retry after a brief throttle.
+const DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC = 30;
+
 function serverError(res: Response, exchange: string, err: unknown) {
-  const msg = (err as Error)?.message ?? String(err);
-  logger.error({ exchange, error: msg }, '[exchange-proxy] error');
-  res.status(502).json({ ok: false, error: msg, exchange });
+  const { code, message, status } = classifyError(err);
+  logger.error({ exchange, code, error: message }, '[exchange-proxy] error');
+  // Map error code → HTTP status so existing fetch/!res.ok checks still work.
+  const httpStatus =
+    status ??
+    (code === 'auth'        ? 401 :
+     code === 'permission'  ? 403 :
+     code === 'rate_limit'  ? 429 :
+     code === 'network'     ? 503 :
+     code === 'account_type' ? 422 :
+     502);
+  if (code === 'rate_limit') {
+    res.setHeader('Retry-After', String(DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC));
+    res.status(httpStatus).json({
+      ok: false, code, error: message, exchange,
+      retryAfter: DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC,
+    });
+    return;
+  }
+  res.status(httpStatus).json({ ok: false, code, error: message, exchange });
 }
 
 function requireExchange(req: Request, res: Response): string | null {
@@ -73,7 +96,27 @@ router.post('/exchange/:exchange/validate', async (req, res) => {
   const adapter = getAdapter(ex)!;
   try {
     const result = await adapter.validateCredentials(creds);
-    res.json({ ok: result.success, ...result });
+    if (!result.success) {
+      // Adapter returned a non-throw failure — classify so the frontend
+      // gets a stable code (auth / permission / network / rate_limit / …)
+      // instead of a generic "balance_error".
+      const { code, message } = classifyError(result.error ?? 'Validation failed');
+      const httpStatus =
+        code === 'auth'         ? 401 :
+        code === 'permission'   ? 403 :
+        code === 'rate_limit'   ? 429 :
+        code === 'network'      ? 503 :
+        code === 'account_type' ? 422 : 401;
+      if (code === 'rate_limit') {
+        res.setHeader('Retry-After', String(DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC));
+        return res.status(httpStatus).json({
+          ok: false, exchange: ex, code, error: message,
+          retryAfter: DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC, ...result,
+        });
+      }
+      return res.status(httpStatus).json({ ok: false, exchange: ex, code, error: message, ...result });
+    }
+    res.json({ ok: true, exchange: ex, ...result });
   } catch (e) { serverError(res, ex, e); }
 });
 

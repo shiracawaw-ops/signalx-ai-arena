@@ -18,6 +18,11 @@ export interface Balance {
   available: number;
   hold:      number;
   total:     number;
+  // Approximate USDT value of this asset. Adapters populate this for
+  // stable-coin assets (USDT/USDC/DAI/...) where the value equals total;
+  // for other assets it is left undefined so the frontend can render
+  // "—" instead of a misleading "$0".
+  usdtValue?: number;
 }
 
 export interface SymbolRules {

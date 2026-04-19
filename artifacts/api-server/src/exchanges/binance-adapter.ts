@@ -1,5 +1,6 @@
 // ─── Binance REST Adapter ─────────────────────────────────────────────────────
 import { hmacSHA256, safeFetch, stubSymbolRules, toUsdtPair } from './base-adapter.js';
+import { classifyHttpFailure, check200Error, withUsdtValue, assertArray, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE         = 'https://api.binance.com';
@@ -101,17 +102,25 @@ export class BinanceAdapter implements ExchangeAdapter {
     const r = await safeFetch(`${base}/api/v3/account?${q}`, {
       headers: authHeaders(creds.apiKey),
     }, 'binance');
-    if (!r.ok) throw new Error(r.error?.message ?? 'Balance fetch failed');
+    if (!r.ok) throw classifyHttpFailure('binance', r.status, r.error?.message);
+    check200Error('binance', r.data, 'code', 'msg', [undefined, 0, '0', 200, '200']);
     const d   = r.data as Record<string, unknown>;
-    const raw = (d['balances'] as Array<Record<string, string>>) ?? [];
-    return raw
+    const raw = assertArray('binance', d['balances'] ?? [], '/api/v3/account#balances') as Array<Record<string, string>>;
+    const balances = raw
       .filter(b => parseFloat(b['free'] ?? '0') + parseFloat(b['locked'] ?? '0') > 0)
-      .map(b => ({
-        asset:     b['asset'] ?? '',
-        available: parseFloat(b['free'] ?? '0'),
-        hold:      parseFloat(b['locked'] ?? '0'),
-        total:     parseFloat(b['free'] ?? '0') + parseFloat(b['locked'] ?? '0'),
-      }));
+      .map(b => {
+        const availN = parseFloat(b['free'] ?? '0');
+        const holdN  = parseFloat(b['locked'] ?? '0');
+        const available = Number.isFinite(availN) ? availN : 0;
+        const hold      = Number.isFinite(holdN) ? holdN : 0;
+        return withUsdtValue({
+          asset:     b['asset'] ?? '',
+          available,
+          hold,
+          total:     available + hold,
+        });
+      });
+    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

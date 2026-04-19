@@ -1,5 +1,6 @@
 // ─── HTX (Huobi) REST Adapter ─────────────────────────────────────────────────
 import { hmacSHA256Base64, safeFetch, stubSymbolRules } from './base-adapter.js';
+import { classifyHttpFailure, withUsdtValue, assertArray, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE     = 'https://api.huobi.pro';
@@ -83,7 +84,7 @@ export class HtxAdapter implements ExchangeAdapter {
     const path = '/v1/account/accounts';
     const q    = authQs(creds, 'GET', path);
     const r    = await safeFetch(`${BASE}${path}?${q}`, {}, 'htx');
-    if (!r.ok) throw new Error('Cannot get HTX account ID');
+    if (!r.ok) throw classifyHttpFailure('htx', r.status, r.error?.message ?? 'Cannot get HTX account ID');
     const list = (r.data as Record<string, Array<Record<string, unknown>>>)?.['data'] ?? [];
     const spot = list.find(a => a['type'] === 'spot' && a['state'] === 'working');
     this.accountId = String(spot?.['id'] ?? list[0]?.['id'] ?? '');
@@ -107,20 +108,28 @@ export class HtxAdapter implements ExchangeAdapter {
     const path   = `/v1/account/accounts/${acctId}/balance`;
     const q      = authQs(creds, 'GET', path);
     const r      = await safeFetch(`${BASE}${path}?${q}`, {}, 'htx');
-    if (!r.ok) throw new Error(r.error?.message);
-    const list = ((r.data as Record<string, Record<string, unknown[]>>)?.['data']?.['list'] ?? []) as Array<Record<string, string>>;
+    if (!r.ok) throw classifyHttpFailure('htx', r.status, r.error?.message);
+    // HTX also signals errors via status='error' on a 200 response.
+    const status = String((r.data as Record<string, unknown>)?.['status'] ?? '');
+    if (status === 'error') {
+      const errMsg = String((r.data as Record<string, unknown>)?.['err-msg'] ?? 'HTX returned an error');
+      throw classifyHttpFailure('htx', undefined, errMsg);
+    }
+    const list = assertArray('htx', ((r.data as Record<string, Record<string, unknown>>)?.['data'] as Record<string, unknown>)?.['list'] ?? [], '/v1/account/balance#data.list') as Array<Record<string, string>>;
     const map  = new Map<string, { available: number; hold: number }>();
     for (const item of list) {
       const cur = item['currency'] ?? '';
-      const bal = parseFloat(item['balance'] ?? '0');
+      const balN = parseFloat(item['balance'] ?? '0');
+      const bal  = Number.isFinite(balN) ? balN : 0;
       if (!map.has(cur)) map.set(cur, { available: 0, hold: 0 });
       const entry = map.get(cur)!;
       if (item['type'] === 'trade') entry.available = bal;
       else entry.hold = bal;
     }
-    return [...map.entries()]
+    const balances = [...map.entries()]
       .filter(([, v]) => v.available + v.hold > 0)
-      .map(([asset, v]) => ({ asset: asset.toUpperCase(), ...v, total: v.available + v.hold }));
+      .map(([asset, v]) => withUsdtValue({ asset: asset.toUpperCase(), ...v, total: v.available + v.hold }));
+    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

@@ -1,5 +1,6 @@
 // ─── KuCoin REST Adapter (API v2) ─────────────────────────────────────────────
 import { hmacSHA256Base64, safeFetch, stubSymbolRules } from './base-adapter.js';
+import { classifyHttpFailure, check200Error, withUsdtValue, assertArray, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE         = 'https://api.kucoin.com';
@@ -95,16 +96,20 @@ export class KuCoinAdapter implements ExchangeAdapter {
     const sig   = sign(creds.secretKey, ts, 'GET', path);
     const ppSig = encryptPassphrase(creds.secretKey, creds.passphrase ?? '');
     const r = await safeFetch(`${base}${path}`, { headers: headers(creds, ts, sig, ppSig) }, 'kucoin');
-    if (!r.ok) throw new Error(r.error?.message ?? 'KuCoin balance fetch failed');
-    const list = ((r.data as Record<string, unknown[]>)?.['data'] ?? []) as Array<Record<string, unknown>>;
+    if (!r.ok) throw classifyHttpFailure('kucoin', r.status, r.error?.message);
+    check200Error('kucoin', r.data, 'code', 'msg', ['200000']);
+    const list = assertArray('kucoin', (r.data as Record<string, unknown>)?.['data'] ?? [], '/api/v1/accounts#data') as Array<Record<string, unknown>>;
 
     // Merge duplicate currency entries (same currency may appear in main + trade accounts)
     const merged = new Map<string, Balance>();
     for (const a of list) {
-      const asset     = String(a['currency'] ?? '').toUpperCase();
-      const available = parseFloat(String(a['available'] ?? '0'));
-      const hold      = parseFloat(String(a['holds']     ?? '0'));
-      const total     = parseFloat(String(a['balance']   ?? '0'));
+      const asset       = String(a['currency'] ?? '').toUpperCase();
+      const availableN  = parseFloat(String(a['available'] ?? '0'));
+      const holdN       = parseFloat(String(a['holds']     ?? '0'));
+      const totalN      = parseFloat(String(a['balance']   ?? '0'));
+      const available   = Number.isFinite(availableN) ? availableN : 0;
+      const hold        = Number.isFinite(holdN)      ? holdN      : 0;
+      const total       = Number.isFinite(totalN)     ? totalN     : 0;
       if (!asset || total <= 0) continue;
       const prev = merged.get(asset);
       if (prev) {
@@ -118,7 +123,8 @@ export class KuCoinAdapter implements ExchangeAdapter {
         merged.set(asset, { asset, available, hold, total });
       }
     }
-    return Array.from(merged.values());
+    const balances = Array.from(merged.values()).map(withUsdtValue);
+    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

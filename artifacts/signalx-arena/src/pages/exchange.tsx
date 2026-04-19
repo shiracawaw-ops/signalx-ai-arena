@@ -1,5 +1,6 @@
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { ErrorBoundary } from '@/components/error-boundary';
 import { motion } from 'framer-motion';
 import {
   getExchangeAdapter, checkTradingPermission, KNOWN_EXCHANGES,
@@ -20,11 +21,79 @@ import {
 
 // ── New engine imports ────────────────────────────────────────────────────────
 import { exchangeMode as exMode }   from '@/lib/exchange-mode';
-import type { ExchangeModeState }   from '@/lib/exchange-mode';
+import type { ExchangeModeState, ConnectionState } from '@/lib/exchange-mode';
 import { tradeConfig, type TradeConfig } from '@/lib/trade-config';
 import { executionLog, type ExecutionEntry } from '@/lib/execution-log';
-import { apiClient }                from '@/lib/api-client';
+import { apiClient, type ExchangeErrorCode } from '@/lib/api-client';
 import { setCredentials }           from '@/lib/execution-engine';
+import { credentialStore }          from '@/lib/credential-store';
+import { exchangeEvents, type ExchangeEvent } from '@/lib/exchange-events';
+
+// Map a backend error code (or fetch failure) to a connection-machine state.
+function codeToState(code: ExchangeErrorCode | undefined): ConnectionState {
+  switch (code) {
+    case 'auth':         return 'invalid_credentials';
+    case 'permission':   return 'permission_denied';
+    case 'rate_limit':   return 'rate_limited';
+    case 'network':      return 'network_error';
+    case 'empty':        return 'balance_empty';
+    case 'account_type': return 'balance_error';
+    default:             return 'balance_error';
+  }
+}
+
+// Connection states that warrant the persistent inline error card.
+// `balance_empty` is a successful fetch (just no funds) so it is not an error.
+const CONNECTION_ERROR_STATES: ReadonlySet<ConnectionState> = new Set([
+  'network_error', 'invalid_credentials', 'permission_denied',
+  'rate_limited',  'balance_error',
+]);
+
+function friendlyConnectionError(
+  state: ConnectionState, exName: string, error?: string,
+): { title: string; body: string; needsKeys: boolean } {
+  switch (state) {
+    case 'network_error':
+      return {
+        title: `Can't reach ${exName}`,
+        body: error ?? 'We could not reach the exchange. Check your internet connection and try again.',
+        needsKeys: false,
+      };
+    case 'invalid_credentials':
+      return {
+        title: 'API credentials were rejected',
+        body: error ?? 'Your API key or secret was not accepted. Re-enter your keys to continue.',
+        needsKeys: true,
+      };
+    case 'permission_denied':
+      return {
+        title: 'API key is missing a required permission',
+        body: error ?? 'This key does not have the permissions needed to read balances or place trades. Re-enter a key with read + trade enabled.',
+        needsKeys: true,
+      };
+    case 'rate_limited':
+      return {
+        title: `${exName} rate limit hit`,
+        body: error ?? 'The exchange temporarily blocked further requests. Wait a moment, then retry.',
+        needsKeys: false,
+      };
+    case 'balance_error':
+      return {
+        title: 'Could not load your balance',
+        body: error ?? 'Something went wrong while fetching your account balance. Retry, or open Diagnostics for details.',
+        needsKeys: false,
+      };
+    default:
+      return { title: 'Connection issue', body: error ?? 'Something went wrong with this connection.', needsKeys: false };
+  }
+}
+
+// Numeric coercion that always returns a finite number — protects every
+// downstream `.toFixed`, sum, and division from a bad shape on the wire.
+function num(v: unknown): number {
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
 
 function fmt(n: number, dec = 2) {
   return n.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
@@ -73,6 +142,7 @@ const TABS = [
   { key: 'livestatus',  label: 'Live Status',   icon: Activity       },
   { key: 'tradeconfig', label: 'Trade Config',  icon: Settings       },
   { key: 'execlog',     label: 'Execution Log', icon: FileText       },
+  { key: 'diagnostics', label: 'Diagnostics',   icon: AlertTriangle  },
 ] as const;
 
 // ── Status dot ────────────────────────────────────────────────────────────────
@@ -94,13 +164,20 @@ function CfgRow({ label, children }: { label: string; children: React.ReactNode 
 
 export default function ExchangePage() {
   const [tab,         setTab]         = useState<typeof TABS[number]['key']>('exchanges');
-  const [selectedEx,  setSelectedEx]  = useState<ExchangeMeta>(KNOWN_EXCHANGES[0]);
-  const [mode,        setMode]        = useState<'demo' | 'paper' | 'testnet' | 'real'>('demo');
-  const [apiKey,      setApiKey]      = useState('');
-  const [secretKey,   setSecretKey]   = useState('');
-  const [passphrase,  setPassphrase]  = useState('');
+  // Initialize selected exchange from the engine singleton so navigating
+  // away and back to /exchange does NOT reset the user's active exchange.
+  const initialEx: ExchangeMeta =
+    KNOWN_EXCHANGES.find(e => e.id === exMode.get().exchange) ?? KNOWN_EXCHANGES[0];
+  const [selectedEx,  setSelectedEx]  = useState<ExchangeMeta>(initialEx);
+  const [mode,        setMode]        = useState<'demo' | 'paper' | 'testnet' | 'real'>(() => exMode.get().mode);
+  // Credentials live in the singleton credentialStore so they survive
+  // page navigation. Local state mirrors them only for the controlled inputs.
+  const [apiKey,      setApiKey]      = useState(() => credentialStore.get(initialEx.id)?.apiKey    ?? '');
+  const [secretKey,   setSecretKey]   = useState(() => credentialStore.get(initialEx.id)?.secretKey ?? '');
+  const [passphrase,  setPassphrase]  = useState(() => credentialStore.get(initialEx.id)?.passphrase ?? '');
   const [showSecret,  setShowSecret]  = useState(false);
-  const [isConnected, setIsConnected] = useState(false);
+  const [isConnected, setIsConnected] = useState(() => credentialStore.has(initialEx.id));
+  const [diagEvents,  setDiagEvents]  = useState<ExchangeEvent[]>(() => exchangeEvents.all());
   const [connecting,  setConnecting]  = useState(false);
   const [balances,    setBalances]    = useState<ExchangeBalance[]>([]);
   const [orders,      setOrders]      = useState<ExchangeOrder[]>([]);
@@ -110,7 +187,7 @@ export default function ExchangePage() {
   const [modeState,   setModeState]   = useState<ExchangeModeState>(exMode.get());
   const [config,      setConfig]      = useState<TradeConfig>(tradeConfig.get(selectedEx.id));
   const [logEntries,  setLogEntries]  = useState<ExecutionEntry[]>(executionLog.all());
-  const [liveBalances, setLiveBalances] = useState<Array<{ asset: string; available: number; hold: number; total: number }>>([]);
+  const [liveBalances, setLiveBalances] = useState<Array<{ asset: string; available: number; hold: number; total: number; usdtValue?: number }>>([]);
   const [liveOrders,   setLiveOrders]  = useState<unknown[]>([]);
   const [livePermissions, setLivePermissions] = useState<{ read: boolean; trade: boolean; withdraw: boolean; futures: boolean } | null>(null);
   const [refreshing,   setRefreshing]  = useState(false);
@@ -126,34 +203,68 @@ export default function ExchangePage() {
     const unsub1 = exMode.subscribe(setModeState);
     const unsub2 = tradeConfig.subscribe(configs => setConfig(configs[selectedEx.id] ?? tradeConfig.get(selectedEx.id)));
     const unsub3 = executionLog.subscribe(setLogEntries);
-    return () => { unsub1(); unsub2(); unsub3(); };
+    const unsub4 = exchangeEvents.subscribe(setDiagEvents);
+    return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
   }, [selectedEx.id]);
 
   // ── Sync mode singleton when user changes mode selector ──────────────────
   // Must use setMode() — not update() — so armed/networkUp/balanceFetched/
   // apiValidated flags are cleared when the user switches modes.
+  // Skip first run: the local `mode` was initialized FROM the singleton, so
+  // calling setMode() on mount would needlessly clear connection flags and
+  // break "connection visibly alive after returning to /exchange".
+  const modeMounted = useRef(false);
   useEffect(() => {
+    if (!modeMounted.current) { modeMounted.current = true; return; }
+    if (exMode.get().mode === mode) return;
     exMode.setMode(mode);
+    exchangeEvents.log('switch-mode', selectedEx.id, `User selected mode "${mode}"`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
-  // ── Disconnect when switching exchanges ───────────────────────────────────
+  // ── Switch exchanges: keep saved creds, restore connection state from store
+  // Same first-mount guard so a passive page return doesn't wipe flags
+  // or clear cached live balances/orders that the user expects to still
+  // see after returning to /exchange.
+  const exMounted = useRef(false);
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setIsConnected(false);
-    setBalances([]);
-    setOrders([]);
-    setLiveBalances([]);
-    setLiveOrders([]);
-    setLivePermissions(null);
-    setLatency(null);
-    setApiKey('');
-    setSecretKey('');
-    setPassphrase('');
-    setBalError(null);
-    setOrdError(null);
-    setCredentials(null);
-    exMode.setExchange(selectedEx.id);
     setConfig(tradeConfig.get(selectedEx.id));
+
+    if (!exMounted.current) {
+      // First mount: rehydrate cached live data for this exchange so the
+      // user sees the same balances/orders they had before navigating away.
+      exMounted.current = true;
+      const cached = credentialStore.getCache(selectedEx.id);
+      if (cached) {
+        if (cached.liveBalances)   setLiveBalances(cached.liveBalances);
+        if (cached.liveOrders)     setLiveOrders(cached.liveOrders);
+        if (cached.permissions)    setLivePermissions(cached.permissions);
+        if (typeof cached.latency === 'number') setLatency(cached.latency);
+      }
+    } else {
+      // Active exchange switch: reset everything for the new exchange.
+      setBalances([]);
+      setOrders([]);
+      setLiveBalances([]);
+      setLiveOrders([]);
+      setLivePermissions(null);
+      setLatency(null);
+      setBalError(null);
+      setOrdError(null);
+      if (exMode.get().exchange !== selectedEx.id) {
+        exMode.setExchange(selectedEx.id);
+      }
+    }
+
+    // Rehydrate creds + connection flag from the singleton store.
+    const saved = credentialStore.get(selectedEx.id);
+    setApiKey(saved?.apiKey     ?? '');
+    setSecretKey(saved?.secretKey ?? '');
+    setPassphrase(saved?.passphrase ?? '');
+    setIsConnected(!!saved);
+    setCredentials(saved);
+    exchangeEvents.log('state-change', selectedEx.id,
+      saved ? 'Restored saved credentials for this exchange' : 'No saved credentials for this exchange');
   }, [selectedEx.id]);
 
   // ── Demo data loader ──────────────────────────────────────────────────────
@@ -169,12 +280,26 @@ export default function ExchangePage() {
   }, [adapter]);
 
   // ── Live data refresh ─────────────────────────────────────────────────────
-  const refreshLiveData = useCallback(async () => {
+  // `opts.auto` distinguishes a timer-driven retry from a manual call.
+  // Manual calls always cancel any pending auto-retry first (so a click
+  // and a timer can't race); auto calls mark the one-shot flag so they
+  // can't loop into a retry storm. Accepts an options object (rather than
+  // a bare boolean) so onClick handlers that pass a SyntheticEvent are
+  // safely treated as manual.
+  const refreshLiveData = useCallback(async (opts?: { auto?: boolean }) => {
+    const isAuto = opts?.auto === true;
     if ((mode !== 'real' && mode !== 'testnet') || !apiKey || !secretKey) return;
+    if (isAuto) {
+      exMode.markAutoRetryConsumed();
+      exchangeEvents.log('fetch-balance', selectedEx.id, 'Auto-retry firing after transient refresh error');
+    } else {
+      exMode.cancelAutoRetry();
+    }
     setRefreshing(true);
     setBalError(null);
     setOrdError(null);
     const creds = { apiKey, secretKey, ...(passphrase ? { passphrase } : {}) };
+    exchangeEvents.log('fetch-balance', selectedEx.id, 'Fetching live balances + orders', { apiKey });
     try {
       const [balRes, ordRes] = await Promise.all([
         apiClient.getBalances(selectedEx.id, creds),
@@ -182,33 +307,83 @@ export default function ExchangePage() {
       ]);
 
       if (balRes.ok) {
-        const bals = (balRes.data as { balances: typeof liveBalances }).balances ?? [];
+        let bals: Array<{ asset: string; available: number; hold: number; total: number; usdtValue?: number }> = [];
+        try {
+          const raw = (balRes.data as { balances?: unknown }).balances;
+          if (Array.isArray(raw)) {
+            // Defensive normalization — never trust upstream shape.
+            bals = raw
+              .filter((b): b is Record<string, unknown> => !!b && typeof b === 'object')
+              .map(b => {
+                const usdtRaw = b['usdtValue'];
+                const usdtNum = typeof usdtRaw === 'number' && Number.isFinite(usdtRaw)
+                  ? usdtRaw
+                  : undefined;
+                return {
+                  asset:     String(b['asset'] ?? ''),
+                  available: num(b['available']),
+                  hold:      num(b['hold']),
+                  total:     num(b['total']),
+                  ...(usdtNum !== undefined ? { usdtValue: usdtNum } : {}),
+                };
+              })
+              .filter(b => b.asset);
+          }
+        } catch (parseErr) {
+          exchangeEvents.log('parse-response', selectedEx.id,
+            `Balance parse failed: ${(parseErr as Error).message}`,
+            { level: 'error' });
+        }
         setLiveBalances(bals);
+        credentialStore.setCache(selectedEx.id, { liveBalances: bals });
         exMode.update({ balanceFetched: true });
         if (bals.length === 0) {
           setBalError('No assets found. Make sure your API key has read permission and funds exist in any account type.');
+          exMode.setConnectionState('balance_empty', 'Balance fetch returned no assets');
+          exchangeEvents.log('parse-response', selectedEx.id, 'Balance response had 0 assets', { level: 'warn' });
+        } else {
+          exMode.setConnectionState('balance_loaded');
+          exchangeEvents.log('fetch-balance', selectedEx.id, `Loaded ${bals.length} asset(s)`);
         }
       } else {
-        const errMsg = (balRes as { error: string }).error ?? 'Balance fetch failed';
+        const errMsg = balRes.error ?? 'Balance fetch failed';
+        const code   = balRes.code;
+        const retryAfterMs = (balRes as { retryAfterMs?: number }).retryAfterMs;
         setBalError(errMsg);
+        exMode.setConnectionState(codeToState(code), errMsg, retryAfterMs);
+        exchangeEvents.log('fetch-balance', selectedEx.id, errMsg, { level: 'error', data: { code, retryAfterMs } });
         toast({ title: 'Balance fetch failed', description: errMsg, variant: 'destructive' });
       }
 
       if (ordRes.ok) {
-        setLiveOrders((ordRes.data as { orders: unknown[] }).orders ?? []);
+        const rawOrders = (ordRes.data as { orders?: unknown }).orders;
+        const ordsArr = Array.isArray(rawOrders) ? rawOrders : [];
+        setLiveOrders(ordsArr);
+        credentialStore.setCache(selectedEx.id, { liveOrders: ordsArr });
       } else {
-        const errMsg = (ordRes as { error: string }).error ?? 'Order history fetch failed';
+        const errMsg = ordRes.error ?? 'Order history fetch failed';
         setOrdError(errMsg);
+        exchangeEvents.log('fetch-balance', selectedEx.id, `Order history failed: ${errMsg}`, { level: 'warn', data: { code: ordRes.code } });
+        // If the balance side succeeded (so the connection itself is still
+        // healthy) but the order fetch tripped on a transient blip, schedule
+        // the same one-shot auto-retry the connect/balance path uses.
+        if (balRes.ok && (ordRes.code === 'network' || ordRes.code === 'rate_limit')) {
+          const reason = ordRes.code === 'network' ? 'network' : 'rate_limit';
+          const ra = (ordRes as { retryAfterMs?: number }).retryAfterMs;
+          exMode.scheduleAutoRetry(reason, ra);
+        }
       }
     } catch (e) {
       const msg = (e as Error).message ?? 'Unexpected error';
       setBalError(msg);
       setOrdError(msg);
+      exMode.setConnectionState('balance_error', msg);
+      exchangeEvents.log('fetch-balance', selectedEx.id, `Unexpected refresh error: ${msg}`, { level: 'error' });
       toast({ title: 'Refresh failed', description: msg, variant: 'destructive' });
     } finally {
       setRefreshing(false);
     }
-  }, [mode, apiKey, secretKey, passphrase, selectedEx.id]);
+  }, [mode, apiKey, secretKey, passphrase, selectedEx.id, toast]);
 
   // ── Connect ───────────────────────────────────────────────────────────────
   const handleConnect = async () => {
@@ -247,31 +422,58 @@ export default function ExchangePage() {
       secretKey:  secretKey.trim(),
       ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {}),
     };
+
+    // Persist creds into the in-memory singleton FIRST so a tab-switch or
+    // transient render error during validate cannot lose them. They will be
+    // cleared if validation produces an unrecoverable auth/permission error.
+    credentialStore.set(selectedEx.id, creds);
+    setCredentials(creds);
+    exMode.setConnectionState('validating');
+    exchangeEvents.log('save-keys', selectedEx.id, 'Credentials saved to session store', { apiKey: creds.apiKey });
+
     try {
       // 1. Check exchange is reachable (no auth needed)
+      exchangeEvents.log('connect', selectedEx.id, 'Pinging exchange…');
       const pingRes = await apiClient.ping(selectedEx.id);
       if ('error' in pingRes) {
-        // Backend or exchange unreachable — fall back to demo
+        // Network blip — DO NOT silently switch to Demo. Stay in Real, mark
+        // the connection state so the UI can show a retry button.
+        exMode.setConnectionState('network_error', pingRes.error);
+        exchangeEvents.log('connect', selectedEx.id, `Ping failed: ${pingRes.error}`, { level: 'error' });
         toast({
           title:       'Cannot reach exchange server',
-          description: `${pingRes.error} — falling back to Demo mode.`,
+          description: `${pingRes.error} You are still in ${mode === 'testnet' ? 'Testnet' : 'Real'} mode — try Connect again when the network recovers.`,
           variant:     'destructive',
         });
-        setMode('demo');
-        exMode.update({ mode: 'demo', apiValidated: false });
         setConnecting(false);
         setValidating(false);
         return;
       }
       const lat = pingRes.latency;
+      exMode.update({ networkUp: true });
+      exchangeEvents.log('connect', selectedEx.id, `Ping ok (${lat}ms)`);
 
       // 2. Validate credentials via backend proxy
+      exchangeEvents.log('validate', selectedEx.id, 'Validating API credentials…', { apiKey: creds.apiKey });
       const valRes = await apiClient.validate(selectedEx.id, creds);
       if (!valRes.ok) {
-        const errMsg = (valRes as { error: string }).error ?? 'Validation failed';
+        const errMsg = valRes.error ?? 'Validation failed';
+        const next   = codeToState(valRes.code);
+        const retryAfterMs = (valRes as { retryAfterMs?: number }).retryAfterMs;
+        exMode.setConnectionState(next, errMsg, retryAfterMs);
+        exchangeEvents.log('validate', selectedEx.id, errMsg, { level: 'error', data: { code: valRes.code, retryAfterMs } });
+        // Auth / permission failures = bad keys → drop them so the user must
+        // re-enter. Network/rate_limit failures = keep them so a retry works.
+        if (valRes.code === 'auth' || valRes.code === 'permission') {
+          credentialStore.clear(selectedEx.id, { keepHint: true });
+          setCredentials(null);
+          setIsConnected(false);
+        }
         toast({
-          title:       'API validation failed',
-          description: errMsg,
+          title:       valRes.code === 'auth' ? 'Invalid API credentials'
+                     : valRes.code === 'permission' ? 'API key missing required permission'
+                     : 'API validation failed',
+          description: `${errMsg} You are still in ${mode === 'testnet' ? 'Testnet' : 'Real'} mode.`,
           variant:     'destructive',
         });
         setConnecting(false);
@@ -285,8 +487,9 @@ export default function ExchangePage() {
       }).data;
       const perms = vData?.permissions ?? { read: true, trade: false, withdraw: false, futures: false };
       setLivePermissions(perms);
+      credentialStore.setCache(selectedEx.id, { permissions: perms, latency: lat });
 
-      // 4. Update global engine state — credentials stay in React state only
+      // 4. Update global engine state — credentials stay in session store
       exMode.update({
         mode,
         networkUp:    true,
@@ -295,16 +498,17 @@ export default function ExchangePage() {
         connectedAt:  Date.now(),
         latency:      lat,
       });
-      setCredentials(creds);  // inject into execution engine (in-memory only, not persisted)
+      exMode.setConnectionState('connected');
       setLatency(lat);
       setIsConnected(true);
+      exchangeEvents.log('connect', selectedEx.id, 'Connected', { data: { perms } });
 
       // 5. Load live balances / orders
       await refreshLiveData();
 
-      const modeLabel = mode === 'testnet' ? 'Testnet' : 'Real';
+      const modeLabelStr = mode === 'testnet' ? 'Testnet' : 'Real';
       toast({
-        title: `Connected to ${selectedEx.name} (${modeLabel})`,
+        title: `Connected to ${selectedEx.name} (${modeLabelStr})`,
         description: perms.trade
           ? 'API validated — trading permission confirmed.'
           : 'API connected but trading permission is missing on this key.',
@@ -312,15 +516,17 @@ export default function ExchangePage() {
       });
 
     } catch (e) {
-      // Unexpected error — fall back to demo mode for safety
+      // Unexpected error — DO NOT switch to Demo. Surface the failure and
+      // keep the user where they were. Drop creds only if the error looks
+      // like an auth problem.
       const msg = (e as Error)?.message ?? 'Unknown error';
+      exMode.setConnectionState('balance_error', msg);
+      exchangeEvents.log('connect', selectedEx.id, `Unexpected error: ${msg}`, { level: 'error' });
       toast({
         title:       'Connection error',
-        description: `${msg} — switching to Demo mode for safety.`,
+        description: `${msg} You are still in ${mode === 'testnet' ? 'Testnet' : 'Real'} mode — review Diagnostics tab and try again.`,
         variant:     'destructive',
       });
-      setMode('demo');
-      exMode.update({ mode: 'demo', apiValidated: false });
     } finally {
       setConnecting(false);
       setValidating(false);
@@ -336,15 +542,114 @@ export default function ExchangePage() {
     setLivePermissions(null);
     setLatency(null);
     setCredentials(null);
+    setApiKey(''); setSecretKey(''); setPassphrase('');
+    credentialStore.clear(selectedEx.id);
     exMode.disconnect();
+    exchangeEvents.log('disconnect', selectedEx.id, 'User disconnected');
     toast({ title: 'Disconnected', description: `${selectedEx.name} connection terminated.` });
   };
 
+  // ── Retry connect+balance after a classified failure ─────────────────────
+  // Used by the persistent inline error card. For network / rate-limit /
+  // balance errors the saved creds are still in the session store, so we
+  // can simply re-run the full validate+balance flow. For auth/permission
+  // failures the creds were already cleared, so the card surfaces a
+  // "Re-enter keys" shortcut instead and this function jumps to that tab.
+  //
+  // `handleConnect` closes over a lot of local state (apiKey, mode, etc.)
+  // and is re-created every render. To avoid stale-closure bugs without
+  // re-creating retryConnection on every render, mirror the latest
+  // handleConnect into a ref and call through it.
+  const handleConnectRef = useRef(handleConnect);
+  useEffect(() => { handleConnectRef.current = handleConnect; });
+  // Mirror the latest refreshLiveData + connected flag into refs so the
+  // stable `retryConnection` callback can route an auto-retry to the
+  // lighter refresh path (when the user is already connected and only a
+  // refresh fetch tripped) without being re-created on every render.
+  const refreshLiveDataRef = useRef(refreshLiveData);
+  useEffect(() => { refreshLiveDataRef.current = refreshLiveData; });
+  const isConnectedRef = useRef(isConnected);
+  useEffect(() => { isConnectedRef.current = isConnected; });
+  // Hard-guard so a manual click and an about-to-fire auto-retry timer can't
+  // both kick off `handleConnect` in the same tick. The first caller wins
+  // and the other becomes a no-op.
+  const retryInFlightRef = useRef(false);
+  // `auto` distinguishes a timer-driven retry from a manual click. Manual
+  // clicks always cancel any pending auto-retry first; timer-driven ones
+  // mark the one-shot flag so they cannot loop into a retry storm.
+  const retryConnection = useCallback(async (auto = false) => {
+    if (retryInFlightRef.current) return;
+    if (!credentialStore.has(selectedEx.id)) {
+      exMode.cancelAutoRetry();
+      setTab('connection');
+      if (!auto) toast({ title: 'Re-enter your API keys', description: `Provide a valid ${selectedEx.name} API key to retry.` });
+      return;
+    }
+    // Auto-retries that fire while the user is already connected can use
+    // the lighter refresh path — the connection is fine, only the latest
+    // balance/order fetch tripped. `refreshLiveData({auto:true})` already
+    // marks the one-shot consumed, so don't double-mark here.
+    const useRefresh = auto && isConnectedRef.current;
+    if (auto && !useRefresh) {
+      exMode.markAutoRetryConsumed();
+      exchangeEvents.log('connect', selectedEx.id, 'Auto-retry firing after transient connection error');
+    } else if (!auto) {
+      exMode.cancelAutoRetry();
+    }
+    retryInFlightRef.current = true;
+    try {
+      if (useRefresh) {
+        await refreshLiveDataRef.current({ auto: true });
+      } else {
+        await handleConnectRef.current();
+      }
+    } finally {
+      retryInFlightRef.current = false;
+    }
+  }, [selectedEx.id, selectedEx.name, toast]);
+
+  // ── Auto-retry timer ─────────────────────────────────────────────────────
+  // The connection state machine sets `autoRetryAt` when entering a
+  // transient error state. We schedule a single timer to fire the silent
+  // re-validation. Effect cleanup cancels the timer if the user disconnects,
+  // switches mode/exchange, clicks Retry manually, or another error path
+  // clears the schedule — preventing duplicate or stale retries.
+  const autoRetryAt = modeState.autoRetryAt;
+  useEffect(() => {
+    if (!autoRetryAt) return;
+    if (mode !== 'real' && mode !== 'testnet') return;
+    const delay = Math.max(0, autoRetryAt - Date.now());
+    const id = setTimeout(() => { void retryConnection(true); }, delay);
+    return () => clearTimeout(id);
+  }, [autoRetryAt, mode, retryConnection]);
+
+  // Tick once per second so the countdown re-renders without forcing the
+  // whole singleton to publish ticks. The effect is active only while a
+  // retry is pending.
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    if (!autoRetryAt) return;
+    const id = setInterval(() => setNowTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [autoRetryAt]);
+
   const permCheck = checkTradingPermission(['read', 'trade'], mode);
-  const totalUsdValue = balances.reduce((s, b) => s + b.usdtValue, 0);
+  // Defensive sums — guard every numeric input against NaN / undefined so a
+  // single malformed balance row can never crash the page.
+  const totalUsdValue = balances.reduce((s, b) => s + num(b?.usdtValue), 0);
   // Include all stablecoins, not just USDT
   const STABLES       = new Set(['USDT', 'USD', 'USDC', 'BUSD', 'TUSD', 'USDP', 'DAI', 'FDUSD', 'USDD']);
-  const liveTotalUSD  = liveBalances.filter(b => STABLES.has(b.asset)).reduce((s, b) => s + b.total, 0);
+  // Sum every asset's approximate USDT value (adapter-populated). Rows with
+  // an undefined `usdtValue` (no USDT pair available) are explicitly excluded
+  // from the total — counting them as 0 would silently understate the
+  // portfolio when an adapter can't price an asset, so we instead surface
+  // how many rows actually contributed to the headline number.
+  const livePricedRows = liveBalances.filter(b => typeof b?.usdtValue === 'number');
+  const liveTotalUSD  = livePricedRows.reduce((s, b) => s + num(b?.usdtValue), 0);
+  const liveUnpricedCount = liveBalances.length - livePricedRows.length;
+  const liveStableTotal = liveBalances
+    .filter(b => b && STABLES.has(b.asset))
+    .reduce((s, b) => s + num(b?.total), 0);
   const ac = selectedEx.accent;
   const isLive = mode === 'real';  // true only in real mode — real exchange data & orders
 
@@ -407,6 +712,81 @@ export default function ExchangePage() {
         </div>
       )}
 
+      {/* Persistent inline error card — visible across tabs while the connection
+          is in a classified error state. Auto-dismisses on success because the
+          connection state will leave CONNECTION_ERROR_STATES. */}
+      {(mode === 'real' || mode === 'testnet') && CONNECTION_ERROR_STATES.has(modeState.connectionState) && (() => {
+        const info = friendlyConnectionError(modeState.connectionState, selectedEx.name, modeState.connectionError);
+        const retrySecs = modeState.autoRetryAt
+          ? Math.max(0, Math.ceil((modeState.autoRetryAt - Date.now()) / 1000))
+          : null;
+        const retryReasonLabel =
+          modeState.autoRetryReason === 'rate_limit' ? 'rate-limit' : 'network';
+        return (
+          <div
+            role="alert"
+            className="mb-4 rounded-xl border border-red-500/40 bg-red-500/5 px-4 py-3"
+            data-testid="connection-error-card"
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-8 h-8 rounded-lg border border-red-500/40 bg-red-500/10 flex items-center justify-center flex-shrink-0">
+                <AlertTriangle size={15} className="text-red-400" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="text-sm font-semibold text-red-300">{info.title}</p>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-red-500/30 text-red-400 font-mono">
+                    {modeState.connectionState}
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-300 mt-1 break-words">{info.body}</p>
+                {retrySecs !== null && (
+                  <p
+                    className="text-[11px] text-amber-300 mt-1.5 flex items-center gap-1.5"
+                    data-testid="connection-error-auto-retry-countdown"
+                  >
+                    <RefreshCw size={10} className="animate-spin" />
+                    {retrySecs > 0
+                      ? `Retrying in ${retrySecs}s after ${retryReasonLabel} blip…`
+                      : `Retrying now after ${retryReasonLabel} blip…`}
+                  </p>
+                )}
+                <div className="flex flex-wrap items-center gap-2 mt-3">
+                  <Button
+                    size="sm" variant="outline"
+                    onClick={() => { void retryConnection(false); }} disabled={connecting || validating || refreshing}
+                    className="text-xs h-7 border-red-500/40 text-red-300 hover:bg-red-500/10"
+                    data-testid="connection-error-retry"
+                  >
+                    <RefreshCw size={11} className={`mr-1.5 ${(connecting || validating || refreshing) ? 'animate-spin' : ''}`} />
+                    Retry now
+                  </Button>
+                  {info.needsKeys && (
+                    <Button
+                      size="sm" variant="outline"
+                      onClick={() => setTab('connection')}
+                      className="text-xs h-7 border-amber-500/40 text-amber-300 hover:bg-amber-500/10"
+                      data-testid="connection-error-reenter-keys"
+                    >
+                      <Lock size={11} className="mr-1.5" />
+                      Re-enter keys
+                    </Button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setTab('diagnostics')}
+                    className="text-xs text-zinc-400 hover:text-zinc-200 underline underline-offset-2 ml-1"
+                    data-testid="connection-error-open-diagnostics"
+                  >
+                    Open diagnostics
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Tabs */}
       <div className="flex items-center gap-2 mb-6 border-b border-zinc-800/60 pb-3 overflow-x-auto">
         {TABS.map(t => {
@@ -425,7 +805,7 @@ export default function ExchangePage() {
       </div>
 
       {/* ── Exchange Selector ── */}
-      {tab === 'exchanges' && (
+      {tab === 'exchanges' && (<ErrorBoundary label="exchange:tab:exchanges">
         <div className="space-y-4">
           <div>
             <h2 className="text-sm font-semibold text-zinc-300 mb-1">Select Exchange</h2>
@@ -474,10 +854,10 @@ export default function ExchangePage() {
             })}
           </div>
         </div>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Connection ── */}
-      {tab === 'connection' && (
+      {tab === 'connection' && (<ErrorBoundary label="exchange:tab:connection">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Exchange info */}
           <Card className={`border ${ACCENT_BORDER[ac]}`}>
@@ -593,7 +973,7 @@ export default function ExchangePage() {
                     )}
                     <div className="flex items-start gap-2 p-2.5 rounded-lg bg-amber-500/5 border border-amber-500/20 text-[10px] text-amber-400">
                       <Lock size={11} className="flex-shrink-0 mt-0.5" />
-                      Keys are stored in browser localStorage only. Never share your secret key.
+                      Keys are kept in memory for this session only — never written to disk. Only a masked hint (e.g. abcd***wxyz) is persisted so the UI can show "previously connected" after a restart. Never share your secret key.
                     </div>
                   </>
                 )}
@@ -613,27 +993,108 @@ export default function ExchangePage() {
             </Card>
           </div>
         </div>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Balances ── */}
-      {tab === 'balances' && (
+      {tab === 'balances' && (<ErrorBoundary label="exchange:tab:balances">
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
               <div className="text-2xl font-bold font-mono">${fmt(isLive && liveBalances.length > 0 ? liveTotalUSD : totalUsdValue)}</div>
               <div className="text-xs text-zinc-500">
-                {isLive && liveBalances.length > 0 ? `Stablecoin balance · ${liveBalances.length} asset${liveBalances.length !== 1 ? 's' : ''} total` : 'Total portfolio value (USDT)'} · {selectedEx.name}
+                {isLive && liveBalances.length > 0
+                  ? `Total portfolio value (USDT) · ${livePricedRows.length}/${liveBalances.length} asset${liveBalances.length !== 1 ? 's' : ''} priced${liveUnpricedCount > 0 ? ` · ${liveUnpricedCount} excluded (no USDT pair)` : ''} · stables ${fmt(liveStableTotal)}`
+                  : 'Total portfolio value (USDT)'} · {selectedEx.name}
               </div>
             </div>
-            <Button variant="outline" size="sm" onClick={isLive ? refreshLiveData : loadData} disabled={refreshing} className="flex items-center gap-1.5 text-xs">
+            <Button variant="outline" size="sm" onClick={() => isLive ? refreshLiveData() : loadData()} disabled={refreshing} className="flex items-center gap-1.5 text-xs">
               <RefreshCw size={12} className={refreshing ? 'animate-spin' : ''} /> Refresh
             </Button>
           </div>
-          {isLive && balError && (
-            <div className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2.5 text-xs text-red-400">
-              <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
-              <span>{balError}</span>
-            </div>
+          {isLive && balError && modeState.connectionState !== 'balance_empty' && (
+            modeState.autoRetryAt ? (
+              <div
+                className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs text-amber-300"
+                data-testid="balances-auto-retry-hint"
+                role="status"
+              >
+                <RefreshCw size={13} className="mt-0.5 flex-shrink-0 animate-spin" />
+                <span>
+                  {(() => {
+                    const secs = Math.max(0, Math.ceil((modeState.autoRetryAt - Date.now()) / 1000));
+                    const reason = modeState.autoRetryReason === 'rate_limit' ? 'rate-limit' : 'network';
+                    return secs > 0
+                      ? `Retrying in ${secs}s after ${reason} blip…`
+                      : `Retrying now after ${reason} blip…`;
+                  })()}
+                </span>
+              </div>
+            ) : (
+              <div className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2.5 text-xs text-red-400">
+                <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
+                <span>{balError}</span>
+              </div>
+            )
+          )}
+          {isLive && modeState.connectionState === 'balance_empty' && liveBalances.length === 0 && (
+            <Card className="border-zinc-800/60 bg-zinc-900/40">
+              <CardContent className="p-5">
+                <div className="flex items-start gap-3">
+                  <div className="flex-shrink-0 mt-0.5 rounded-full bg-zinc-800/80 p-2">
+                    <Wallet size={18} className="text-zinc-300" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold text-zinc-100">
+                      Connected to {selectedEx.name} — no assets found
+                    </div>
+                    <div className="mt-1 text-xs text-zinc-400 leading-relaxed">
+                      The connection and your API key are working. The account just looks empty right now. The most common reasons:
+                    </div>
+                    <ul className="mt-3 space-y-2 text-xs text-zinc-300">
+                      <li className="flex items-start gap-2">
+                        <span className="mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-zinc-500" />
+                        <span><span className="font-medium text-zinc-100">No funds yet.</span> Deposit or transfer assets into this account to start trading.</span>
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-zinc-500" />
+                        <span><span className="font-medium text-zinc-100">Wrong account type.</span> Funds in Futures, Margin, Earn or Funding wallets won&apos;t show up under Spot — move them to the matching wallet, or pick a key tied to the right account.</span>
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-zinc-500" />
+                        <span><span className="font-medium text-zinc-100">Read-only key on a different sub-account.</span> Sub-account API keys only see that sub-account&apos;s balances. Use a master-account key, or a key issued by the sub-account that actually holds the funds.</span>
+                      </li>
+                    </ul>
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1.5"
+                        onClick={() => window.open(`https://${selectedEx.website}`, '_blank', 'noopener,noreferrer')}
+                      >
+                        <ExternalLink size={11} /> Fund on {selectedEx.shortName}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1.5"
+                        onClick={() => window.open(`https://www.google.com/search?q=${encodeURIComponent(`${selectedEx.name} transfer between spot futures wallet`)}`, '_blank', 'noopener,noreferrer')}
+                      >
+                        <ArrowLeftRight size={11} /> Switch account type
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1.5"
+                        onClick={() => refreshLiveData()}
+                        disabled={refreshing}
+                      >
+                        <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} /> Retry
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
           )}
           {isLive && liveBalances.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -646,6 +1107,9 @@ export default function ExchangePage() {
                     </div>
                     <div className="font-mono font-bold text-xl">{fmt(b.available, 6)}</div>
                     <div className="text-xs text-zinc-500 mt-1">Total: {fmt(b.total, 6)}</div>
+                    <div className="text-xs text-zinc-500 mt-0.5">
+                      {typeof b.usdtValue === 'number' ? `≈ $${fmt(b.usdtValue)} USDT` : '≈ — USDT'}
+                    </div>
                     {b.hold > 0 && <div className="text-[10px] text-amber-400 mt-0.5">Locked: {fmt(b.hold, 6)}</div>}
                   </CardContent>
                 </Card>
@@ -669,16 +1133,16 @@ export default function ExchangePage() {
             </div>
           )}
         </div>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Orders ── */}
-      {tab === 'orders' && (
+      {tab === 'orders' && (<ErrorBoundary label="exchange:tab:orders">
         <Card className="border-zinc-800/60">
           <CardHeader className="py-3 px-4 flex items-center justify-between">
             <CardTitle className="text-sm">
               {isLive ? 'Live Orders' : 'Recent Orders'} — {selectedEx.name}
             </CardTitle>
-            <Button variant="outline" size="sm" onClick={isLive ? refreshLiveData : loadData} disabled={refreshing} className="flex items-center gap-1.5 text-xs h-7">
+            <Button variant="outline" size="sm" onClick={() => isLive ? refreshLiveData() : loadData()} disabled={refreshing} className="flex items-center gap-1.5 text-xs h-7">
               <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} /> Refresh
             </Button>
           </CardHeader>
@@ -754,10 +1218,10 @@ export default function ExchangePage() {
             )}
           </CardContent>
         </Card>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Permissions ── */}
-      {tab === 'permissions' && (
+      {tab === 'permissions' && (<ErrorBoundary label="exchange:tab:permissions">
         <div className="space-y-4">
           <Card className="border-zinc-800/60">
             <CardHeader className="py-3 px-4"><CardTitle className="text-sm">API Permissions & Security — {selectedEx.name}</CardTitle></CardHeader>
@@ -806,11 +1270,49 @@ export default function ExchangePage() {
             </CardContent>
           </Card>
         </div>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Live Status (NEW) ── */}
-      {tab === 'livestatus' && (
+      {tab === 'livestatus' && (<ErrorBoundary label="exchange:tab:livestatus">
         <div className="space-y-4">
+          {isLive && modeState.connectionState === 'balance_empty' && liveBalances.length === 0 && (
+            <Card className="border-zinc-800/60 bg-zinc-900/40">
+              <CardContent className="p-4">
+                <div className="flex items-start gap-3">
+                  <div className="flex-shrink-0 mt-0.5 rounded-full bg-zinc-800/80 p-2">
+                    <Wallet size={16} className="text-zinc-300" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold text-zinc-100">
+                      Connected to {selectedEx.name} — no assets found
+                    </div>
+                    <div className="mt-1 text-xs text-zinc-400 leading-relaxed">
+                      The connection and your API key are working — the account just looks empty. Common causes: no funds yet, funds in a different wallet (Futures, Margin, Earn, Funding), or a sub-account key that can&apos;t see this balance.
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1.5"
+                        onClick={() => setTab('balances')}
+                      >
+                        See Balances tab for details
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1.5"
+                        onClick={() => refreshLiveData()}
+                        disabled={refreshing}
+                      >
+                        <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} /> Retry
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
           {/* Readiness summary */}
           <Card className="border-zinc-800/60">
             <CardHeader className="py-3 px-4"><CardTitle className="text-sm flex items-center gap-2"><Activity size={13} /> Execution Readiness — {selectedEx.name}</CardTitle></CardHeader>
@@ -845,20 +1347,31 @@ export default function ExchangePage() {
                   <p className={`text-sm font-semibold ${modeState.armed ? 'text-red-400' : 'text-zinc-400'}`}>
                     {modeState.armed ? '🔴 ARMED — Live orders will be placed' : '⚪ DISARMED — No real orders will be placed'}
                   </p>
-                  <p className="text-[10px] text-zinc-600 mt-0.5">Requires: Live mode + validated API + trade permission</p>
+                  <p className="text-[10px] text-zinc-600 mt-0.5">Requires: Real mode + network up + validated API + balance fetched + trade permission</p>
                 </div>
                 <Switch
                   checked={modeState.armed}
+                  disabled={!exMode.canArm() && !modeState.armed}
                   onCheckedChange={checked => {
-                    if (checked && !modeState.apiValidated) {
-                      toast({ title: 'Cannot arm', description: 'Validate your API key first.', variant: 'destructive' });
-                      return;
+                    if (!checked) { exMode.disarm(); return; }
+                    if (modeState.mode !== 'real') {
+                      toast({ title: 'Cannot arm', description: 'Switch to Real mode first.', variant: 'destructive' }); return;
                     }
-                    if (checked && !modeState.permissions.trade) {
-                      toast({ title: 'Cannot arm', description: 'API key does not have trade permission.', variant: 'destructive' });
-                      return;
+                    if (!modeState.networkUp) {
+                      toast({ title: 'Cannot arm', description: 'Connection is not healthy. Reconnect first.', variant: 'destructive' }); return;
                     }
-                    if (checked) exMode.arm(); else exMode.disarm();
+                    if (!modeState.apiValidated) {
+                      toast({ title: 'Cannot arm', description: 'Validate your API key first.', variant: 'destructive' }); return;
+                    }
+                    if (!modeState.balanceFetched) {
+                      toast({ title: 'Cannot arm', description: 'Fetch your live balance first.', variant: 'destructive' }); return;
+                    }
+                    if (!modeState.permissions.trade) {
+                      toast({ title: 'Cannot arm', description: 'API key does not have trade permission.', variant: 'destructive' }); return;
+                    }
+                    if (!exMode.arm()) {
+                      toast({ title: 'Cannot arm', description: 'Readiness check failed. Open the Live Status tab to see what\u2019s missing.', variant: 'destructive' });
+                    }
                   }}
                   className={modeState.armed ? 'data-[state=checked]:bg-red-500' : ''}
                 />
@@ -892,10 +1405,10 @@ export default function ExchangePage() {
             </CardContent>
           </Card>
         </div>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Trade Config (NEW) ── */}
-      {tab === 'tradeconfig' && (
+      {tab === 'tradeconfig' && (<ErrorBoundary label="exchange:tab:tradeconfig">
         <div className="space-y-4">
           <Card className="border-zinc-800/60">
             <CardHeader className="py-3 px-4">
@@ -967,10 +1480,10 @@ export default function ExchangePage() {
             Reset to defaults
           </Button>
         </div>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Execution Log (NEW) ── */}
-      {tab === 'execlog' && (
+      {tab === 'execlog' && (<ErrorBoundary label="exchange:tab:execlog">
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
@@ -1055,7 +1568,84 @@ export default function ExchangePage() {
             </CardContent>
           </Card>
         </div>
-      )}
+      </ErrorBoundary>)}
+
+      {/* ── Diagnostics ── */}
+      {tab === 'diagnostics' && (<ErrorBoundary label="exchange:tab:diagnostics">
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-zinc-200">Connection Diagnostics</h2>
+              <p className="text-[11px] text-zinc-500 mt-0.5">
+                Connection state: <span className="text-zinc-300 font-mono">{modeState.connectionState}</span>
+                {modeState.connectionError ? <> · <span className="text-red-400">{modeState.connectionError}</span></> : null}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline" size="sm"
+                onClick={async () => {
+                  try { await navigator.clipboard.writeText(exchangeEvents.toText()); toast({ title: 'Diagnostics copied to clipboard' }); }
+                  catch { toast({ title: 'Clipboard unavailable', variant: 'destructive' }); }
+                }}
+                className="text-xs h-7"
+              >Copy log</Button>
+              <Button
+                variant="outline" size="sm"
+                onClick={() => { exchangeEvents.clear(); }}
+                className="text-xs h-7 border-zinc-700 text-zinc-500"
+              >Clear</Button>
+            </div>
+          </div>
+
+          <Card className="border-zinc-800/60">
+            <CardContent className="p-0">
+              {diagEvents.length === 0 ? (
+                <div className="text-center py-12 text-zinc-500 text-sm">No exchange events recorded yet.</div>
+              ) : (
+                <div className="overflow-x-auto max-h-[60vh]">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-zinc-950">
+                      <tr className="border-b border-zinc-800 text-zinc-500">
+                        {['Time', 'Stage', 'Exchange', 'Level', 'Message'].map(h => (
+                          <th key={h} className="text-left px-3 py-2 font-medium whitespace-nowrap">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...diagEvents].reverse().map(ev => (
+                        <tr key={ev.id} className="border-b border-zinc-800/40 hover:bg-zinc-900/40 align-top">
+                          <td className="px-3 py-2 text-zinc-500 whitespace-nowrap font-mono text-[10px]">
+                            {new Date(ev.ts).toLocaleTimeString()}
+                          </td>
+                          <td className="px-3 py-2 text-zinc-300 font-mono text-[10px] whitespace-nowrap">{ev.stage}</td>
+                          <td className="px-3 py-2 text-zinc-400">{ev.exchange || '—'}</td>
+                          <td className="px-3 py-2">
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
+                              ev.level === 'error' ? 'border-red-500/40 text-red-400 bg-red-500/5' :
+                              ev.level === 'warn'  ? 'border-amber-500/40 text-amber-400 bg-amber-500/5' :
+                                                     'border-zinc-700 text-zinc-400 bg-zinc-800/30'}`}>
+                              {ev.level}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-zinc-300">
+                            <div className="break-words">{ev.message}</div>
+                            {ev.data && Object.keys(ev.data).length > 0 && (
+                              <div className="text-[10px] text-zinc-600 mt-0.5 font-mono break-all">
+                                {JSON.stringify(ev.data)}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </ErrorBoundary>)}
     </div>
   );
 }
