@@ -3,11 +3,33 @@ on:
   push:
     branches: [main, master]
     tags: ['v*']
+  pull_request:
   workflow_dispatch:
 permissions:
   contents: write
 jobs:
+  test:
+    # Fast routing/unit smoke checks. Runs on every push & PR so we catch
+    # regressions like the blank-window Electron router bug (task #31)
+    # without waiting for the Windows packaging job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - run: pnpm install --frozen-lockfile
+      - name: Build Electron bundle (needed by routing smoke test)
+        working-directory: artifacts/signalx-arena
+        run: pnpm run build:electron
+        env: { NODE_ENV: production }
+      - name: Run unit & routing smoke tests
+        run: pnpm -r --if-present run test
   build-windows:
+    needs: test
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
