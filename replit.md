@@ -148,8 +148,11 @@ See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and pa
 - `electron-builder.yml` outputs to `dist-electron/` (matches the upload-artifact path). Electron entry point is in `package.json`'s `main` field, NOT in this YAML.
 - `pnpm-workspace.yaml` keeps all `win32-x64` native binaries enabled (rollup/lightningcss/oxide/esbuild) — Linux installs auto-skip them via os/cpu fields. `minimumReleaseAge: 1440` is a 1-day supply-chain defense — DO NOT DISABLE.
 - **`vite-plugin-pwa` is intentionally OFF in `vite.electron.config.ts`** — Service Worker registration throws under `file://` and produces a blank window. PWA stays ON in `vite.config.ts` (web build).
+- **Hash routing in Electron build only** (`src/App.tsx`): under `file://` the renderer's `pathname` is the absolute path of `index.html`, which never matches `/login`/`/`/etc., so wouter renders nothing and the window appears blank. The Electron build (detected via `VITE_IS_ELECTRON === "true"` or `protocol === "file:"`) wraps routes with `WouterRouter hook={useHashLocation} base=""`. The web build keeps its existing `BASE_URL`-driven path-based routing untouched.
+- **NoRouteFallback diagnostic**: when `<Switch>` falls through under Electron, a visible red panel renders showing `href`/`pathname`/`hash`/wouter location — prevents future "blank window with no error" regressions.
 - **Renderer error overlay**: `src/main.tsx` wraps `createRoot()` and adds global `onerror`/`unhandledrejection` listeners that paint a red panel into `#root`. A "blank Electron window" always means a renderer crash; the overlay shows the error.
 - **Debug DevTools**: launch the EXE with `SIGNALX_DEBUG=1` env var or `--debug` CLI arg to auto-open detached DevTools.
+- **Packaged-asset CI check**: `Verify packaged frontend assets` step in `.github/workflows/main.yml` asserts `resources/frontend/index.html` + `assets/index-*.js` exist in the unpacked installer and that no service-worker registration leaked back in. Build fails before upload if any check fails.
 - `artifacts/api-server/vitest.config.ts` excludes `src/exchanges/**` from coverage (adapter tests deferred — task #22). Threshold 60% passes on routes (100%) + lib (94%).
 
 ### Critical notes (localStorage keys)
