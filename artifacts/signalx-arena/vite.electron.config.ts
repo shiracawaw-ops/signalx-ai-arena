@@ -1,14 +1,16 @@
 // ─── Vite config for Electron desktop build ──────────────────────────────────
-// Produces a self-contained static bundle in dist-electron/frontend/
+// Produces a self-contained static bundle in dist-electron/
 // suitable for loading via file:// protocol inside an Electron BrowserWindow.
-// Run with:
-//   PORT=1 BASE_PATH="./" pnpm --filter @workspace/signalx-arena build:electron
+//
+// IMPORTANT: vite-plugin-pwa is intentionally NOT included here.
+// Service Worker registration throws under the file:// protocol (insecure
+// context), which aborts the entry module and produces a blank window.
+// The PWA stays enabled in the regular web build (vite.config.ts).
 
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
-import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
   // Relative base so all assets work with file:// protocol
@@ -17,24 +19,6 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
-    VitePWA({
-      registerType: "autoUpdate",
-      base: "./",
-      includeAssets: ["favicon.svg"],
-      manifest: {
-        name: "SignalX AI Arena",
-        short_name: "SignalX",
-        description: "AI-powered virtual trading simulator",
-        theme_color: "#09090b",
-        background_color: "#09090b",
-        display: "standalone",
-      },
-      workbox: {
-        globPatterns: ["**/*.{js,css,html,ico,png,svg,woff,woff2}"],
-        navigateFallback: null,
-      },
-      devOptions: { enabled: false },
-    }),
   ],
 
   // Inject the Electron flag so api-client can detect runtime env

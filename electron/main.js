@@ -9,6 +9,9 @@ const http = require('http');
 
 // ── Paths ──────────────────────────────────────────────────────────────────────
 const IS_PACKAGED = app.isPackaged;
+const DEBUG_MODE  =
+  process.env.SIGNALX_DEBUG === '1' ||
+  process.argv.includes('--debug');
 
 function resourcePath(...parts) {
   return IS_PACKAGED
@@ -31,11 +34,14 @@ const API_PORT = 18080;
 // ── API server via utilityProcess ─────────────────────────────────────────────
 // utilityProcess.fork() runs a Node.js script inside Electron's process model
 // without requiring a separate node.exe binary — safe in packaged apps.
-let apiProc = null;
+let apiProc       = null;
+let apiStartError = null;
 
 function startApiServer() {
   if (!fs.existsSync(API_ENTRY)) {
-    console.warn('[electron] API entry not found:', API_ENTRY);
+    const msg = `API server bundle missing at: ${API_ENTRY}`;
+    console.error('[electron]', msg);
+    apiStartError = msg;
     return;
   }
 
@@ -75,7 +81,7 @@ function waitForApi(retries, callback) {
 // ── BrowserWindow ─────────────────────────────────────────────────────────────
 let mainWindow = null;
 
-function createWindow() {
+function createWindow(startupError) {
   const iconPath = path.join(__dirname, 'icon.png');
 
   mainWindow = new BrowserWindow({
@@ -104,9 +110,29 @@ function createWindow() {
     console.warn('[electron] index.html not found at', indexHtml, '— falling back to dev server');
   }
 
+  // Surface any startup error inside the window itself (not just in DevTools).
+  if (startupError) {
+    mainWindow.webContents.once('did-finish-load', () => {
+      const safe = String(startupError).replace(/`/g, "\\`").replace(/\$/g, '\\$');
+      mainWindow.webContents.executeJavaScript(`
+        (function() {
+          var box = document.createElement('div');
+          box.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;'
+            + 'background:#7f1d1d;color:#fee2e2;padding:10px 16px;'
+            + 'font:13px ui-monospace,Menlo,monospace;border-bottom:1px solid #ef4444;';
+          box.textContent = 'SignalX startup warning: ' + \`${safe}\`;
+          document.body.appendChild(box);
+        })();
+      `).catch(() => { /* swallow — best-effort overlay */ });
+    });
+  }
+
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
     mainWindow.focus();
+    if (DEBUG_MODE) {
+      mainWindow.webContents.openDevTools({ mode: 'detach' });
+    }
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -121,18 +147,31 @@ function createWindow() {
 app.whenReady().then(() => {
   startApiServer();
 
+  // If the API bundle is missing, don't waste 20 seconds polling — open the
+  // window immediately with an in-window warning banner.
+  if (apiStartError) {
+    dialog.showErrorBox(
+      'SignalX — Startup Warning',
+      `The local API server bundle is missing.\n\n${apiStartError}\n\n` +
+      'The app will open in demo mode — real trading will be unavailable.',
+    );
+    createWindow(apiStartError);
+    return;
+  }
+
   waitForApi(50, err => {
     if (err) {
-      dialog.showErrorBox(
-        'SignalX — Startup Error',
-        'The local API server failed to start.\n\nThe app will open in demo mode — real trading will be unavailable.',
-      );
+      const msg = 'The local API server failed to start within the expected time. ' +
+                  'The app will open in demo mode — real trading will be unavailable.';
+      dialog.showErrorBox('SignalX — Startup Error', msg);
+      createWindow(msg);
+      return;
     }
-    createWindow();
+    createWindow(null);
   });
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(null);
   });
 });
 
