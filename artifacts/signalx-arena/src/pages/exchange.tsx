@@ -280,8 +280,21 @@ export default function ExchangePage() {
   }, [adapter]);
 
   // ── Live data refresh ─────────────────────────────────────────────────────
-  const refreshLiveData = useCallback(async () => {
+  // `opts.auto` distinguishes a timer-driven retry from a manual call.
+  // Manual calls always cancel any pending auto-retry first (so a click
+  // and a timer can't race); auto calls mark the one-shot flag so they
+  // can't loop into a retry storm. Accepts an options object (rather than
+  // a bare boolean) so onClick handlers that pass a SyntheticEvent are
+  // safely treated as manual.
+  const refreshLiveData = useCallback(async (opts?: { auto?: boolean }) => {
+    const isAuto = opts?.auto === true;
     if ((mode !== 'real' && mode !== 'testnet') || !apiKey || !secretKey) return;
+    if (isAuto) {
+      exMode.markAutoRetryConsumed();
+      exchangeEvents.log('fetch-balance', selectedEx.id, 'Auto-retry firing after transient refresh error');
+    } else {
+      exMode.cancelAutoRetry();
+    }
     setRefreshing(true);
     setBalError(null);
     setOrdError(null);
@@ -344,6 +357,14 @@ export default function ExchangePage() {
         const errMsg = ordRes.error ?? 'Order history fetch failed';
         setOrdError(errMsg);
         exchangeEvents.log('fetch-balance', selectedEx.id, `Order history failed: ${errMsg}`, { level: 'warn', data: { code: ordRes.code } });
+        // If the balance side succeeded (so the connection itself is still
+        // healthy) but the order fetch tripped on a transient blip, schedule
+        // the same one-shot auto-retry the connect/balance path uses.
+        if (balRes.ok && (ordRes.code === 'network' || ordRes.code === 'rate_limit')) {
+          const reason = ordRes.code === 'network' ? 'network' : 'rate_limit';
+          const ra = (ordRes as { retryAfterMs?: number }).retryAfterMs;
+          exMode.scheduleAutoRetry(reason, ra);
+        }
       }
     } catch (e) {
       const msg = (e as Error).message ?? 'Unexpected error';
@@ -534,6 +555,14 @@ export default function ExchangePage() {
   // handleConnect into a ref and call through it.
   const handleConnectRef = useRef(handleConnect);
   useEffect(() => { handleConnectRef.current = handleConnect; });
+  // Mirror the latest refreshLiveData + connected flag into refs so the
+  // stable `retryConnection` callback can route an auto-retry to the
+  // lighter refresh path (when the user is already connected and only a
+  // refresh fetch tripped) without being re-created on every render.
+  const refreshLiveDataRef = useRef(refreshLiveData);
+  useEffect(() => { refreshLiveDataRef.current = refreshLiveData; });
+  const isConnectedRef = useRef(isConnected);
+  useEffect(() => { isConnectedRef.current = isConnected; });
   // Hard-guard so a manual click and an about-to-fire auto-retry timer can't
   // both kick off `handleConnect` in the same tick. The first caller wins
   // and the other becomes a no-op.
@@ -549,15 +578,24 @@ export default function ExchangePage() {
       if (!auto) toast({ title: 'Re-enter your API keys', description: `Provide a valid ${selectedEx.name} API key to retry.` });
       return;
     }
-    if (auto) {
+    // Auto-retries that fire while the user is already connected can use
+    // the lighter refresh path — the connection is fine, only the latest
+    // balance/order fetch tripped. `refreshLiveData({auto:true})` already
+    // marks the one-shot consumed, so don't double-mark here.
+    const useRefresh = auto && isConnectedRef.current;
+    if (auto && !useRefresh) {
       exMode.markAutoRetryConsumed();
       exchangeEvents.log('connect', selectedEx.id, 'Auto-retry firing after transient connection error');
-    } else {
+    } else if (!auto) {
       exMode.cancelAutoRetry();
     }
     retryInFlightRef.current = true;
     try {
-      await handleConnectRef.current();
+      if (useRefresh) {
+        await refreshLiveDataRef.current({ auto: true });
+      } else {
+        await handleConnectRef.current();
+      }
     } finally {
       retryInFlightRef.current = false;
     }
@@ -952,15 +990,34 @@ export default function ExchangePage() {
                 {isLive && liveBalances.length > 0 ? `Stablecoin balance · ${liveBalances.length} asset${liveBalances.length !== 1 ? 's' : ''} total` : 'Total portfolio value (USDT)'} · {selectedEx.name}
               </div>
             </div>
-            <Button variant="outline" size="sm" onClick={isLive ? refreshLiveData : loadData} disabled={refreshing} className="flex items-center gap-1.5 text-xs">
+            <Button variant="outline" size="sm" onClick={() => isLive ? refreshLiveData() : loadData()} disabled={refreshing} className="flex items-center gap-1.5 text-xs">
               <RefreshCw size={12} className={refreshing ? 'animate-spin' : ''} /> Refresh
             </Button>
           </div>
           {isLive && balError && modeState.connectionState !== 'balance_empty' && (
-            <div className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2.5 text-xs text-red-400">
-              <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
-              <span>{balError}</span>
-            </div>
+            modeState.autoRetryAt ? (
+              <div
+                className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs text-amber-300"
+                data-testid="balances-auto-retry-hint"
+                role="status"
+              >
+                <RefreshCw size={13} className="mt-0.5 flex-shrink-0 animate-spin" />
+                <span>
+                  {(() => {
+                    const secs = Math.max(0, Math.ceil((modeState.autoRetryAt - Date.now()) / 1000));
+                    const reason = modeState.autoRetryReason === 'rate_limit' ? 'rate-limit' : 'network';
+                    return secs > 0
+                      ? `Retrying in ${secs}s after ${reason} blip…`
+                      : `Retrying now after ${reason} blip…`;
+                  })()}
+                </span>
+              </div>
+            ) : (
+              <div className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2.5 text-xs text-red-400">
+                <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
+                <span>{balError}</span>
+              </div>
+            )
           )}
           {isLive && modeState.connectionState === 'balance_empty' && liveBalances.length === 0 && (
             <Card className="border-zinc-800/60 bg-zinc-900/40">
@@ -1011,7 +1068,7 @@ export default function ExchangePage() {
                         variant="outline"
                         size="sm"
                         className="h-7 text-xs gap-1.5"
-                        onClick={refreshLiveData}
+                        onClick={() => refreshLiveData()}
                         disabled={refreshing}
                       >
                         <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} /> Retry
@@ -1065,7 +1122,7 @@ export default function ExchangePage() {
             <CardTitle className="text-sm">
               {isLive ? 'Live Orders' : 'Recent Orders'} — {selectedEx.name}
             </CardTitle>
-            <Button variant="outline" size="sm" onClick={isLive ? refreshLiveData : loadData} disabled={refreshing} className="flex items-center gap-1.5 text-xs h-7">
+            <Button variant="outline" size="sm" onClick={() => isLive ? refreshLiveData() : loadData()} disabled={refreshing} className="flex items-center gap-1.5 text-xs h-7">
               <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} /> Refresh
             </Button>
           </CardHeader>
@@ -1225,7 +1282,7 @@ export default function ExchangePage() {
                         variant="outline"
                         size="sm"
                         className="h-7 text-xs gap-1.5"
-                        onClick={refreshLiveData}
+                        onClick={() => refreshLiveData()}
                         disabled={refreshing}
                       >
                         <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} /> Retry

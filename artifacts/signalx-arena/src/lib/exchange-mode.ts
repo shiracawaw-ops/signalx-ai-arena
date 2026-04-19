@@ -186,6 +186,21 @@ class ExchangeModeManager {
     this.update({ autoRetryAt: undefined, autoRetryReason: undefined, autoRetryAttempted: true });
   }
 
+  // Schedule a one-shot auto-retry WITHOUT changing the connection state.
+  // Used by lightweight refresh paths (balance / order history refresh)
+  // when the connection itself is still considered healthy and we just
+  // want the same short-backoff retry the connect flow uses. No-op if a
+  // retry is already pending or the one-shot has been consumed for the
+  // current error cycle.
+  scheduleAutoRetry(reason: 'network' | 'rate_limit', retryAfterMs?: number) {
+    if (this.state.autoRetryAttempted) return;
+    if (this.state.autoRetryAt !== undefined) return;
+    const delay = reason === 'rate_limit'
+      ? Math.max(1_000, retryAfterMs ?? AUTO_RETRY_RATE_LIMIT_MS)
+      : AUTO_RETRY_NETWORK_MS;
+    this.update({ autoRetryAt: Date.now() + delay, autoRetryReason: reason });
+  }
+
   // Transition to a new connection state with an optional error message.
   // Does not touch `mode` — failures during connect must NOT silently flip
   // the user back to Demo. The user remains in Real / Testnet and the UI
