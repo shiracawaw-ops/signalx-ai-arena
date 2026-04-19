@@ -640,9 +640,13 @@ export default function ExchangePage() {
   // Include all stablecoins, not just USDT
   const STABLES       = new Set(['USDT', 'USD', 'USDC', 'BUSD', 'TUSD', 'USDP', 'DAI', 'FDUSD', 'USDD']);
   // Sum every asset's approximate USDT value (adapter-populated). Rows with
-  // an undefined `usdtValue` (no USDT pair available) contribute 0 — they are
-  // excluded rather than counting their `total` as $1 by mistake.
-  const liveTotalUSD  = liveBalances.reduce((s, b) => s + num(b?.usdtValue), 0);
+  // an undefined `usdtValue` (no USDT pair available) are explicitly excluded
+  // from the total — counting them as 0 would silently understate the
+  // portfolio when an adapter can't price an asset, so we instead surface
+  // how many rows actually contributed to the headline number.
+  const livePricedRows = liveBalances.filter(b => typeof b?.usdtValue === 'number');
+  const liveTotalUSD  = livePricedRows.reduce((s, b) => s + num(b?.usdtValue), 0);
+  const liveUnpricedCount = liveBalances.length - livePricedRows.length;
   const liveStableTotal = liveBalances
     .filter(b => b && STABLES.has(b.asset))
     .reduce((s, b) => s + num(b?.total), 0);
@@ -998,7 +1002,9 @@ export default function ExchangePage() {
             <div>
               <div className="text-2xl font-bold font-mono">${fmt(isLive && liveBalances.length > 0 ? liveTotalUSD : totalUsdValue)}</div>
               <div className="text-xs text-zinc-500">
-                {isLive && liveBalances.length > 0 ? `Approx. portfolio value (USDT) · ${liveBalances.length} asset${liveBalances.length !== 1 ? 's' : ''} · stables ${fmt(liveStableTotal)}` : 'Total portfolio value (USDT)'} · {selectedEx.name}
+                {isLive && liveBalances.length > 0
+                  ? `Total portfolio value (USDT) · ${livePricedRows.length}/${liveBalances.length} asset${liveBalances.length !== 1 ? 's' : ''} priced${liveUnpricedCount > 0 ? ` · ${liveUnpricedCount} excluded (no USDT pair)` : ''} · stables ${fmt(liveStableTotal)}`
+                  : 'Total portfolio value (USDT)'} · {selectedEx.name}
               </div>
             </div>
             <Button variant="outline" size="sm" onClick={() => isLive ? refreshLiveData() : loadData()} disabled={refreshing} className="flex items-center gap-1.5 text-xs">
