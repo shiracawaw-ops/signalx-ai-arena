@@ -83,7 +83,20 @@ router.post('/exchange/:exchange/validate', async (req, res) => {
   const adapter = getAdapter(ex)!;
   try {
     const result = await adapter.validateCredentials(creds);
-    res.json({ ok: result.success, ...result });
+    if (!result.success) {
+      // Adapter returned a non-throw failure — classify so the frontend
+      // gets a stable code (auth / permission / network / rate_limit / …)
+      // instead of a generic "balance_error".
+      const { code, message } = classifyError(result.error ?? 'Validation failed');
+      const httpStatus =
+        code === 'auth'         ? 401 :
+        code === 'permission'   ? 403 :
+        code === 'rate_limit'   ? 429 :
+        code === 'network'      ? 503 :
+        code === 'account_type' ? 422 : 401;
+      return res.status(httpStatus).json({ ok: false, exchange: ex, code, error: message, ...result });
+    }
+    res.json({ ok: true, exchange: ex, ...result });
   } catch (e) { serverError(res, ex, e); }
 });
 

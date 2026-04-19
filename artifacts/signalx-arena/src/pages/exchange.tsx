@@ -1,5 +1,6 @@
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { ErrorBoundary } from '@/components/error-boundary';
 import { motion } from 'framer-motion';
 import {
   getExchangeAdapter, checkTradingPermission, KNOWN_EXCHANGES,
@@ -117,15 +118,19 @@ function CfgRow({ label, children }: { label: string; children: React.ReactNode 
 
 export default function ExchangePage() {
   const [tab,         setTab]         = useState<typeof TABS[number]['key']>('exchanges');
-  const [selectedEx,  setSelectedEx]  = useState<ExchangeMeta>(KNOWN_EXCHANGES[0]);
+  // Initialize selected exchange from the engine singleton so navigating
+  // away and back to /exchange does NOT reset the user's active exchange.
+  const initialEx: ExchangeMeta =
+    KNOWN_EXCHANGES.find(e => e.id === exMode.get().exchange) ?? KNOWN_EXCHANGES[0];
+  const [selectedEx,  setSelectedEx]  = useState<ExchangeMeta>(initialEx);
   const [mode,        setMode]        = useState<'demo' | 'paper' | 'testnet' | 'real'>(() => exMode.get().mode);
   // Credentials live in the singleton credentialStore so they survive
   // page navigation. Local state mirrors them only for the controlled inputs.
-  const [apiKey,      setApiKey]      = useState(() => credentialStore.get(KNOWN_EXCHANGES[0].id)?.apiKey    ?? '');
-  const [secretKey,   setSecretKey]   = useState(() => credentialStore.get(KNOWN_EXCHANGES[0].id)?.secretKey ?? '');
-  const [passphrase,  setPassphrase]  = useState(() => credentialStore.get(KNOWN_EXCHANGES[0].id)?.passphrase ?? '');
+  const [apiKey,      setApiKey]      = useState(() => credentialStore.get(initialEx.id)?.apiKey    ?? '');
+  const [secretKey,   setSecretKey]   = useState(() => credentialStore.get(initialEx.id)?.secretKey ?? '');
+  const [passphrase,  setPassphrase]  = useState(() => credentialStore.get(initialEx.id)?.passphrase ?? '');
   const [showSecret,  setShowSecret]  = useState(false);
-  const [isConnected, setIsConnected] = useState(() => credentialStore.has(KNOWN_EXCHANGES[0].id));
+  const [isConnected, setIsConnected] = useState(() => credentialStore.has(initialEx.id));
   const [diagEvents,  setDiagEvents]  = useState<ExchangeEvent[]>(() => exchangeEvents.all());
   const [connecting,  setConnecting]  = useState(false);
   const [balances,    setBalances]    = useState<ExchangeBalance[]>([]);
@@ -159,13 +164,21 @@ export default function ExchangePage() {
   // ── Sync mode singleton when user changes mode selector ──────────────────
   // Must use setMode() — not update() — so armed/networkUp/balanceFetched/
   // apiValidated flags are cleared when the user switches modes.
+  // Skip first run: the local `mode` was initialized FROM the singleton, so
+  // calling setMode() on mount would needlessly clear connection flags and
+  // break "connection visibly alive after returning to /exchange".
+  const modeMounted = useRef(false);
   useEffect(() => {
+    if (!modeMounted.current) { modeMounted.current = true; return; }
+    if (exMode.get().mode === mode) return;
     exMode.setMode(mode);
     exchangeEvents.log('switch-mode', selectedEx.id, `User selected mode "${mode}"`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
   // ── Switch exchanges: keep saved creds, restore connection state from store
+  // Same first-mount guard so a passive page return doesn't wipe flags.
+  const exMounted = useRef(false);
   useEffect(() => {
     setBalances([]);
     setOrders([]);
@@ -175,8 +188,16 @@ export default function ExchangePage() {
     setLatency(null);
     setBalError(null);
     setOrdError(null);
-    exMode.setExchange(selectedEx.id);
     setConfig(tradeConfig.get(selectedEx.id));
+
+    // Only call setExchange() when the user actually changes exchanges —
+    // not on the very first mount (which would clear active connection
+    // flags carried over from a previous page visit).
+    if (!exMounted.current) {
+      exMounted.current = true;
+    } else if (exMode.get().exchange !== selectedEx.id) {
+      exMode.setExchange(selectedEx.id);
+    }
 
     // Rehydrate creds + connection flag from the singleton store.
     const saved = credentialStore.get(selectedEx.id);
@@ -526,7 +547,7 @@ export default function ExchangePage() {
       </div>
 
       {/* ── Exchange Selector ── */}
-      {tab === 'exchanges' && (
+      {tab === 'exchanges' && (<ErrorBoundary label="exchange:tab:exchanges">
         <div className="space-y-4">
           <div>
             <h2 className="text-sm font-semibold text-zinc-300 mb-1">Select Exchange</h2>
@@ -575,10 +596,10 @@ export default function ExchangePage() {
             })}
           </div>
         </div>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Connection ── */}
-      {tab === 'connection' && (
+      {tab === 'connection' && (<ErrorBoundary label="exchange:tab:connection">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Exchange info */}
           <Card className={`border ${ACCENT_BORDER[ac]}`}>
@@ -714,10 +735,10 @@ export default function ExchangePage() {
             </Card>
           </div>
         </div>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Balances ── */}
-      {tab === 'balances' && (
+      {tab === 'balances' && (<ErrorBoundary label="exchange:tab:balances">
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
@@ -770,10 +791,10 @@ export default function ExchangePage() {
             </div>
           )}
         </div>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Orders ── */}
-      {tab === 'orders' && (
+      {tab === 'orders' && (<ErrorBoundary label="exchange:tab:orders">
         <Card className="border-zinc-800/60">
           <CardHeader className="py-3 px-4 flex items-center justify-between">
             <CardTitle className="text-sm">
@@ -855,10 +876,10 @@ export default function ExchangePage() {
             )}
           </CardContent>
         </Card>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Permissions ── */}
-      {tab === 'permissions' && (
+      {tab === 'permissions' && (<ErrorBoundary label="exchange:tab:permissions">
         <div className="space-y-4">
           <Card className="border-zinc-800/60">
             <CardHeader className="py-3 px-4"><CardTitle className="text-sm">API Permissions & Security — {selectedEx.name}</CardTitle></CardHeader>
@@ -907,10 +928,10 @@ export default function ExchangePage() {
             </CardContent>
           </Card>
         </div>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Live Status (NEW) ── */}
-      {tab === 'livestatus' && (
+      {tab === 'livestatus' && (<ErrorBoundary label="exchange:tab:livestatus">
         <div className="space-y-4">
           {/* Readiness summary */}
           <Card className="border-zinc-800/60">
@@ -993,10 +1014,10 @@ export default function ExchangePage() {
             </CardContent>
           </Card>
         </div>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Trade Config (NEW) ── */}
-      {tab === 'tradeconfig' && (
+      {tab === 'tradeconfig' && (<ErrorBoundary label="exchange:tab:tradeconfig">
         <div className="space-y-4">
           <Card className="border-zinc-800/60">
             <CardHeader className="py-3 px-4">
@@ -1068,10 +1089,10 @@ export default function ExchangePage() {
             Reset to defaults
           </Button>
         </div>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Execution Log (NEW) ── */}
-      {tab === 'execlog' && (
+      {tab === 'execlog' && (<ErrorBoundary label="exchange:tab:execlog">
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
@@ -1156,10 +1177,10 @@ export default function ExchangePage() {
             </CardContent>
           </Card>
         </div>
-      )}
+      </ErrorBoundary>)}
 
       {/* ── Diagnostics ── */}
-      {tab === 'diagnostics' && (
+      {tab === 'diagnostics' && (<ErrorBoundary label="exchange:tab:diagnostics">
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
@@ -1233,7 +1254,7 @@ export default function ExchangePage() {
             </CardContent>
           </Card>
         </div>
-      )}
+      </ErrorBoundary>)}
     </div>
   );
 }
