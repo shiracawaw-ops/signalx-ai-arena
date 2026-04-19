@@ -6,19 +6,24 @@
 |------|---------|---------|
 | Node.js | 22+ | https://nodejs.org |
 | pnpm | 10+ | `npm install -g pnpm@latest` |
+| Git | any | https://git-scm.com |
 
-## Quick Start — Electron Desktop (3 commands)
+## Quick Start — Electron Desktop
 
-This is the primary way to run the app as a full desktop client:
+Clone, install, build, and launch — these are the only commands you need:
 
 ```bash
-# 1. Install all dependencies
+# 1. Clone the repository
+git clone https://github.com/shiracawaw-ops/signalx-ai-arena.git
+cd signalx-ai-arena
+
+# 2. Install all dependencies
 pnpm install
 
-# 2. Build the frontend (Electron mode) and the API server bundle
+# 3. Build the frontend (Electron mode) + embedded API server
 pnpm run build:electron
 
-# 3. Launch the Electron shell
+# 4. Launch the Electron shell
 npx electron .
 ```
 
