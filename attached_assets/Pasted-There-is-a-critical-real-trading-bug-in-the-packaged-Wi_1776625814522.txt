@@ -1,0 +1,90 @@
+There is a critical real-trading bug in the packaged Windows app.
+
+Current behavior:
+
+1. After entering API keys, clicking Balance causes the app UI to go black
+2. Real trading does not start
+3. If I switch to another option and come back, the API connection is lost
+4. The app falls back to Demo mode automatically
+
+This is not acceptable. Fix it as a production blocking issue.
+
+Diagnose and fix all of the following with priority:
+
+1. Balance fetch crash
+
+* Reproduce the issue when clicking Balance
+* Capture renderer console errors
+* Capture Electron main process logs
+* Capture API/backend logs
+* Find the exact exception causing the black screen
+
+2. Prevent renderer black screen
+
+* Add error boundaries / guarded rendering
+* Never let a failed balance request blank the whole UI
+* Show a visible error message instead of crashing
+
+3. Fix API connection persistence
+
+* API keys / exchange mode / connection state must persist correctly
+* Switching tabs/pages must not clear the API session
+* Do not reset connected state on simple UI navigation
+
+4. Fix incorrect fallback to Demo mode
+
+* Do not automatically revert to Demo just because balance fetch fails once
+* Keep REAL disabled if validation fails, but do not wipe the connection unless credentials are truly invalid
+* Separate:
+
+  * temporary fetch failure
+  * invalid API credentials
+  * network error
+  * permission error
+  * empty balance response
+
+5. Audit the Bybit balance logic
+
+* Verify correct endpoint and account type handling
+* Handle Unified / Spot / Contract account structures safely
+* Validate null/undefined/missing fields everywhere
+* Do not assume a fixed response shape
+
+6. Add strict connection state machine
+   Use explicit states such as:
+
+* disconnected
+* keys_saved
+* validating
+* connected
+* balance_loaded
+* validation_failed
+* network_error
+  Do not collapse all failures into “disconnect and demo mode”.
+
+7. Keep real trading gated correctly
+
+* REAL must remain disabled unless validation succeeds
+* but failed validation must not black-screen the app
+* and must not erase the saved connection unless credentials are actually invalid
+
+8. Add logs
+   Log all of these:
+
+* save keys
+* validate keys
+* connect exchange
+* fetch balance
+* parse response
+* switch mode
+* disconnect reason
+* fallback reason
+
+At the end give me only:
+
+1. exact root cause
+2. exact files changed
+3. whether Balance now works without black screen
+4. whether API connection now persists when switching tabs
+5. whether the app still wrongly falls back to Demo
+6. whether REAL TRADING is now actually usable
