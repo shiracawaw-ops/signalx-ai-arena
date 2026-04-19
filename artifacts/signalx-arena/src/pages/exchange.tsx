@@ -42,6 +42,52 @@ function codeToState(code: ExchangeErrorCode | undefined): ConnectionState {
   }
 }
 
+// Connection states that warrant the persistent inline error card.
+// `balance_empty` is a successful fetch (just no funds) so it is not an error.
+const CONNECTION_ERROR_STATES: ReadonlySet<ConnectionState> = new Set([
+  'network_error', 'invalid_credentials', 'permission_denied',
+  'rate_limited',  'balance_error',
+]);
+
+function friendlyConnectionError(
+  state: ConnectionState, exName: string, error?: string,
+): { title: string; body: string; needsKeys: boolean } {
+  switch (state) {
+    case 'network_error':
+      return {
+        title: `Can't reach ${exName}`,
+        body: error ?? 'We could not reach the exchange. Check your internet connection and try again.',
+        needsKeys: false,
+      };
+    case 'invalid_credentials':
+      return {
+        title: 'API credentials were rejected',
+        body: error ?? 'Your API key or secret was not accepted. Re-enter your keys to continue.',
+        needsKeys: true,
+      };
+    case 'permission_denied':
+      return {
+        title: 'API key is missing a required permission',
+        body: error ?? 'This key does not have the permissions needed to read balances or place trades. Re-enter a key with read + trade enabled.',
+        needsKeys: true,
+      };
+    case 'rate_limited':
+      return {
+        title: `${exName} rate limit hit`,
+        body: error ?? 'The exchange temporarily blocked further requests. Wait a moment, then retry.',
+        needsKeys: false,
+      };
+    case 'balance_error':
+      return {
+        title: 'Could not load your balance',
+        body: error ?? 'Something went wrong while fetching your account balance. Retry, or open Diagnostics for details.',
+        needsKeys: false,
+      };
+    default:
+      return { title: 'Connection issue', body: error ?? 'Something went wrong with this connection.', needsKeys: false };
+  }
+}
+
 // Numeric coercion that always returns a finite number — protects every
 // downstream `.toFixed`, sum, and division from a bad shape on the wire.
 function num(v: unknown): number {
@@ -473,6 +519,28 @@ export default function ExchangePage() {
     toast({ title: 'Disconnected', description: `${selectedEx.name} connection terminated.` });
   };
 
+  // ── Retry connect+balance after a classified failure ─────────────────────
+  // Used by the persistent inline error card. For network / rate-limit /
+  // balance errors the saved creds are still in the session store, so we
+  // can simply re-run the full validate+balance flow. For auth/permission
+  // failures the creds were already cleared, so the card surfaces a
+  // "Re-enter keys" shortcut instead and this function jumps to that tab.
+  //
+  // `handleConnect` closes over a lot of local state (apiKey, mode, etc.)
+  // and is re-created every render. To avoid stale-closure bugs without
+  // re-creating retryConnection on every render, mirror the latest
+  // handleConnect into a ref and call through it.
+  const handleConnectRef = useRef(handleConnect);
+  useEffect(() => { handleConnectRef.current = handleConnect; });
+  const retryConnection = useCallback(async () => {
+    if (!credentialStore.has(selectedEx.id)) {
+      setTab('connection');
+      toast({ title: 'Re-enter your API keys', description: `Provide a valid ${selectedEx.name} API key to retry.` });
+      return;
+    }
+    await handleConnectRef.current();
+  }, [selectedEx.id, selectedEx.name, toast]);
+
   const permCheck = checkTradingPermission(['read', 'trade'], mode);
   // Defensive sums — guard every numeric input against NaN / undefined so a
   // single malformed balance row can never crash the page.
@@ -543,6 +611,65 @@ export default function ExchangePage() {
           </span>
         </div>
       )}
+
+      {/* Persistent inline error card — visible across tabs while the connection
+          is in a classified error state. Auto-dismisses on success because the
+          connection state will leave CONNECTION_ERROR_STATES. */}
+      {(mode === 'real' || mode === 'testnet') && CONNECTION_ERROR_STATES.has(modeState.connectionState) && (() => {
+        const info = friendlyConnectionError(modeState.connectionState, selectedEx.name, modeState.connectionError);
+        return (
+          <div
+            role="alert"
+            className="mb-4 rounded-xl border border-red-500/40 bg-red-500/5 px-4 py-3"
+            data-testid="connection-error-card"
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-8 h-8 rounded-lg border border-red-500/40 bg-red-500/10 flex items-center justify-center flex-shrink-0">
+                <AlertTriangle size={15} className="text-red-400" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="text-sm font-semibold text-red-300">{info.title}</p>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-red-500/30 text-red-400 font-mono">
+                    {modeState.connectionState}
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-300 mt-1 break-words">{info.body}</p>
+                <div className="flex flex-wrap items-center gap-2 mt-3">
+                  <Button
+                    size="sm" variant="outline"
+                    onClick={retryConnection} disabled={connecting || validating || refreshing}
+                    className="text-xs h-7 border-red-500/40 text-red-300 hover:bg-red-500/10"
+                    data-testid="connection-error-retry"
+                  >
+                    <RefreshCw size={11} className={`mr-1.5 ${(connecting || validating || refreshing) ? 'animate-spin' : ''}`} />
+                    Retry
+                  </Button>
+                  {info.needsKeys && (
+                    <Button
+                      size="sm" variant="outline"
+                      onClick={() => setTab('connection')}
+                      className="text-xs h-7 border-amber-500/40 text-amber-300 hover:bg-amber-500/10"
+                      data-testid="connection-error-reenter-keys"
+                    >
+                      <Lock size={11} className="mr-1.5" />
+                      Re-enter keys
+                    </Button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setTab('diagnostics')}
+                    className="text-xs text-zinc-400 hover:text-zinc-200 underline underline-offset-2 ml-1"
+                    data-testid="connection-error-open-diagnostics"
+                  >
+                    Open diagnostics
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Tabs */}
       <div className="flex items-center gap-2 mb-6 border-b border-zinc-800/60 pb-3 overflow-x-auto">
