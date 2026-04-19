@@ -1,6 +1,5 @@
 
 import { useState } from 'react';
-import { motion } from 'framer-motion';
 import { useUser } from '@/context/user-context';
 import { PLAN_FEATURES } from '@/lib/user-store';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -8,11 +7,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import {
   User, Settings, Key, Crown, CheckCircle2, AlertTriangle,
-  Eye, EyeOff, Shield, LogOut, Clock, BarChart3, ShieldAlert,
+  Eye, EyeOff, Shield, LogOut, ShieldAlert,
 } from 'lucide-react';
 
 const TABS = [

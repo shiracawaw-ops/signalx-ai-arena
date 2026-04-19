@@ -9,12 +9,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-import { Badge } from '@/components/ui/badge';
-import { Progress } from '@/components/ui/progress';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Shield, AlertTriangle, XCircle, CheckCircle2, Gauge, Zap,
-  TrendingDown, Activity, StopCircle, Eye,
+  Shield, XCircle, Gauge,
+  StopCircle,
 } from 'lucide-react';
 
 function fmt(n: number, dec = 2) {
@@ -47,7 +45,7 @@ function RiskGauge({ value, max, label, color }: { value: number; max: number; l
 }
 
 export default function RiskPage() {
-  const { bots, trades, market, getCurrentPrice, stop } = useArena();
+  const { bots, market, getCurrentPrice, stop } = useArena();
   const [risk, setRisk] = useState<RiskConfig>(() => loadRisk());
   const { toast } = useToast();
 

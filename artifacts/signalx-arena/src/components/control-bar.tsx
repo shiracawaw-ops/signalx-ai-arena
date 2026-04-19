@@ -15,7 +15,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { useToast } from '@/hooks/use-toast';
 import {
   Play, Pause, RotateCcw, Plus, Stethoscope, Search, AlertTriangle,
-  TrendingUp, TrendingDown, DollarSign, Activity, Zap, Menu, CircleDot,
+  TrendingUp, TrendingDown, DollarSign, Activity, Menu, CircleDot,
   Shield, Bot, X, Cpu,
 } from 'lucide-react';
 
@@ -167,9 +167,13 @@ function TickerStrip() {
   const botsRef   = useRef(bots);
   const tradesRef = useRef(trades);
   const marketRef = useRef(market);
-  // Direct ref updates in render — no useEffect needed, no extra re-renders
+  // Intentional: sync refs during render so the interval callback always reads
+  // the latest values without needing them as dependencies (avoids reset storms).
+  // eslint-disable-next-line react-hooks/refs
   botsRef.current   = bots;
+  // eslint-disable-next-line react-hooks/refs
   tradesRef.current = trades;
+  // eslint-disable-next-line react-hooks/refs
   marketRef.current = market;
 
   // Compute ticker items — refreshed every 5 seconds via own interval
@@ -264,12 +268,16 @@ export function GlobalControlBar({ onMobileOpen, alerts = 0 }: GlobalControlBarP
   } = useArena();
 
   // ── Throttled display stats — recompute at most every 2s via interval ─────
-  // Refs are updated inline (not via useEffect) to always reflect latest data
+  // Intentional: sync refs during render so the interval callback always reads
+  // the latest values without needing them as dependencies (avoids reset storms).
   const botsRef   = useRef(bots);
   const tradesRef = useRef(trades);
   const gcRef     = useRef(getCurrentPrice);
+  // eslint-disable-next-line react-hooks/refs
   botsRef.current   = bots;
+  // eslint-disable-next-line react-hooks/refs
   tradesRef.current = trades;
+  // eslint-disable-next-line react-hooks/refs
   gcRef.current     = getCurrentPrice;
 
   const computeStats = useCallback(() => {
@@ -287,13 +295,14 @@ export function GlobalControlBar({ onMobileOpen, alerts = 0 }: GlobalControlBarP
     return { activeBots, pausedBots, totalPnL, totalFees, winRate, weakBots, criticalBots };
   }, []);
 
+  // eslint-disable-next-line react-hooks/refs
   const [stats, setStats] = useState(computeStats);
   // Interval-only update — refs are always fresh, so no bots/trades deps needed.
   // This prevents setStats from being called on every single tick.
   useEffect(() => {
     const id = setInterval(() => setStats(computeStats()), 2000);
     return () => clearInterval(id);
-  }, [computeStats]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [computeStats]);
 
   const handleStartAll  = () => { start();    toast({ title: '▶ Arena Resumed', description: `${stats.activeBots} bots trading.` }); };
   const handlePauseAll  = () => { stop();     toast({ title: '⏸ Arena Paused',  description: 'All bot activity halted.' }); };

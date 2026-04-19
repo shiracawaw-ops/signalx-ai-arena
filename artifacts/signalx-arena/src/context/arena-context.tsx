@@ -1,9 +1,9 @@
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
-import { Bot, Trade, loadBots, saveBots, loadTrades, saveTrades, BOT_COLORS, SYMBOLS, STRATEGIES } from '@/lib/storage';
+import { Bot, Trade, loadBots, saveBots, loadTrades, saveTrades, BOT_COLORS } from '@/lib/storage';
 import { perfMonitor } from '@/lib/perf-monitor';
-import { MarketData, initMarket, tickMarket, executeBotTick, getBotPnL, getBotTotalValue } from '@/lib/engine';
-import { generateBots, makeFreshStandbyBot, STANDBY_POOL_SIZE } from '@/lib/seed';
+import { MarketData, initMarket, tickMarket, executeBotTick } from '@/lib/engine';
+import { generateBots, makeFreshStandbyBot } from '@/lib/seed';
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
 const BOT_COUNT_KEY    = 'signalx_bot_count';
@@ -156,15 +156,18 @@ export function ArenaProvider({ children }: { children: React.ReactNode }) {
   const watchdogRef        = useRef<ReturnType<typeof setInterval> | null>(null);
   const qualityRef         = useRef<string>('high');
   const runningRef         = useRef(false);
+  // eslint-disable-next-line react-hooks/purity
   const lastTickAtRef      = useRef<number>(Date.now());
   const tickCountRef       = useRef(0);
   const saveThrottleRef    = useRef(0);
+  // eslint-disable-next-line react-hooks/purity
   const engineStartedAtRef = useRef<number>(Date.now());
   // Always reflects the latest user-configured active bot count
   const botCountRef        = useRef<number>(init.botCount);
 
   const stateRef = useRef({ bots, market, trades, spendPct });
-  // Update ref synchronously during render — no useEffect needed for a ref
+  // Intentional: sync ref during render so callbacks always read latest values.
+  // eslint-disable-next-line react-hooks/refs
   stateRef.current = { bots, market, trades, spendPct };
 
   // ── Emit heal events ──────────────────────────────────────────────────────
@@ -359,6 +362,7 @@ export function ArenaProvider({ children }: { children: React.ReactNode }) {
   // ── Auto-start ────────────────────────────────────────────────────────────
   useEffect(() => {
     start();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsGlobalRunning(true);
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);

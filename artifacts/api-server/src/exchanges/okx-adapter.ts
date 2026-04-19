@@ -1,5 +1,5 @@
 // ─── OKX REST Adapter ─────────────────────────────────────────────────────────
-import { hmacSHA256Base64, safeFetch, stubSymbolRules, toUsdtPair } from './base-adapter.js';
+import { hmacSHA256Base64, safeFetch, stubSymbolRules } from './base-adapter.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE = 'https://www.okx.com';

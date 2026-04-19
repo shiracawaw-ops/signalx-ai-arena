@@ -1,0 +1,277 @@
+Implement the existing SignalX AI Arena project in a self-healing full auto mode optimized for low Replit cost and stable performance.
+
+Do not rebuild the app from scratch.
+Upgrade the current project carefully and keep the existing design language.
+
+Core operating mode
+
+The whole platform must behave like a smart self-managing system:
+
+- monitor bots automatically
+- detect weak / slow / broken / inactive bots
+- replace failing bots automatically with better standby bots
+- auto-heal project issues where safe
+- auto-tune settings where safe
+- keep the app stable, lightweight, and responsive
+
+1) Self-healing bot lifecycle
+
+Create a full bot lifecycle management system.
+
+Each bot must have:
+
+- id
+- name
+- strategy type
+- status
+- health score
+- performance score
+- activity score
+- stability score
+- latency score
+- risk score
+- error count
+- no-trade duration
+- pnl
+- fees
+- win rate
+- drawdown
+- replacement priority
+
+Statuses:
+
+- Active
+- Standby
+- Watch
+- Throttled
+- Paused
+- Disabled
+- Replaced
+
+Detection rules
+
+A bot must be considered unhealthy if one or more of these happen:
+
+- too slow response
+- repeated errors
+- inactivity for too long
+- too many failed decisions
+- poor performance score
+- bad drawdown
+- high risk score
+- low health score
+- unstable behavior
+- abnormal latency
+- stuck updates
+- missing heartbeat
+
+Automatic response
+
+When a bot becomes unhealthy:
+
+- first reduce its activity or move it to Watch
+- if still weak, pause it
+- then replace it automatically with a better standby bot
+- pick the replacement based on the highest total score
+- log the reason for replacement
+- update all dashboard sections immediately
+- never leave a bad bot active if a stronger standby bot exists
+
+2) Automatic replacement engine
+
+Add a replacement engine that:
+
+- continuously evaluates all bots in lightweight intervals
+- ranks standby bots by efficiency
+- promotes the best standby bot when an active bot fails
+- demotes weak active bots automatically
+- avoids rapid flip-flopping by using cooldown rules
+- keeps only the best active bots running
+
+Scoring logic
+
+Build a weighted total bot score using:
+
+- net pnl
+- stability
+- win rate
+- drawdown
+- health
+- activity
+- latency
+- risk penalty
+
+Use the score to:
+
+- choose top active bots
+- choose which weak bots should be replaced
+- choose the next best standby bot
+
+3) Self-healing project behavior
+
+The whole project should auto-correct itself where safe.
+
+Add safe self-healing rules for:
+
+- broken intervals
+- stale UI state
+- disconnected simulated feeds
+- stuck bot loops
+- missing refresh cycles
+- desynced reports
+- frozen counters
+- stale rankings
+- invalid bot status combinations
+
+When detected:
+
+- restart only the affected module if possible
+- reconnect simulated updates
+- restore shared state consistency
+- regenerate bad values safely
+- write incident logs
+- show recovery status in admin/doctor panels
+
+Do not use dangerous silent logic rewrites.
+Only safe recovery and safe rebalancing.
+
+4) Auto-tuning settings
+
+Create an automatic settings optimizer that can adjust the platform gently over time.
+
+Allowed auto-adjustments:
+
+- reduce active bots count if performance drops
+- increase standby pool usage if needed
+- reduce update frequency if the app becomes heavy
+- increase scan interval when CPU load is high
+- lower animation intensity in performance-safe mode
+- rebalance scoring thresholds based on recent bot performance
+- auto-enable lightweight mode if lag is detected
+
+Rules:
+
+- changes must be safe
+- changes must be logged
+- changes must not break the UI
+- changes must update visible settings state
+- add cooldowns so settings are not changing too often
+
+5) Default low-cost auto mode
+
+Set the platform to efficient Replit-friendly defaults:
+
+- total bots: 30 by default
+- active bots: 6 by default
+- remaining bots: standby/watch
+- bot evaluation cycle: every 5 seconds
+- reports refresh: every 15 seconds
+- bot doctor scan: every 30 seconds
+- admin refresh: lightweight and batched
+- avoid expensive re-render loops
+
+6) Bot Doctor upgrades
+
+Upgrade Bot Doctor into a real diagnostics center.
+
+It must:
+
+- detect slow bots
+- detect weak bots
+- detect inactive bots
+- detect unstable bots
+- detect replacement events
+- detect repeated recovery loops
+- show why a bot was downgraded or replaced
+- show what action the system took
+- show whether recovery succeeded
+
+Add sections:
+
+- unhealthy bots
+- recently replaced bots
+- standby candidates
+- recovery events
+- auto-tuning adjustments
+
+7) Shared state synchronization
+
+Refactor the project so these modules remain synchronized:
+
+- Arena
+- Bot Doctor
+- Reports
+- Exchange
+- Wallet
+- Risk Engine
+- Admin
+- Top technical bar
+
+Any bot replacement, reset, pause, recovery, or auto-tuning action must update everywhere correctly.
+
+8) Reset All behavior
+
+Reset All must fully reset:
+
+- all bot states
+- active/standby allocation
+- rankings
+- reports
+- pnl
+- fees
+- trades
+- health scores
+- doctor warnings
+- recovery events
+- auto-tuning temporary changes
+- wallet demo values
+- risk engine values
+
+After reset:
+
+- restore selected demo balance
+- regenerate clean bots
+- restore default auto mode settings
+- resume stable operation cleanly
+
+9) Performance constraints
+
+Optimize for smooth performance:
+
+- batch bot updates
+- do not re-render all UI on each bot tick
+- memoize computed values
+- use shared state carefully
+- keep charts lightweight
+- keep long lists efficient
+- reduce heavy visual effects if needed
+- keep the rotating red X smooth and GPU-friendly
+
+10) UI additions
+
+Add clear visible indicators for:
+
+- self-healing active
+- auto replacement active
+- auto tuning active
+- current active bots
+- standby bots
+- replaced bots count
+- recent recovery action
+- performance-safe mode
+
+The platform should feel alive and intelligent, not static.
+
+11) Final expected behavior
+
+After implementation:
+
+- weak or slow bots are automatically detected
+- bad bots are automatically replaced with stronger ones
+- the project heals minor runtime problems safely
+- settings can auto-adjust for stability and cost efficiency
+- all modules stay synchronized
+- the app remains smooth on Replit
+- the system behaves like a real smart autonomous AI Arena
+
+Implement this directly into the existing project now, carefully, fully, and in a stable low-cost way.

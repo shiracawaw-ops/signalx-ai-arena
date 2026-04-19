@@ -49,12 +49,12 @@ class TradeConfigManager {
   }
 
   private save() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.configs)); } catch {}
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.configs)); } catch { /* storage full */ }
   }
 
   private notify() {
     const snap = { ...this.configs };
-    this.listeners.forEach(fn => { try { fn(snap); } catch {} });
+    this.listeners.forEach(fn => { try { fn(snap); } catch { /* ignore errors from individual listeners */ } });
   }
 
   get(exchange: string): TradeConfig {

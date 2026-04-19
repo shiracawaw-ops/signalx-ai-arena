@@ -35,7 +35,7 @@ export function loadWallet(): WalletState {
   try {
     const r = localStorage.getItem(WALLET_KEY);
     if (r) return JSON.parse(r);
-  } catch {}
+  } catch { /* ignore parse errors */ }
   return initWallet();
 }
 

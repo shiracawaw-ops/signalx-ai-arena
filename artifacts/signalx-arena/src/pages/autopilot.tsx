@@ -194,6 +194,7 @@ export default function AutoPilotPage() {
   const [log, setLog]             = useState<DecisionLogEntry[]>([]);
 
   // Refs for always-fresh values inside interval callbacks (avoids stale closures)
+  // Intentional: sync refs during render so interval callbacks always read latest values.
   const botsRef          = useRef(bots);
   const tradesRef        = useRef(trades);
   const gcRef            = useRef(getCurrentPrice);
@@ -201,10 +202,15 @@ export default function AutoPilotPage() {
   const stopRef          = useRef(stop);
   const lastBotIdRef     = useRef<string | null>(null);
   const lastRiskRef      = useRef<string | null>(null);
+  // eslint-disable-next-line react-hooks/refs
   botsRef.current        = bots;
+  // eslint-disable-next-line react-hooks/refs
   tradesRef.current      = trades;
+  // eslint-disable-next-line react-hooks/refs
   gcRef.current          = getCurrentPrice;
+  // eslint-disable-next-line react-hooks/refs
   isRunningRef.current   = isGlobalRunning;
+  // eslint-disable-next-line react-hooks/refs
   stopRef.current        = stop;
 
   const runDecision = useCallback(() => {
@@ -241,7 +247,7 @@ export default function AutoPilotPage() {
     if (d.selectedBot && d.masterAction !== d.selectedBot.action && d.masterAction === 'HOLD') {
       setLog(prev => [makeLogEntry('hold', `Signal overridden to HOLD — risk level ${d.riskLevel}`, 'warn'), ...prev].slice(0, MAX_LOG));
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps — all values via refs
+  }, []);
 
   // Run immediately + every 5s — stable interval, fresh data via refs
   useEffect(() => {

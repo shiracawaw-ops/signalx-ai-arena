@@ -7,7 +7,9 @@
     "dev": "export NODE_ENV=development && pnpm run build && pnpm run start",
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@workspace/api-zod": "workspace:*",
@@ -20,13 +22,20 @@
     "pino-http": "^10"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "catalog:",
+    "@types/supertest": "^7.2.0",
+    "@vitest/coverage-v8": "^3.2.4",
     "esbuild": "^0.27.3",
     "esbuild-plugin-pino": "^2.3.3",
+    "eslint": "^10.2.1",
     "pino-pretty": "^13",
-    "thread-stream": "3.1.0"
+    "supertest": "^7.2.2",
+    "thread-stream": "3.1.0",
+    "typescript-eslint": "^8.58.2",
+    "vitest": "^3.2.4"
   }
 }

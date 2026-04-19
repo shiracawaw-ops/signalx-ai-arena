@@ -3,7 +3,6 @@ import { useState, useEffect, useRef } from 'react';
 import { useArena } from '@/hooks/use-arena';
 import { loadAlerts, type AlertRecord } from '@/lib/platform';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import {
   Activity, CheckCircle2, AlertTriangle, XCircle, Server,
   Shield, Cpu, BarChart3, Clock, Zap, Info, ShieldAlert,
@@ -31,9 +30,11 @@ export default function StatusPage() {
   const { bots, trades, isGlobalRunning, tickCount } = useArena();
   const [alerts,   setAlerts]   = useState<AlertRecord[]>([]);
   const [uptime,   setUptime]   = useState(0);
+  // eslint-disable-next-line react-hooks/purity
   const startRef               = useRef(Date.now());
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setAlerts(loadAlerts().slice(-50).reverse());
     const id = setInterval(() => {
       setUptime(Math.floor((Date.now() - startRef.current) / 1000));

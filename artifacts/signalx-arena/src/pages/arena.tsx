@@ -3,7 +3,7 @@ import { useState, useMemo, useCallback, memo } from 'react';
 import { useArena } from '@/hooks/use-arena';
 import { getBotTotalValue, getBotPnL, getBotPnLPercent } from '@/lib/engine';
 import { computeAllIndicators } from '@/lib/indicators';
-import { SYMBOLS, STRATEGIES, CATEGORIES, ASSETS, ASSET_MAP, type AssetCategory } from '@/lib/storage';
+import { SYMBOLS, STRATEGIES, CATEGORIES, ASSETS, ASSET_MAP } from '@/lib/storage';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -23,11 +23,6 @@ function fmt(n: number, dec = 2) {
 
 function pct(n: number) {
   return `${n >= 0 ? '+' : ''}${fmt(n)}%`;
-}
-
-function SignalDot({ signal }: { signal: 'BUY' | 'SELL' | 'HOLD' }) {
-  const cls = { BUY: 'bg-emerald-500', SELL: 'bg-red-500', HOLD: 'bg-slate-600' }[signal];
-  return <span className={`inline-block w-1.5 h-1.5 rounded-full ${cls}`} />;
 }
 
 function SignalBadge({ signal }: { signal: 'BUY' | 'SELL' | 'HOLD' }) {
@@ -138,7 +133,7 @@ interface BotCardProps {
   removeBot: (id: string) => void;
 }
 const BotCard = memo(function BotCard({
-  bot, price, priceChange, pnl, pnlPct, totalValue, tradeCount, candles,
+  bot, price, priceChange: _priceChange, pnl, pnlPct, totalValue, tradeCount, candles,
   toggleBot, resetBot, removeBot,
 }: BotCardProps) {
   const [showInd, setShowInd] = useState(false);
@@ -292,7 +287,7 @@ export default function ArenaPage() {
   }, [trades]);
 
   // Memoized portfolio stats
-  const { totalPortfolio, totalStarting, totalPnL, totalPnLPct, winRate, wins, losses } = useMemo(() => {
+  const { totalPortfolio, totalPnL, totalPnLPct, winRate, wins, losses } = useMemo(() => {
     const totalPortfolio = bots.reduce((s, b) => s + getBotTotalValue(b, getCurrentPrice(b.symbol)), 0);
     const totalStarting  = bots.reduce((s, b) => s + b.startingBalance, 0);
     const totalPnL       = totalPortfolio - totalStarting;

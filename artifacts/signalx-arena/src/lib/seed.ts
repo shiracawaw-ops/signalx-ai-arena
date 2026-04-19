@@ -164,8 +164,3 @@ export function generateBots(
   const cappedTrades = trades.slice(-2000);
   return { bots, trades: cappedTrades, market };
 }
-
-// ── Legacy export ─────────────────────────────────────────────────────────────
-export function seedBots(initialMarket: MarketData): { bots: Bot[]; trades: Trade[]; market: MarketData } {
-  return generateBots(30, 1000);
-}

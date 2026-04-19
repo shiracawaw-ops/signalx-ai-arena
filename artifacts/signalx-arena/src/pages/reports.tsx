@@ -1,6 +1,6 @@
 
 import { useMemo, useState, useEffect, useRef } from 'react';
-import { motion, AnimatePresence, useSpring, useTransform, useMotionValue } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import { useArena } from '@/hooks/use-arena';
 import { getBotTotalValue, getBotPnL } from '@/lib/engine';
 import { calcFeeAdjusted } from '@/lib/platform';
@@ -10,21 +10,15 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import {
   BarChart3, TrendingUp, TrendingDown, Award, AlertTriangle,
-  FileText, Download, Trophy, Flame, Skull, Activity, Zap,
+  FileText, Download, Trophy, Skull, Activity, Zap,
 } from 'lucide-react';
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip,
-  LineChart, Line, Cell, Area, AreaChart, CartesianGrid,
+  Line, Cell, Area, AreaChart, CartesianGrid,
 } from 'recharts';
 
 function fmt(n: number, dec = 2) {
   return n.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
-}
-
-function fmtShort(n: number): string {
-  const abs = Math.abs(n);
-  if (abs >= 1000) return `${n >= 0 ? '+' : ''}$${(n / 1000).toFixed(1)}k`;
-  return `${n >= 0 ? '+' : ''}$${fmt(n)}`;
 }
 
 // ── Animated number component ────────────────────────────────────────────────
@@ -83,6 +77,7 @@ function AnimatedNumber({
       <AnimatePresence>
         {delta && (
           <motion.span
+            // eslint-disable-next-line react-hooks/purity
             key={delta + Date.now()}
             className={`absolute -top-3 left-0 text-[9px] font-bold ${delta === 'up' ? 'text-emerald-400' : 'text-red-400'}`}
             initial={{ opacity: 1, y: 0 }}
@@ -151,21 +146,6 @@ interface BotReport {
   status: 'top' | 'good' | 'weak' | 'failing';
 }
 
-// ── Delta badge ──────────────────────────────────────────────────────────────
-function DeltaBadge({ value, prevValue }: { value: number; prevValue: number }) {
-  const diff = value - prevValue;
-  if (Math.abs(diff) < 0.01) return null;
-  return (
-    <motion.span
-      initial={{ opacity: 0, scale: 0.8 }}
-      animate={{ opacity: 1, scale: 1 }}
-      className={`text-[9px] px-1 py-0.5 rounded font-bold ml-1 ${diff > 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'}`}
-    >
-      {diff > 0 ? '▲' : '▼'} {Math.abs(diff).toFixed(1)}
-    </motion.span>
-  );
-}
-
 // ── Rank change indicator ────────────────────────────────────────────────────
 function RankChange({ rank, prev }: { rank: number; prev: number }) {
   const diff = prev - rank;
@@ -225,6 +205,7 @@ export default function ReportsPage() {
   const reports: BotReport[] = useMemo(() => {
     const prev = prevReportsRef.current;
     const computed = bots
+      // eslint-disable-next-line react-hooks/refs
       .map(bot => {
         const price     = getCurrentPrice(bot.symbol);
         const botTrades = trades.filter(t => t.botId === bot.id);
@@ -270,6 +251,7 @@ export default function ReportsPage() {
 
     const next: Record<string, { rank: number; netPnl: number }> = {};
     computed.forEach(r => { next[r.id] = { rank: r.rank, netPnl: r.netPnl }; });
+    // eslint-disable-next-line react-hooks/refs
     prevReportsRef.current = next;
     return computed;
   }, [bots, trades, market]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -518,6 +500,7 @@ export default function ReportsPage() {
                     </tr>
                   </thead>
                   <tbody>
+                    {/* eslint-disable-next-line react-hooks/refs */}
                     {reports.map(r => (
                       <motion.tr
                         key={r.id}
@@ -587,6 +570,7 @@ export default function ReportsPage() {
             <span className="text-xs text-zinc-500">(Net P&L after fees)</span>
           </div>
           <AnimatePresence mode="sync">
+            {/* eslint-disable-next-line react-hooks/refs */}
             {reports.filter(r => r.status === 'top' || r.status === 'good').slice(0, 10).map((r, i) => (
               <motion.div
                 key={r.id}
@@ -648,6 +632,7 @@ export default function ReportsPage() {
             <span className="text-xs text-zinc-500">(Requiring attention)</span>
           </div>
           <AnimatePresence>
+            {/* eslint-disable-next-line react-hooks/refs */}
             {reports.filter(r => r.status === 'weak' || r.status === 'failing').map((r, i) => (
               <motion.div
                 key={r.id}

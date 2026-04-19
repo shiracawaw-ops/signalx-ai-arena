@@ -1,0 +1,213 @@
+Fix the current SignalX AI Arena project without rebuilding it from scratch.
+
+Main fixes required now
+
+The UI exists, but many options are not functional. Make the whole platform actually interactive and working.
+
+1) Make all sidebar options work
+
+Activate these sections so each one opens a real functional page/panel instead of being static:
+
+- Arena
+- Bot Doctor
+- Reports
+- Exchange
+- Wallet
+- Risk Engine
+- Admin
+
+Each tab must:
+
+- open correctly
+- render real content
+- preserve app state
+- not freeze
+- not show dead placeholders
+
+2) Add bot count control
+
+Add a control that allows choosing the number of bots dynamically.
+Requirements:
+
+- default bots count can be 200
+- user can change bot count manually
+- allowed range should be flexible and safe
+- example quick options:
+  - 10
+  - 25
+  - 50
+  - 100
+  - 200
+  - 500
+- bot list, rankings, reports, and arena stats must all update based on the selected bot count
+
+3) Make the bots system actually dynamic
+
+Each bot must have:
+
+- name
+- status
+- balance
+- gross pnl
+- net pnl
+- fees
+- trades count
+- win rate
+- health score
+- activity score
+- risk level
+
+Bot count must be generated from the selected amount.
+All reports and arena views must read from the same shared state.
+
+4) Add configurable demo balance
+
+Create a control for demo balance selection.
+Requirements:
+
+- user can choose starting virtual balance
+- range must be from:
+  - 100 USD
+  - up to 1,000,000 USD
+- add preset buttons like:
+  - 100
+  - 500
+  - 1,000
+  - 5,000
+  - 10,000
+  - 50,000
+  - 100,000
+  - 1,000,000
+- user can also type a custom value within the allowed range
+- all bots and reports should use this selected demo balance as the base if reset is triggered
+
+5) Fix Reset All completely
+
+The current Reset All must become fully functional.
+When pressed:
+
+- reset all bots
+- reset rankings
+- reset reports
+- reset pnl
+- reset trades
+- reset fees
+- reset win rates
+- reset wallet demo values
+- reset bot doctor states
+- reset risk engine simulated values
+- restore the selected starting demo balance
+- do not leave stale values anywhere
+- update UI instantly after reset
+
+6) Make the red X logo rotate horizontally forever
+
+For the SignalX logo:
+
+- keep the X red
+- keep it premium and glowing
+- make it rotate horizontally continuously forever
+- smooth motion only
+- not too fast
+- no jitter
+- animation must always run
+- keep it visually elegant and high-end
+- apply it in sidebar header and main top branding if present
+
+7) Improve state management
+
+Refactor the app so everything is connected through shared state/store.
+Requirements:
+
+- Arena
+- Bot Doctor
+- Reports
+- Wallet
+- Risk Engine
+- Admin
+  must all stay synchronized
+
+Changing bot count, demo balance, reset state, or bot activity must reflect everywhere automatically.
+
+8) Make every section useful
+
+Implement at least these working features:
+
+Arena
+
+- live bot cards/table
+- rank list
+- filtering
+- selected bot details
+
+Bot Doctor
+
+- detect weak bots
+- detect inactive bots
+- show issues
+- allow simple actions:
+  - restart
+  - pause
+  - replace
+  - reduce risk
+
+Reports
+
+- gross pnl
+- fees
+- net pnl
+- win rate
+- total trades
+- charts based on current bot pool
+
+Exchange
+
+- demo mode panel
+- exchange connection placeholder structure
+- status indicators
+
+Wallet
+
+- demo balance display
+- current allocated capital
+- available balance
+- reset-linked balance updates
+
+Risk Engine
+
+- simulated risk score
+- warnings
+- exposure summary
+
+Admin
+
+- total bots
+- active bots
+- paused bots
+- disabled bots
+- quick controls
+
+9) Stability requirements
+
+- do not rebuild app from scratch
+- modify current project carefully
+- fix broken handlers and dead buttons
+- avoid heavy dependencies
+- keep performance smooth even with 200 bots
+- make all actions responsive
+- no fake dead UI
+
+Final result expected
+
+After implementation:
+
+- all sidebar options must work
+- 200 bots must be supported
+- bot count must be user-selectable
+- demo balance must be selectable from 100 to 1,000,000
+- Reset All must truly reset everything
+- the X logo must rotate horizontally forever
+- all modules must be connected and functional
+- the app must feel alive, synchronized, and interactive
+
+Do not return partial placeholder work. Fix the existing project carefully and leave it fully interactive.

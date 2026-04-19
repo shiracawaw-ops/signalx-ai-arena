@@ -91,7 +91,7 @@ class ExchangeModeManager {
 
   private notify() {
     const snap = this.get();
-    this.listeners.forEach(fn => { try { fn(snap); } catch {} });
+    this.listeners.forEach(fn => { try { fn(snap); } catch { /* ignore errors from individual listeners */ } });
   }
 
   // ── Convenience helpers ──────────────────────────────────────────────────

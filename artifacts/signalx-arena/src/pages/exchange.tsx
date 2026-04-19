@@ -138,6 +138,7 @@ export default function ExchangePage() {
 
   // ── Disconnect when switching exchanges ───────────────────────────────────
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsConnected(false);
     setBalances([]);
     setOrders([]);
@@ -715,6 +716,7 @@ export default function ExchangePage() {
                         <td className="px-3 py-2">
                           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">{String(o['status'] ?? 'open')}</span>
                         </td>
+                        {/* eslint-disable-next-line react-hooks/purity */}
                         <td className="px-3 py-2 text-zinc-500">{new Date(Number(o['timestamp']) || Date.now()).toLocaleTimeString()}</td>
                       </tr>
                     ))}

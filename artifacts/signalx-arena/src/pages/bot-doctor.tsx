@@ -2,13 +2,10 @@
 import { useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useArena } from '@/hooks/use-arena';
-import { diagnoseBots, type BotDiagnostic, type BotAction, type IssueCode } from '@/lib/diagnostics';
+import { diagnoseBots, type BotDiagnostic, type BotAction } from '@/lib/diagnostics';
 import { loadRisk } from '@/lib/platform';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Progress } from '@/components/ui/progress';
-import { Separator } from '@/components/ui/separator';
+import { Card, CardContent } from '@/components/ui/card';
 import {
   Stethoscope, AlertTriangle, CheckCircle2, XCircle,
   RefreshCw, TrendingDown, Activity, Zap, ChevronDown, ChevronUp,

@@ -1,0 +1,170 @@
+حوّل مشروع **SignalX AI Arena** إلى **نسخة إنتاجية مستقرة وقابلة للتنزيل على Windows**، مع إزالة أي أخطاء تمنع التشغيل الحقيقي، **وبدون تغيير شكل الواجهة أو تدفق الاستخدام إلا عند الضرورة القصوى فقط**.
+
+## المطلوب التنفيذي
+
+### 1) فحص شامل للمشروع
+
+افحص المشروع كاملًا وحدد جميع أسباب الفشل في:
+
+* التشغيل المحلي
+* البناء Production Build
+* تشغيل Electron
+* تشغيل API server
+* تشغيل frontend
+* التداول الحقيقي
+* قراءة الرصيد
+* مفاتيح API
+* ملفات البيئة
+* المسارات والاعتمادات
+
+### 2) إصلاح البنية كاملة
+
+أصلح جميع مشاكل:
+
+* Electron
+* API server
+* frontend
+* preload
+* build scripts
+* package.json
+* electron-builder
+* imports
+* missing modules
+* env loading
+* runtime crashes
+* path resolution
+* Windows packaging
+
+### 3) التشغيل المحلي الإجباري قبل أي بناء
+
+تأكد أن المشروع يعمل محليًا بنجاح عبر:
+
+* API server
+* frontend
+* Electron shell
+
+ولا تعتبر المهمة منتهية قبل التأكد من أن الثلاثة تعمل معًا بدون crash.
+
+### 4) فصل أوضاع التشغيل بوضوح
+
+نفّذ فصلًا صارمًا بين:
+
+* DEMO
+* PAPER
+* TESTNET
+* REAL TRADING
+
+ويجب أن يكون سلوك كل وضع واضحًا في الكود والواجهة والمنطق الداخلي.
+
+### 5) منع تفعيل REAL إلا بالشروط التالية
+
+لا تسمح بتفعيل REAL TRADING إلا إذا تحققت كل الشروط التالية فعليًا:
+
+* API keys موجودة
+* الصلاحيات صحيحة
+* exchange connected
+* balance fetched successfully
+* trading permissions valid
+* network available
+* mode explicitly confirmed as REAL
+
+وإذا فشل أي شرط:
+
+* امنع التفعيل
+* أظهر سبب الرفض بوضوح
+* لا ترسل أي أمر تداول
+
+### 6) إضافة فحوصات صارمة قبل أي أمر شراء/بيع
+
+أضف طبقة حماية حاسمة قبل تنفيذ أي order تشمل:
+
+* symbol validation
+* market availability check
+* min order size
+* quantity precision
+* insufficient balance
+* leverage / margin safety where applicable
+* network timeout retry
+* exchange error handling
+* duplicate order protection
+* stale price protection
+* invalid side/type protection
+
+### 7) إصلاح أي اعتماد مكسور
+
+أصلح أي:
+
+* package ناقص
+* import خاطئ
+* version conflict
+* build dependency issue
+* runtime dependency issue
+
+وثبّت الإصدارات اللازمة داخل ملفات الحزم بحيث لا ينهار البناء لاحقًا.
+
+### 8) تثبيت الإصدارات بشكل آمن
+
+حدّد وثبّت الإصدارات داخل package files وملفات البناء بحيث تكون:
+
+* reproducible
+* stable
+* مناسبة لـ Windows build
+* غير معتمدة على إصدارات عائمة تسبب أعطال مستقبلية
+
+### 9) إنشاء أو إصلاح الملفات التالية
+
+أنشئ أو أصلح هذه الملفات:
+
+* .env.example
+* README_RUN.md
+* README_BUILD.md
+* build-and-package.bat
+
+ويجب أن تكون عملية وواضحة وقصيرة.
+
+### 10) إنشاء نسخة Windows Production
+
+ابنِ نسخة Windows نهائية تتضمن:
+
+* portable exe
+* installer exe إن أمكن
+
+### 11) مكان المخرجات النهائية
+
+ضع جميع مخرجات البناء النهائية داخل:
+
+* artifacts/electron/dist-app/
+
+وإن كان هناك مسار أدق داخل هذا المجلد فاذكره بوضوح.
+
+### 12) اختبار إلزامي بعد البناء
+
+بعد البناء، اختبر النسخة الناتجة وتأكد من:
+
+* فتح البرنامج
+* تحميل الواجهة
+* تشغيل Electron بدون crash
+* عمل API server
+* جلب الرصيد إذا كانت المفاتيح موجودة
+* منع REAL إذا كانت الشروط غير مكتملة
+* عدم الانهيار عند فقدان الإنترنت
+* عدم الانهيار عند فشل API
+* عدم إرسال أوامر حقيقية في حال وجود خطأ
+
+### 13) تقليل التكلفة والتعقيد
+
+نفّذ الإصلاحات **بأقل تكلفة ممكنة** وبدون إدخال خدمات مدفوعة غير ضرورية.
+استخدم ما هو موجود في المشروع قدر الإمكان.
+لا تضف بنية جديدة مكلفة إلا إذا كانت ضرورية جدًا للاستقرار.
+
+## المخرجات النهائية المطلوبة فقط
+
+لا تكتب شرحًا طويلًا. في النهاية أعطني فقط:
+
+1. **ما الذي تم إصلاحه**
+2. **أين يوجد ملف exe**
+3. **أين يوجد installer إن وُجد**
+4. **ما الذي ما زال يحتاج إعدادًا يدويًا**
+5. **ما هي متغيرات البيئة المطلوبة**
+6. **هل REAL TRADING جاهز أم لا**
+7. **ما هي المشاكل المتبقية إن وجدت**

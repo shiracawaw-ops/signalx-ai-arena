@@ -46,12 +46,12 @@ class ExecutionLogManager {
   private save() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.entries.slice(0, MAX_ENTRIES)));
-    } catch {}
+    } catch { /* storage full */ }
   }
 
   private notify() {
     const snap = [...this.entries];
-    this.listeners.forEach(fn => { try { fn(snap); } catch {} });
+    this.listeners.forEach(fn => { try { fn(snap); } catch { /* ignore errors from individual listeners */ } });
   }
 
   all(): ExecutionEntry[]      { return [...this.entries]; }

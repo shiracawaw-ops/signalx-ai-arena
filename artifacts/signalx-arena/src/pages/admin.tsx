@@ -1,21 +1,19 @@
 
 import { useState, useMemo, useEffect } from 'react';
-import { motion } from 'framer-motion';
 import { useArena } from '@/hooks/use-arena';
 import { getBotTotalValue, getBotPnL } from '@/lib/engine';
 import { loadRisk, saveRisk, loadUser, DEFAULT_RISK, addAlert, loadAlerts, type RiskConfig } from '@/lib/platform';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Settings, Shield, Users, Activity, Zap, AlertTriangle,
+  Settings, Shield, Activity, Zap, AlertTriangle,
   RefreshCw, StopCircle, BarChart2, Bell, CheckCircle2, XCircle,
-  TrendingUp, Database, Bot, DollarSign, ChevronDown,
+  TrendingUp, Database, Bot, DollarSign,
 } from 'lucide-react';
 
 function fmt(n: number, dec = 2) {
@@ -33,7 +31,7 @@ function fmtBalance(n: number) {
 
 export default function AdminPage() {
   const {
-    bots, trades, market, getCurrentPrice,
+    bots, trades, getCurrentPrice,
     resetAll, start, stop, isGlobalRunning,
     botCount, demoBalance, setBotCount, setDemoBalance, tickCount, healLog,
   } = useArena();
@@ -48,6 +46,7 @@ export default function AdminPage() {
   const [alertsData, setAlertsData] = useState(() => loadAlerts().slice(-20).reverse());
   useEffect(() => {
     if (section !== 'alerts') return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setAlertsData(loadAlerts().slice(-20).reverse());
     const id = setInterval(() => setAlertsData(loadAlerts().slice(-20).reverse()), 3000);
     return () => clearInterval(id);

@@ -90,7 +90,6 @@ export class BybitAdapter implements ExchangeAdapter {
   async getBalances(creds: ExchangeCredentials): Promise<Balance[]> {
     const base = creds.testnet ? TESTNET_BASE : BASE;
     const ts   = Date.now();
-    const body = ''; // GET request, no body
     const sig  = sign(creds.apiKey, creds.secretKey, ts, 'accountType=UNIFIED');
     const r    = await safeFetch(`${base}/v5/account/wallet-balance?accountType=UNIFIED`, {
       headers: headers(creds, ts, sig),

@@ -84,6 +84,7 @@ function scoreBot(
               + (stabilityScore * 0.15) + (activityScore * 0.05);
 
   // Action & reasons
+  // eslint-disable-next-line no-useless-assignment
   let action: AutoPilotAction = 'HOLD';
   const reasons: string[] = [];
 

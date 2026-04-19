@@ -1,5 +1,5 @@
 // ─── Binance REST Adapter ─────────────────────────────────────────────────────
-import { hmacSHA256, safeFetch, stubBalance, stubPermission, stubOrder, stubSymbolRules, toUsdtPair, maskKey } from './base-adapter.js';
+import { hmacSHA256, safeFetch, stubSymbolRules, toUsdtPair } from './base-adapter.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE         = 'https://api.binance.com';

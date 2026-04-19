@@ -1,19 +1,16 @@
 
 import { useState, useMemo } from 'react';
-import { motion } from 'framer-motion';
 import { useArena } from '@/hooks/use-arena';
 import { getBotTotalValue, getBotPnL } from '@/lib/engine';
-import { loadWallet, saveWallet, requestDeposit, requestWithdrawal, type WalletState, type Transaction } from '@/lib/wallet';
+import { loadWallet, requestDeposit, requestWithdrawal, type WalletState } from '@/lib/wallet';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Badge } from '@/components/ui/badge';
-import { Separator } from '@/components/ui/separator';
 import { useToast } from '@/hooks/use-toast';
 import {
-  Wallet, ArrowDownCircle, ArrowUpCircle, Clock, CheckCircle2,
-  XCircle, RefreshCw, TrendingUp, DollarSign, AlertTriangle, FileText, Bot,
+  Wallet, ArrowDownCircle, ArrowUpCircle,
+  RefreshCw, TrendingUp, DollarSign, AlertTriangle, FileText, Bot,
 } from 'lucide-react';
 
 function fmt(n: number, dec = 2) {
@@ -60,7 +57,6 @@ export default function WalletPage() {
   // Arena stats derived from shared context
   const totalValue   = useMemo(() => bots.reduce((s, b) => s + getBotTotalValue(b, getCurrentPrice(b.symbol)), 0), [bots, getCurrentPrice]);
   const totalPnl     = useMemo(() => bots.reduce((s, b) => s + getBotPnL(b, getCurrentPrice(b.symbol)), 0), [bots, getCurrentPrice]);
-  const totalBalance = useMemo(() => bots.reduce((s, b) => s + b.balance, 0), [bots]);
   const allocatedCapital = useMemo(() => bots.reduce((s, b) => s + (b.position > 0 ? b.position * (b.avgEntryPrice || 0) : 0), 0), [bots]);
   const initialCapital   = botCount * demoBalance;
 

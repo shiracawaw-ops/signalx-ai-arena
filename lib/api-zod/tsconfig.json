@@ -5,7 +5,9 @@
     "declarationMap": true,
     "emitDeclarationOnly": true,
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "src",
+    "strictFunctionTypes": true,
+    "noUnusedLocals": true
   },
   "include": ["src"]
 }

@@ -1,6 +1,6 @@
 // ─── Base Adapter — HMAC utilities, fetch wrapper, error normalisation ─────────
 import { createHmac, createHash } from 'node:crypto';
-import type { ExchangeCredentials, ExchangeError, OrderResult, Balance, Permission, SymbolRules } from './types.js';
+import type { ExchangeError, OrderResult, Balance, Permission, SymbolRules } from './types.js';
 
 export function hmacSHA256(secret: string, data: string): string {
   return createHmac('sha256', secret).update(data).digest('hex');

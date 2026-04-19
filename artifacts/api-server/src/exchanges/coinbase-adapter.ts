@@ -56,7 +56,7 @@ export class CoinbaseAdapter implements ExchangeAdapter {
   readonly name = 'Coinbase Advanced';
 
   normalizeSymbol(symbol: string): string {
-    const base = symbol.replace(/[-\/]?(USDT|USD)$/i, '');
+    const base = symbol.replace(/[-/]?(USDT|USD)$/i, '');
     return `${base}-USD`;
   }
 

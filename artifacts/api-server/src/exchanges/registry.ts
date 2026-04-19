@@ -13,7 +13,7 @@ import { HtxAdapter }      from './htx-adapter.js';
 import { BitgetAdapter }   from './bitget-adapter.js';
 import { DeribitAdapter }  from './deribit-adapter.js';
 
-const adapters: Map<string, ExchangeAdapter> = new Map([
+const adapters = new Map<string, ExchangeAdapter>([
   ['binance',  new BinanceAdapter()],
   ['okx',      new OkxAdapter()],
   ['bybit',    new BybitAdapter()],

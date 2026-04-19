@@ -1,5 +1,5 @@
 // ─── Kraken REST Adapter ──────────────────────────────────────────────────────
-import { hmacSHA512Base64, sha256, safeFetch, stubSymbolRules } from './base-adapter.js';
+import { sha256, safeFetch, stubSymbolRules } from './base-adapter.js';
 import { createHmac } from 'node:crypto';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 

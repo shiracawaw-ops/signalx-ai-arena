@@ -16,15 +16,26 @@
     "build:frontend:electron": "pnpm --filter @workspace/signalx-arena run build:electron",
     "package:win": "pnpm run build:electron && electron-builder --win --config electron-builder.yml",
     "package:mac": "pnpm run build:electron && electron-builder --mac --config electron-builder.yml",
-    "package:linux": "pnpm run build:electron && electron-builder --linux --config electron-builder.yml"
+    "package:linux": "pnpm run build:electron && electron-builder --linux --config electron-builder.yml",
+    "prepare": "husky"
   },
   "devDependencies": {
     "electron": "^34.3.0",
     "electron-builder": "^25.1.8",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
     "prettier": "^3.8.1",
     "typescript": "~5.9.2"
   },
   "dependencies": {
     "@replit/connectors-sdk": "^0.4.0"
+  },
+  "lint-staged": {
+    "artifacts/signalx-arena/**/*.{ts,tsx}": [
+      "artifacts/signalx-arena/node_modules/.bin/eslint --fix"
+    ],
+    "artifacts/api-server/**/*.{ts,tsx}": [
+      "artifacts/api-server/node_modules/.bin/eslint --fix"
+    ]
   }
 }

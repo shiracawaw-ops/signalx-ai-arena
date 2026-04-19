@@ -72,12 +72,12 @@ export class BitfinexAdapter implements ExchangeAdapter {
   async validateCredentials(creds: ExchangeCredentials): Promise<ConnectResult> {
     const r = await this.auth(creds, 'permissions');
     if (!r.ok) return { success: false, permissions: { read: false, trade: false, withdraw: false, futures: false }, error: r.error };
-    const d = r.data as Record<string, Record<string, string>>;
+    const d = r.data as Record<string, string[]>;
     return {
       success: true,
       permissions: {
-        read:     d['read']?.length > 0,
-        trade:    d['write']?.includes?.('orders') ?? false,
+        read:     (d['read']?.length ?? 0) > 0,
+        trade:    d['write']?.includes('orders') ?? false,
         withdraw: false,
         futures:  false,
       },

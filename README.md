@@ -1,5 +1,7 @@
 # SignalX AI Arena
 
+  [![codecov](https://codecov.io/gh/shiracawaw-ops/signalx-ai-arena/branch/main/graph/badge.svg)](https://codecov.io/gh/shiracawaw-ops/signalx-ai-arena)
+
   > AI-powered virtual trading simulator with 12 exchange integrations
 
   ## Features
