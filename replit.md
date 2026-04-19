@@ -42,7 +42,10 @@ See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and pa
 - `src/lib/platform.ts` — user session, fees (0.1%), risk config, alerts
 - `src/lib/diagnostics.ts` — bot health scoring, issue detection, BotDiagnostic
 - `src/lib/exchange.ts` — MockBinanceAdapter, ExchangeOrder, permission checker
-- `src/lib/exchange-mode.ts` — Unified Demo/Live singleton (ExchangeModeManager), armed state, readiness report
+- `src/lib/exchange-mode.ts` — Unified Demo/Live singleton (ExchangeModeManager), armed state, readiness report, ConnectionState machine (idle/validating/connected/network_error/invalid_credentials/permission_denied/balance_loaded/balance_empty)
+- `src/lib/credential-store.ts` — In-memory per-exchange API key store; rehydrates inputs on mount/exchange-switch so Real connection survives tab navigation
+- `src/lib/exchange-events.ts` — Diagnostics ring buffer (200 entries, masked keys); powers the Diagnostics tab on /exchange
+- `src/components/error-boundary.tsx` — Top-level + per-page boundary (red-themed in Real mode); replaces the prior black-screen crash
 - `src/lib/execution-engine.ts` — Signal-to-execution engine (demo/live separation, armed check, API call)
 - `src/lib/risk-manager.ts` — Pre-execution risk validation (balance, min size, cooldown, daily limit, duplicate)
 - `src/lib/execution-log.ts` — Execution log (CRUD, 500-entry cap, localStorage, reject reasons)

@@ -5,6 +5,7 @@ import { Router, type IRouter, type Request, type Response } from 'express';
 import { getAdapter, listAdapters, isSupported } from '../exchanges/registry.js';
 import { maskKey } from '../exchanges/base-adapter.js';
 import type { ExchangeCredentials, OrderRequest } from '../exchanges/types.js';
+import { classifyError } from '../exchanges/exchange-error.js';
 import { logger } from '../lib/logger.js';
 
 const router: IRouter = Router();
@@ -33,9 +34,18 @@ function badRequest(res: Response, msg: string) {
 }
 
 function serverError(res: Response, exchange: string, err: unknown) {
-  const msg = (err as Error)?.message ?? String(err);
-  logger.error({ exchange, error: msg }, '[exchange-proxy] error');
-  res.status(502).json({ ok: false, error: msg, exchange });
+  const { code, message, status } = classifyError(err);
+  logger.error({ exchange, code, error: message }, '[exchange-proxy] error');
+  // Map error code → HTTP status so existing fetch/!res.ok checks still work.
+  const httpStatus =
+    status ??
+    (code === 'auth'        ? 401 :
+     code === 'permission'  ? 403 :
+     code === 'rate_limit'  ? 429 :
+     code === 'network'     ? 503 :
+     code === 'account_type' ? 422 :
+     502);
+  res.status(httpStatus).json({ ok: false, code, error: message, exchange });
 }
 
 function requireExchange(req: Request, res: Response): string | null {

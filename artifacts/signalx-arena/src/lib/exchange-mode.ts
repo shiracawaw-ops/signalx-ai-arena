@@ -5,6 +5,22 @@
 
 export type ExchangeMode = 'demo' | 'paper' | 'testnet' | 'real';
 
+// Explicit per-exchange connection state. Replaces the old four-boolean
+// collapse so the UI and engine can distinguish *why* a real connection is
+// not ready (transient network blip vs. invalid creds vs. empty account).
+export type ConnectionState =
+  | 'disconnected'
+  | 'keys_saved'
+  | 'validating'
+  | 'network_error'
+  | 'invalid_credentials'
+  | 'permission_denied'
+  | 'rate_limited'
+  | 'connected'
+  | 'balance_loaded'
+  | 'balance_empty'
+  | 'balance_error';
+
 export interface ExchangeCredentials {
   apiKey:      string;
   secretKey:   string;
@@ -22,6 +38,8 @@ export interface ExchangeModeState {
   uid?:            string;
   connectedAt?:    number;
   latency?:        number;
+  connectionState:  ConnectionState;
+  connectionError?: string;
 }
 
 type Listener = (state: ExchangeModeState) => void;
@@ -30,13 +48,14 @@ const STORAGE_KEY = 'sx_exchange_mode_v1';
 
 function defaultState(): ExchangeModeState {
   return {
-    mode:           'demo',
-    exchange:       'binance',
-    armed:          false,
-    apiValidated:   false,
-    balanceFetched: false,
-    networkUp:      false,
-    permissions:    { read: false, trade: false, withdraw: false, futures: false },
+    mode:            'demo',
+    exchange:        'binance',
+    armed:           false,
+    apiValidated:    false,
+    balanceFetched:  false,
+    networkUp:       false,
+    permissions:     { read: false, trade: false, withdraw: false, futures: false },
+    connectionState: 'disconnected',
   };
 }
 
@@ -100,12 +119,14 @@ class ExchangeModeManager {
     // Switching mode clears all sensitive state
     this.update({
       mode,
-      armed:          false,
-      apiValidated:   false,
-      balanceFetched: false,
-      networkUp:      false,
-      permissions:    { read: false, trade: false, withdraw: false, futures: false },
-      uid:            undefined,
+      armed:           false,
+      apiValidated:    false,
+      balanceFetched:  false,
+      networkUp:       false,
+      permissions:     { read: false, trade: false, withdraw: false, futures: false },
+      uid:             undefined,
+      connectionState: 'disconnected',
+      connectionError: undefined,
     });
   }
 
@@ -113,15 +134,30 @@ class ExchangeModeManager {
     // Switching exchange clears connection state
     this.update({
       exchange,
-      armed:          false,
-      apiValidated:   false,
-      balanceFetched: false,
-      networkUp:      false,
-      permissions:    { read: false, trade: false, withdraw: false, futures: false },
-      uid:            undefined,
-      connectedAt:    undefined,
-      latency:        undefined,
+      armed:           false,
+      apiValidated:    false,
+      balanceFetched:  false,
+      networkUp:       false,
+      permissions:     { read: false, trade: false, withdraw: false, futures: false },
+      uid:             undefined,
+      connectedAt:     undefined,
+      latency:         undefined,
+      connectionState: 'disconnected',
+      connectionError: undefined,
     });
+  }
+
+  // Transition to a new connection state with an optional error message.
+  // Does not touch `mode` — failures during connect must NOT silently flip
+  // the user back to Demo. The user remains in Real / Testnet and the UI
+  // shows the classified error.
+  setConnectionState(state: ConnectionState, error?: string) {
+    const patch: Partial<ExchangeModeState> = { connectionState: state };
+    if (error !== undefined) patch.connectionError = error;
+    else if (state === 'connected' || state === 'balance_loaded' || state === 'disconnected') {
+      patch.connectionError = undefined;
+    }
+    this.update(patch);
   }
 
   arm()   { this.update({ armed: true  }); }
@@ -162,14 +198,16 @@ class ExchangeModeManager {
 
   disconnect() {
     this.update({
-      armed:          false,
-      apiValidated:   false,
-      balanceFetched: false,
-      networkUp:      false,
-      permissions:    { read: false, trade: false, withdraw: false, futures: false },
-      uid:            undefined,
-      connectedAt:    undefined,
-      latency:        undefined,
+      armed:           false,
+      apiValidated:    false,
+      balanceFetched:  false,
+      networkUp:       false,
+      permissions:     { read: false, trade: false, withdraw: false, futures: false },
+      uid:             undefined,
+      connectedAt:     undefined,
+      latency:         undefined,
+      connectionState: 'disconnected',
+      connectionError: undefined,
     });
   }
 }

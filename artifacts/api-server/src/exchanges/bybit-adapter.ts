@@ -1,5 +1,6 @@
 // ─── Bybit REST Adapter (Unified v5) ─────────────────────────────────────────
 import { hmacSHA256, safeFetch, stubSymbolRules, toUsdtPair } from './base-adapter.js';
+import { ExchangeOperationError } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE         = 'https://api.bybit.com';
@@ -88,22 +89,109 @@ export class BybitAdapter implements ExchangeAdapter {
   }
 
   async getBalances(creds: ExchangeCredentials): Promise<Balance[]> {
-    const base = creds.testnet ? TESTNET_BASE : BASE;
-    const ts   = Date.now();
-    const sig  = sign(creds.apiKey, creds.secretKey, ts, 'accountType=UNIFIED');
-    const r    = await safeFetch(`${base}/v5/account/wallet-balance?accountType=UNIFIED`, {
-      headers: headers(creds, ts, sig),
-    }, 'bybit');
-    if (!r.ok) throw new Error(r.error?.message);
-    const coins = ((r.data as Record<string, Record<string, unknown[]>>)?.['result']?.['list']?.[0] as Record<string, unknown[]>)?.['coin'] ?? [];
-    return (coins as Array<Record<string, unknown>>)
-      .filter(c => parseFloat(String(c['walletBalance'] ?? '0')) > 0)
-      .map(c => ({
-        asset:     String(c['coin'] ?? ''),
-        available: parseFloat(String(c['availableToWithdraw'] ?? '0')),
-        hold:      parseFloat(String(c['locked'] ?? '0')),
-        total:     parseFloat(String(c['walletBalance'] ?? '0')),
-      }));
+    // Bybit accounts may be Unified, Spot-only, or Contract-only depending on
+    // whether the user migrated to Unified Margin. Try each in order and
+    // merge the non-empty results so we don't show an empty balance pane to
+    // a user whose funds happen to live in Spot or Contract.
+    const base       = creds.testnet ? TESTNET_BASE : BASE;
+    const accountTypes = ['UNIFIED', 'SPOT', 'CONTRACT'] as const;
+
+    const merged: Map<string, Balance> = new Map();
+    let lastError: { code: 'auth' | 'rate_limit' | 'permission' | 'network' | 'account_type' | 'unknown'; message: string; status?: number } | null = null;
+
+    for (const accountType of accountTypes) {
+      const ts  = Date.now();
+      const qs  = `accountType=${accountType}`;
+      const sig = sign(creds.apiKey, creds.secretKey, ts, qs);
+      const r   = await safeFetch(`${base}/v5/account/wallet-balance?${qs}`, {
+        headers: headers(creds, ts, sig),
+      }, 'bybit');
+
+      if (!r.ok) {
+        const status = r.status;
+        const msg    = r.error?.message ?? `Bybit balance fetch failed (${accountType})`;
+        const lc     = msg.toLowerCase();
+        // Wrong-account-type response — keep trying other types.
+        if (status === 422 || lc.includes('accounttype') || lc.includes('account type')) {
+          lastError = { code: 'account_type', message: msg, status };
+          continue;
+        }
+        if (status === 401 || lc.includes('signature') || lc.includes('apikey') || lc.includes('api key') || lc.includes('invalid')) {
+          throw new ExchangeOperationError('auth', `Bybit rejected the API key: ${msg}`, 401);
+        }
+        if (status === 403 || lc.includes('permission') || lc.includes('not allowed')) {
+          throw new ExchangeOperationError('permission', `Bybit API key lacks permission: ${msg}`, 403);
+        }
+        if (status === 429 || lc.includes('rate')) {
+          throw new ExchangeOperationError('rate_limit', `Bybit rate limit hit: ${msg}`, 429);
+        }
+        if (status === 0 || lc.includes('timeout') || lc.includes('network')) {
+          throw new ExchangeOperationError('network', `Bybit unreachable: ${msg}`);
+        }
+        // Other classes of failure — remember and keep trying remaining types.
+        lastError = { code: 'unknown', message: msg, status };
+        continue;
+      }
+
+      // Bybit v5 also signals errors via retCode != 0 on a 200 response.
+      const retCode = (r.data as Record<string, unknown>)?.['retCode'];
+      const retMsg  = String((r.data as Record<string, unknown>)?.['retMsg'] ?? '');
+      if (typeof retCode === 'number' && retCode !== 0) {
+        const lcMsg = retMsg.toLowerCase();
+        if (lcMsg.includes('accounttype') || lcMsg.includes('account type')) {
+          lastError = { code: 'account_type', message: retMsg };
+          continue;
+        }
+        if (retCode === 10003 || retCode === 10004 || lcMsg.includes('signature') || lcMsg.includes('api key')) {
+          throw new ExchangeOperationError('auth', `Bybit auth error (retCode ${retCode}): ${retMsg}`, 401);
+        }
+        if (retCode === 10005 || lcMsg.includes('permission')) {
+          throw new ExchangeOperationError('permission', `Bybit permission denied (retCode ${retCode}): ${retMsg}`, 403);
+        }
+        if (retCode === 10006 || lcMsg.includes('rate limit')) {
+          throw new ExchangeOperationError('rate_limit', `Bybit rate limit (retCode ${retCode}): ${retMsg}`, 429);
+        }
+        lastError = { code: 'unknown', message: `retCode ${retCode}: ${retMsg}` };
+        continue;
+      }
+
+      const list   = (r.data as Record<string, Record<string, unknown[]>>)?.['result']?.['list'] ?? [];
+      const first  = (list[0] ?? {}) as Record<string, unknown[]>;
+      const coins  = (first['coin'] as Array<Record<string, unknown>> | undefined) ?? [];
+
+      for (const c of coins) {
+        const asset = String(c['coin'] ?? '');
+        if (!asset) continue;
+        const total     = parseFloat(String(c['walletBalance'] ?? '0'));
+        if (!Number.isFinite(total) || total <= 0) continue;
+        const available = parseFloat(String(c['availableToWithdraw'] ?? c['free'] ?? '0'));
+        const hold      = parseFloat(String(c['locked'] ?? '0'));
+        // Merge across account types — sum same-asset balances.
+        const prev = merged.get(asset);
+        if (prev) {
+          merged.set(asset, {
+            asset,
+            available: prev.available + (Number.isFinite(available) ? available : 0),
+            hold:      prev.hold      + (Number.isFinite(hold)      ? hold      : 0),
+            total:     prev.total     + total,
+          });
+        } else {
+          merged.set(asset, {
+            asset,
+            available: Number.isFinite(available) ? available : 0,
+            hold:      Number.isFinite(hold)      ? hold      : 0,
+            total,
+          });
+        }
+      }
+    }
+
+    if (merged.size === 0 && lastError && lastError.code !== 'account_type') {
+      // All account types failed for the same non-account-type reason.
+      throw new ExchangeOperationError(lastError.code, lastError.message, lastError.status);
+    }
+
+    return [...merged.values()];
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {
