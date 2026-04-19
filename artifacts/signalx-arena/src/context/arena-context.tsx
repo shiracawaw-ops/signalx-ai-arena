@@ -1,6 +1,6 @@
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
-import { Bot, Trade, loadBots, saveBots, loadTrades, saveTrades, BOT_COLORS } from '@/lib/storage';
+import { Bot, Trade, loadBots, saveBots, loadTrades, saveTrades, BOT_COLORS, ASSET_MAP } from '@/lib/storage';
 import { perfMonitor } from '@/lib/perf-monitor';
 import { MarketData, initMarket, tickMarket, executeBotTick } from '@/lib/engine';
 import { generateBots, makeFreshStandbyBot } from '@/lib/seed';
@@ -13,24 +13,22 @@ import { exchangeMode } from '@/lib/exchange-mode';
 // All safety guards (mode/armed/validated/balance/perms/creds, stale-price,
 // risk, min-notional, precision) live in executeSignal — we just bridge.
 //
-// Only crypto-style symbols are forwarded; non-crypto bot symbols (stocks,
-// metals, forex, indices) are skipped because no crypto exchange has a
-// matching tradable pair and the rejections would just spam the log.
-const NON_CRYPTO_SYMBOLS = new Set<string>([
-  'AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'NFLX', 'BABA',
-  'TSM',  'JPM',  'V',    'SAMSUNG', 'TOYOTA',
-  'GOLD', 'SILVER', 'PLAT', 'COPPER', 'OIL', 'NG',
-  'EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF',
-]);
-
+// Only crypto bot symbols are forwarded; stocks/metals/forex are skipped
+// because crypto exchanges have no matching tradable pair and the
+// rejections would just spam the log. Category lookup is driven from the
+// canonical ASSET_MAP so it stays in sync as new assets are added.
 function isLiveTradingMode(mode: string): boolean {
   return mode === 'real' || mode === 'testnet';
+}
+
+function isCryptoSymbol(symbol: string): boolean {
+  return ASSET_MAP[symbol]?.category === 'Crypto';
 }
 
 function bridgeBotTradeToExchange(trade: Trade): void {
   const mode = exchangeMode.get().mode;
   if (!isLiveTradingMode(mode)) return;
-  if (NON_CRYPTO_SYMBOLS.has(trade.symbol)) return;
+  if (!isCryptoSymbol(trade.symbol)) return;
 
   // Fire-and-forget — we never block the tick loop on a network round-trip.
   // executeSignal logs rejections via REJECT.* codes into executionLog and
