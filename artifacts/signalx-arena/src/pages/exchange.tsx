@@ -1016,10 +1016,10 @@ export default function ExchangePage() {
                           <td className="px-3 py-2 text-zinc-500 whitespace-nowrap">{new Date(e.ts).toLocaleTimeString()}</td>
                           <td className="px-3 py-2">
                             <span className={`text-[9px] px-1.5 py-0.5 rounded-full border ${
-                              e.mode === 'real'    ? 'border-red-500/40 text-red-400 bg-red-500/5'       :
-                              e.mode === 'testnet' ? 'border-amber-500/40 text-amber-400 bg-amber-500/5' :
-                              e.mode === 'paper'   ? 'border-blue-500/40 text-blue-400 bg-blue-500/5'    :
-                                                     'border-emerald-500/30 text-emerald-400 bg-emerald-500/5'
+                              e.mode === 'real'    ? 'border-red-500/40 text-red-400 bg-red-500/5'          :
+                              e.mode === 'testnet' ? 'border-orange-500/40 text-orange-400 bg-orange-500/5' :
+                              e.mode === 'paper'   ? 'border-yellow-500/40 text-yellow-400 bg-yellow-500/5' :
+                                                     'border-blue-500/30 text-blue-400 bg-blue-500/5'
                             }`}>
                               {e.mode.toUpperCase()}
                             </span>

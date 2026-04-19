@@ -92,8 +92,9 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     return reject(signal, exchange, mode, REJECT.INVALID_SIDE, `Invalid order side: "${signal.side}". Must be "buy" or "sell".`);
   }
 
-  // Stale price guard
-  if (isPriceStale(signal)) {
+  // Stale price guard — only applies to live exchange submission (testnet/real)
+  // Demo and paper modes do not reject stale signals to keep simulator permissive
+  if ((mode === 'testnet' || mode === 'real') && isPriceStale(signal)) {
     const ageS = ((Date.now() - signal.ts) / 1000).toFixed(1);
     return reject(signal, exchange, mode, REJECT.STALE_PRICE, `Signal price is ${ageS}s old (limit: ${STALE_PRICE_MS / 1000}s). Refusing to execute.`);
   }
