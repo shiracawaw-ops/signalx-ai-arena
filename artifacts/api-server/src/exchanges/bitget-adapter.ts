@@ -1,6 +1,6 @@
 // ─── Bitget REST Adapter (v2) ─────────────────────────────────────────────────
 import { hmacSHA256Base64, safeFetch, stubSymbolRules, toUsdtPair } from './base-adapter.js';
-import { classifyHttpFailure, check200Error, withUsdtValue, assertArray } from './exchange-error.js';
+import { classifyHttpFailure, check200Error, withUsdtValue, assertArray, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE = 'https://api.bitget.com';
@@ -83,7 +83,7 @@ export class BitgetAdapter implements ExchangeAdapter {
     if (!r.ok) throw classifyHttpFailure('bitget', r.status, r.error?.message);
     check200Error('bitget', r.data, 'code', 'msg', ['00000', 0, '0']);
     const list = assertArray('bitget', (r.data as Record<string, unknown>)?.['data'] ?? [], '/spot/account/assets#data') as Array<Record<string, unknown>>;
-    return list
+    const balances = list
       .filter(a => parseFloat(String(a['available'] ?? '0')) + parseFloat(String(a['frozen'] ?? '0')) > 0)
       .map(a => {
         const availN = parseFloat(String(a['available'] ?? '0'));
@@ -96,6 +96,7 @@ export class BitgetAdapter implements ExchangeAdapter {
           total:     available + hold,
         });
       });
+    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

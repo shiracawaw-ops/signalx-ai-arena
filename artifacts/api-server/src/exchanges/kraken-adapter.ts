@@ -1,6 +1,6 @@
 // ─── Kraken REST Adapter ──────────────────────────────────────────────────────
 import { sha256, safeFetch, stubSymbolRules } from './base-adapter.js';
-import { classifyHttpFailure, withUsdtValue } from './exchange-error.js';
+import { classifyHttpFailure, withUsdtValue, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import { createHmac } from 'node:crypto';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
@@ -105,7 +105,7 @@ export class KrakenAdapter implements ExchangeAdapter {
     if (!r.data || typeof r.data !== 'object' || Array.isArray(r.data)) {
       throw classifyHttpFailure('kraken', undefined, 'unexpected response shape from /0/private/Balance');
     }
-    return Object.entries(r.data as Record<string, string>)
+    const balances = Object.entries(r.data as Record<string, string>)
       .filter(([, v]) => parseFloat(v) > 0)
       .map(([k, v]) => {
         const asset = k.replace(/^X|Z$|Z(?=USD)/g, '').replace('XBT', 'BTC');
@@ -113,6 +113,7 @@ export class KrakenAdapter implements ExchangeAdapter {
         const safe  = Number.isFinite(total) ? total : 0;
         return withUsdtValue({ asset, available: safe, hold: 0, total: safe });
       });
+    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

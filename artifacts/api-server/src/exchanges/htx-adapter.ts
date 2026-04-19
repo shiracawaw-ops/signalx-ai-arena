@@ -1,6 +1,6 @@
 // ─── HTX (Huobi) REST Adapter ─────────────────────────────────────────────────
 import { hmacSHA256Base64, safeFetch, stubSymbolRules } from './base-adapter.js';
-import { classifyHttpFailure, withUsdtValue, assertArray } from './exchange-error.js';
+import { classifyHttpFailure, withUsdtValue, assertArray, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE     = 'https://api.huobi.pro';
@@ -126,9 +126,10 @@ export class HtxAdapter implements ExchangeAdapter {
       if (item['type'] === 'trade') entry.available = bal;
       else entry.hold = bal;
     }
-    return [...map.entries()]
+    const balances = [...map.entries()]
       .filter(([, v]) => v.available + v.hold > 0)
       .map(([asset, v]) => withUsdtValue({ asset: asset.toUpperCase(), ...v, total: v.available + v.hold }));
+    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

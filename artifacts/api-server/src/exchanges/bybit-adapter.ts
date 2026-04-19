@@ -1,6 +1,6 @@
 // ─── Bybit REST Adapter (Unified v5) ─────────────────────────────────────────
 import { hmacSHA256, safeFetch, stubSymbolRules, toUsdtPair } from './base-adapter.js';
-import { ExchangeOperationError, withUsdtValue } from './exchange-error.js';
+import { ExchangeOperationError, withUsdtValue, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE         = 'https://api.bybit.com';
@@ -193,7 +193,8 @@ export class BybitAdapter implements ExchangeAdapter {
       throw new ExchangeOperationError(lastError.code, lastError.message, lastError.status);
     }
 
-    return [...merged.values()].map(withUsdtValue);
+    const balances = [...merged.values()].map(withUsdtValue);
+    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

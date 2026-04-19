@@ -187,7 +187,7 @@ export default function ExchangePage() {
   const [modeState,   setModeState]   = useState<ExchangeModeState>(exMode.get());
   const [config,      setConfig]      = useState<TradeConfig>(tradeConfig.get(selectedEx.id));
   const [logEntries,  setLogEntries]  = useState<ExecutionEntry[]>(executionLog.all());
-  const [liveBalances, setLiveBalances] = useState<Array<{ asset: string; available: number; hold: number; total: number }>>([]);
+  const [liveBalances, setLiveBalances] = useState<Array<{ asset: string; available: number; hold: number; total: number; usdtValue?: number }>>([]);
   const [liveOrders,   setLiveOrders]  = useState<unknown[]>([]);
   const [livePermissions, setLivePermissions] = useState<{ read: boolean; trade: boolean; withdraw: boolean; futures: boolean } | null>(null);
   const [refreshing,   setRefreshing]  = useState(false);
@@ -307,19 +307,26 @@ export default function ExchangePage() {
       ]);
 
       if (balRes.ok) {
-        let bals: Array<{ asset: string; available: number; hold: number; total: number }> = [];
+        let bals: Array<{ asset: string; available: number; hold: number; total: number; usdtValue?: number }> = [];
         try {
           const raw = (balRes.data as { balances?: unknown }).balances;
           if (Array.isArray(raw)) {
             // Defensive normalization — never trust upstream shape.
             bals = raw
               .filter((b): b is Record<string, unknown> => !!b && typeof b === 'object')
-              .map(b => ({
-                asset:     String(b['asset'] ?? ''),
-                available: num(b['available']),
-                hold:      num(b['hold']),
-                total:     num(b['total']),
-              }))
+              .map(b => {
+                const usdtRaw = b['usdtValue'];
+                const usdtNum = typeof usdtRaw === 'number' && Number.isFinite(usdtRaw)
+                  ? usdtRaw
+                  : undefined;
+                return {
+                  asset:     String(b['asset'] ?? ''),
+                  available: num(b['available']),
+                  hold:      num(b['hold']),
+                  total:     num(b['total']),
+                  ...(usdtNum !== undefined ? { usdtValue: usdtNum } : {}),
+                };
+              })
               .filter(b => b.asset);
           }
         } catch (parseErr) {
@@ -632,7 +639,11 @@ export default function ExchangePage() {
   const totalUsdValue = balances.reduce((s, b) => s + num(b?.usdtValue), 0);
   // Include all stablecoins, not just USDT
   const STABLES       = new Set(['USDT', 'USD', 'USDC', 'BUSD', 'TUSD', 'USDP', 'DAI', 'FDUSD', 'USDD']);
-  const liveTotalUSD  = liveBalances
+  // Sum every asset's approximate USDT value (adapter-populated). Rows with
+  // an undefined `usdtValue` (no USDT pair available) contribute 0 — they are
+  // excluded rather than counting their `total` as $1 by mistake.
+  const liveTotalUSD  = liveBalances.reduce((s, b) => s + num(b?.usdtValue), 0);
+  const liveStableTotal = liveBalances
     .filter(b => b && STABLES.has(b.asset))
     .reduce((s, b) => s + num(b?.total), 0);
   const ac = selectedEx.accent;
@@ -987,7 +998,7 @@ export default function ExchangePage() {
             <div>
               <div className="text-2xl font-bold font-mono">${fmt(isLive && liveBalances.length > 0 ? liveTotalUSD : totalUsdValue)}</div>
               <div className="text-xs text-zinc-500">
-                {isLive && liveBalances.length > 0 ? `Stablecoin balance · ${liveBalances.length} asset${liveBalances.length !== 1 ? 's' : ''} total` : 'Total portfolio value (USDT)'} · {selectedEx.name}
+                {isLive && liveBalances.length > 0 ? `Approx. portfolio value (USDT) · ${liveBalances.length} asset${liveBalances.length !== 1 ? 's' : ''} · stables ${fmt(liveStableTotal)}` : 'Total portfolio value (USDT)'} · {selectedEx.name}
               </div>
             </div>
             <Button variant="outline" size="sm" onClick={() => isLive ? refreshLiveData() : loadData()} disabled={refreshing} className="flex items-center gap-1.5 text-xs">
@@ -1090,6 +1101,9 @@ export default function ExchangePage() {
                     </div>
                     <div className="font-mono font-bold text-xl">{fmt(b.available, 6)}</div>
                     <div className="text-xs text-zinc-500 mt-1">Total: {fmt(b.total, 6)}</div>
+                    <div className="text-xs text-zinc-500 mt-0.5">
+                      {typeof b.usdtValue === 'number' ? `≈ $${fmt(b.usdtValue)} USDT` : '≈ — USDT'}
+                    </div>
                     {b.hold > 0 && <div className="text-[10px] text-amber-400 mt-0.5">Locked: {fmt(b.hold, 6)}</div>}
                   </CardContent>
                 </Card>

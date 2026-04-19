@@ -1,6 +1,6 @@
 // ─── OKX REST Adapter ─────────────────────────────────────────────────────────
 import { hmacSHA256Base64, safeFetch, stubSymbolRules } from './base-adapter.js';
-import { classifyHttpFailure, check200Error, withUsdtValue, assertArray } from './exchange-error.js';
+import { classifyHttpFailure, check200Error, withUsdtValue, assertArray, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE = 'https://www.okx.com';
@@ -102,7 +102,7 @@ export class OkxAdapter implements ExchangeAdapter {
     check200Error('okx', r.data, 'code', 'msg', ['0', 0]);
     const dataArr = assertArray('okx', (r.data as Record<string, unknown>)?.['data'] ?? [], '/api/v5/account/balance#data');
     const details = ((dataArr[0] as Record<string, unknown[]>)?.['details'] ?? []) as unknown[];
-    return (assertArray('okx', details, '/api/v5/account/balance#details') as Array<Record<string, unknown>>)
+    const balances = (assertArray('okx', details, '/api/v5/account/balance#details') as Array<Record<string, unknown>>)
       .filter(d => parseFloat(String(d['cashBal'] ?? '0')) > 0)
       .map(d => {
         const availN = parseFloat(String(d['availBal']  ?? '0'));
@@ -115,6 +115,7 @@ export class OkxAdapter implements ExchangeAdapter {
           total:     Number.isFinite(totalN) ? totalN : 0,
         });
       });
+    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

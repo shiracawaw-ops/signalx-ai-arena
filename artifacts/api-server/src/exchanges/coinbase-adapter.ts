@@ -1,6 +1,6 @@
 // ─── Coinbase Advanced Trade Adapter ─────────────────────────────────────────
 import { hmacSHA256, safeFetch, stubSymbolRules } from './base-adapter.js';
-import { classifyHttpFailure, withUsdtValue, assertArray } from './exchange-error.js';
+import { classifyHttpFailure, withUsdtValue, assertArray, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE         = 'https://api.coinbase.com';
@@ -89,7 +89,7 @@ export class CoinbaseAdapter implements ExchangeAdapter {
     const r    = await safeFetch(`${base}${path}`, { headers: headers(creds, ts, sig) }, 'coinbase');
     if (!r.ok) throw classifyHttpFailure('coinbase', r.status, r.error?.message);
     const accounts = assertArray('coinbase', (r.data as Record<string, unknown>)?.['accounts'] ?? [], '/brokerage/accounts#accounts') as Array<Record<string, unknown>>;
-    return accounts
+    const balances = accounts
       .filter(a => parseFloat(String((a['available_balance'] as Record<string, string>)?.['value'] ?? '0')) > 0)
       .map(a => {
         const avail = (a['available_balance'] as Record<string, string>) ?? {};
@@ -104,6 +104,7 @@ export class CoinbaseAdapter implements ExchangeAdapter {
           total:     available + hold,
         });
       });
+    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

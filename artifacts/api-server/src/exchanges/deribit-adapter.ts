@@ -1,7 +1,7 @@
 // ─── Deribit REST Adapter (v2) ─────────────────────────────────────────────────
 // Deribit uses client_id/client_secret authentication via OAuth2 token
 import { safeFetch, stubSymbolRules } from './base-adapter.js';
-import { classifyHttpFailure, withUsdtValue, ExchangeOperationError } from './exchange-error.js';
+import { classifyHttpFailure, withUsdtValue, ExchangeOperationError, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE         = 'https://www.deribit.com/api/v2';
@@ -139,7 +139,7 @@ export class DeribitAdapter implements ExchangeAdapter {
     // Auth/permission/rate_limit errors should always bubble up — only
     // swallow the result when at least one currency succeeded.
     if (results.length === 0 && lastError) throw lastError;
-    return results;
+    return enrichBalancesWithUsdtValue(this.id, results, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

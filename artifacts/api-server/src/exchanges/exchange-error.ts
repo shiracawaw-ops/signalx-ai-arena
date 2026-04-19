@@ -146,3 +146,54 @@ export function withUsdtValue(b: {
   return { ...b };
 }
 
+// ─── Per-asset USDT price cache ─────────────────────────────────────────────
+// Real exchanges only return {asset, available, hold, total} for balances, so
+// the frontend would otherwise show "$0 USDT" next to every non-stable coin.
+// `enrichBalancesWithUsdtValue` fills in `usdtValue` for non-stable assets by
+// calling the adapter's own `getPrice(asset)` once per asset and multiplying
+// by `total`. Prices are cached per-exchange/per-asset for `PRICE_TTL_MS` so
+// repeated balance polls don't hammer the public ticker endpoint.
+type PriceEntry = { price: number; ts: number };
+const PRICE_TTL_MS = 30_000;
+const priceCache = new Map<string, PriceEntry>();
+
+export function _resetUsdtPriceCacheForTests(): void {
+  priceCache.clear();
+}
+
+async function lookupUsdtPrice(
+  exchangeId: string,
+  asset: string,
+  getPrice: (symbol: string) => Promise<number>,
+): Promise<number | undefined> {
+  const key = `${exchangeId}:${asset.toUpperCase()}`;
+  const now = Date.now();
+  const cached = priceCache.get(key);
+  if (cached && now - cached.ts < PRICE_TTL_MS) return cached.price;
+  try {
+    const price = await getPrice(asset);
+    if (!Number.isFinite(price) || price <= 0) return undefined;
+    priceCache.set(key, { price, ts: now });
+    return price;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function enrichBalancesWithUsdtValue<
+  B extends { asset: string; total: number; usdtValue?: number },
+>(
+  exchangeId: string,
+  balances: B[],
+  getPrice: (symbol: string) => Promise<number>,
+): Promise<B[]> {
+  const results = await Promise.all(balances.map(async b => {
+    if (b.usdtValue !== undefined) return b;
+    if (!b.asset || !Number.isFinite(b.total) || b.total <= 0) return b;
+    const price = await lookupUsdtPrice(exchangeId, b.asset, getPrice);
+    if (price === undefined) return b;
+    return { ...b, usdtValue: b.total * price };
+  }));
+  return results;
+}
+

@@ -1,6 +1,6 @@
 // ─── Gate.io REST Adapter (v4) ────────────────────────────────────────────────
 import { hmacSHA512Hex, sha256Hex, safeFetch, stubSymbolRules } from './base-adapter.js';
-import { classifyHttpFailure, check200Error, withUsdtValue } from './exchange-error.js';
+import { classifyHttpFailure, check200Error, withUsdtValue, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE = 'https://api.gateio.ws/api/v4';
@@ -94,7 +94,7 @@ export class GateAdapter implements ExchangeAdapter {
       // classified `unknown` rather than crashing on .filter below.
       throw classifyHttpFailure('gate', undefined, 'unexpected response shape from /spot/accounts');
     }
-    return (r.data as Array<Record<string, unknown>>)
+    const balances = (r.data as Array<Record<string, unknown>>)
       .filter(a => parseFloat(String(a['available'] ?? '0')) + parseFloat(String(a['locked'] ?? '0')) > 0)
       .map(a => {
         const availableN = parseFloat(String(a['available'] ?? '0'));
@@ -107,6 +107,7 @@ export class GateAdapter implements ExchangeAdapter {
           total:     available + hold,
         });
       });
+    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

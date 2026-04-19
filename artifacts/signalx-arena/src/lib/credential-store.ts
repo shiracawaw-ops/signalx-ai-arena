@@ -19,7 +19,7 @@ export interface MaskedHint {
 type Listener = (exchange: string) => void;
 
 export interface ExchangeDataCache {
-  liveBalances?: Array<{ asset: string; available: number; hold: number; total: number }>;
+  liveBalances?: Array<{ asset: string; available: number; hold: number; total: number; usdtValue?: number }>;
   liveOrders?:   unknown[];
   permissions?:  { read: boolean; trade: boolean; withdraw: boolean; futures: boolean };
   latency?:      number;

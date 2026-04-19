@@ -1,6 +1,6 @@
 // ─── KuCoin REST Adapter (API v2) ─────────────────────────────────────────────
 import { hmacSHA256Base64, safeFetch, stubSymbolRules } from './base-adapter.js';
-import { classifyHttpFailure, check200Error, withUsdtValue, assertArray } from './exchange-error.js';
+import { classifyHttpFailure, check200Error, withUsdtValue, assertArray, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE         = 'https://api.kucoin.com';
@@ -123,7 +123,8 @@ export class KuCoinAdapter implements ExchangeAdapter {
         merged.set(asset, { asset, available, hold, total });
       }
     }
-    return Array.from(merged.values()).map(withUsdtValue);
+    const balances = Array.from(merged.values()).map(withUsdtValue);
+    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

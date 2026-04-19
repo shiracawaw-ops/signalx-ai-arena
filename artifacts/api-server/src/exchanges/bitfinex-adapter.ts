@@ -1,6 +1,6 @@
 // ─── Bitfinex v2 REST Adapter ─────────────────────────────────────────────────
 import { hmacSHA384Base64, safeFetch, stubSymbolRules } from './base-adapter.js';
-import { classifyHttpFailure, withUsdtValue, assertArray } from './exchange-error.js';
+import { classifyHttpFailure, withUsdtValue, assertArray, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE = 'https://api.bitfinex.com';
@@ -98,7 +98,7 @@ export class BitfinexAdapter implements ExchangeAdapter {
       const arr = r.data as unknown[];
       throw classifyHttpFailure('bitfinex', undefined, String(arr[2] ?? `error code ${String(arr[1])}`));
     }
-    return (assertArray('bitfinex', r.data ?? [], 'auth/r/wallets') as unknown[][])
+    const balances = (assertArray('bitfinex', r.data ?? [], 'auth/r/wallets') as unknown[][])
       .filter(w => Array.isArray(w) && w[0] === 'exchange' && parseFloat(String(w[2] ?? '0')) > 0)
       .map(w => {
         const totalN = parseFloat(String(w[2] ?? '0'));
@@ -111,6 +111,7 @@ export class BitfinexAdapter implements ExchangeAdapter {
           available, hold, total,
         });
       });
+    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

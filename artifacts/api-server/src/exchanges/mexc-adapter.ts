@@ -1,6 +1,6 @@
 // ─── MEXC REST Adapter ────────────────────────────────────────────────────────
 import { hmacSHA256, safeFetch, stubSymbolRules, toUsdtPair } from './base-adapter.js';
-import { classifyHttpFailure, check200Error, withUsdtValue, assertArray } from './exchange-error.js';
+import { classifyHttpFailure, check200Error, withUsdtValue, assertArray, enrichBalancesWithUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE = 'https://api.mexc.com';
@@ -81,7 +81,7 @@ export class MexcAdapter implements ExchangeAdapter {
     check200Error('mexc', r.data, 'code', 'msg', [undefined, 0, '0', 200, '200']);
     const d   = r.data as Record<string, unknown>;
     const raw = assertArray('mexc', d['balances'] ?? [], '/api/v3/account#balances') as Array<Record<string, string>>;
-    return raw
+    const balances = raw
       .filter(b => parseFloat(b['free'] ?? '0') + parseFloat(b['locked'] ?? '0') > 0)
       .map(b => {
         const availN = parseFloat(b['free']   ?? '0');
@@ -94,6 +94,7 @@ export class MexcAdapter implements ExchangeAdapter {
           total:     available + hold,
         });
       });
+    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {
