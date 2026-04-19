@@ -63,6 +63,24 @@ jobs:
             Write-Error "index.html unexpectedly contains a service worker registration"; exit 1
           }
           Write-Host "Frontend assets OK: index.html + $($assets.Count) entry chunk(s)"
+      - name: Smoke-test packaged Electron app
+        # Launches the packaged .exe inside a real Chromium BrowserWindow and
+        # asserts the sign-in UI is visible. Catches blank-window regressions
+        # (preload errors, asset-path issues, CSP violations, missing native
+        # modules) that the jsdom routing test in `test` cannot detect.
+        shell: pwsh
+        run: |
+          # Install playwright-core into an isolated dir so it doesn't trip
+          # the repo's `preinstall` hook (which insists on pnpm) or mutate
+          # the workspace lockfile.
+          New-Item -ItemType Directory -Force -Path .smoke-test | Out-Null
+          Set-Location .smoke-test
+          npm init -y | Out-Null
+          npm install --no-package-lock playwright-core@1.49.1
+          Set-Location ..
+          $env:NODE_PATH = "$PWD/.smoke-test/node_modules"
+          node scripts/electron-smoke-test.mjs
+        env: { NODE_ENV: production }
       - uses: actions/upload-artifact@v4
         with:
           name: SignalX-AI-Arena-Windows
