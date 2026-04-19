@@ -82,6 +82,11 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
 
   // ── Universal pre-flight guards (all modes) ───────────────────────────────
 
+  // Duplicate signal guard — prevent same signal ID being processed twice in-session
+  if (recentSignals.includes(signal.id)) {
+    return reject(signal, exchange, mode, REJECT.DUPLICATE_SIGNAL, `Signal "${signal.id}" already processed this session.`);
+  }
+
   // Invalid side guard
   if (!isValidSide(signal.side)) {
     return reject(signal, exchange, mode, REJECT.INVALID_SIDE, `Invalid order side: "${signal.side}". Must be "buy" or "sell".`);
@@ -108,6 +113,7 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       orderId:   `demo_${Date.now()}`,
       signalId:  signal.id,
     });
+    recentSignals = [signal.id, ...recentSignals].slice(0, 100);
     console.log(`[engine][demo] Signal executed (no real order): ${signal.side} ${signal.symbol} @ $${signal.price}`);
     return { ok: true, orderId: logEntry.orderId, logId: logEntry.id, demo: true };
   }
@@ -139,6 +145,7 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       orderId:   `paper_${Date.now()}`,
       signalId:  signal.id,
     });
+    recentSignals = [signal.id, ...recentSignals].slice(0, 100);
     console.log(`[engine][paper] Paper trade logged (no real order): ${signal.side} ${signal.symbol} @ $${fillPrice}`);
     return { ok: true, orderId: logEntry.orderId, logId: logEntry.id, demo: true };
   }
@@ -273,8 +280,12 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
   try {
     let orderRes = await attemptOrder();
 
-    // Retry once on network error (2s delay)
-    if (!orderRes.ok && (orderRes.error?.includes('network') || orderRes.error?.includes('timed out') || orderRes.error?.includes('reach'))) {
+    // Retry once on transient network/connection errors (2s delay).
+    // Do NOT retry 4xx exchange rejections (bad request, auth failure, etc.).
+    const isNetworkError = (err: string) =>
+      err.includes('network') || err.includes('timed out') || err.includes('reach') ||
+      err.includes('ECONNREFUSED') || err.includes('ECONNRESET') || err.includes('ETIMEDOUT');
+    if (!orderRes.ok && isNetworkError((orderRes as { error: string }).error ?? '')) {
       console.warn('[engine] Network error on first attempt — retrying in 2s…');
       await new Promise(r => setTimeout(r, 2000));
       orderRes = await attemptOrder();

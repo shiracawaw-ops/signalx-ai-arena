@@ -181,7 +181,7 @@ function TickerStrip() {
     const _market  = marketRef.current;
 
     const totalPnL   = _bots.reduce((s, b) => s + getBotPnL(b, getCurrentPrice(b.symbol)), 0);
-    const totalFees  = _trades.reduce((s, t) => s + (t.fee ?? 0), 0);
+    const totalFees  = _trades.reduce((s, t) => s + (((t as unknown as Record<string, number>)['fee']) ?? 0), 0);
     const sells      = _trades.filter(t => t.type === 'SELL');
     const winRate    = sells.length > 0 ? (sells.filter(t => t.pnl > 0).length / sells.length) * 100 : 0;
     const active     = _bots.filter(b => b.isRunning).length;
@@ -279,7 +279,7 @@ export function GlobalControlBar({ onMobileOpen, alerts = 0 }: GlobalControlBarP
     const activeBots   = b.filter(x => x.isRunning).length;
     const pausedBots   = b.filter(x => !x.isRunning).length;
     const totalPnL     = b.reduce((s, x) => s + getBotPnL(x, gp(x.symbol)), 0);
-    const totalFees    = t.reduce((s, x) => s + (x.fee ?? 0), 0);
+    const totalFees    = t.reduce((s, x) => s + (((x as unknown as Record<string, number>)['fee']) ?? 0), 0);
     const sells        = t.filter(x => x.type === 'SELL');
     const winRate      = sells.length > 0 ? (sells.filter(x => x.pnl > 0).length / sells.length) * 100 : 0;
     const weakBots     = b.filter(x => x.startingBalance > 0 && (x.startingBalance - x.balance) / x.startingBalance > 0.15).length;

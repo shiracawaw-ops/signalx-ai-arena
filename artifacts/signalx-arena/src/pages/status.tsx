@@ -42,7 +42,7 @@ export default function StatusPage() {
     return () => clearInterval(id);
   }, []);
 
-  const activeBots   = bots.filter(b => b.isActive).length;
+  const activeBots   = bots.filter(b => b.isRunning).length;
   const totalTrades  = trades.length;
   const avgPnl       = bots.reduce((s, b) => s + b.balance - b.startingBalance, 0);
 

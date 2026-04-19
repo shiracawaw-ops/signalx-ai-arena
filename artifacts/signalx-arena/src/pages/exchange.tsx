@@ -31,10 +31,10 @@ function fmt(n: number, dec = 2) {
 }
 
 const MODES = [
-  { key: 'demo',    label: 'Demo',    desc: 'Virtual funds — no API keys needed',   color: 'text-emerald-400', border: 'border-emerald-500/30 bg-emerald-500/5' },
-  { key: 'paper',   label: 'Paper',   desc: 'Real prices, simulated fills',         color: 'text-blue-400',    border: 'border-blue-500/30 bg-blue-500/5'       },
-  { key: 'testnet', label: 'Testnet', desc: 'Sandbox — test API keys required',     color: 'text-amber-400',   border: 'border-amber-500/30 bg-amber-500/5'    },
-  { key: 'real',    label: 'Real',    desc: '⚠ Real funds — proceed with caution', color: 'text-red-400',     border: 'border-red-500/30 bg-red-500/5'        },
+  { key: 'demo',    label: 'Demo',    desc: 'Virtual funds — no API keys needed',   color: 'text-blue-400',   border: 'border-blue-500/30 bg-blue-500/5'       },
+  { key: 'paper',   label: 'Paper',   desc: 'Real prices, simulated fills',         color: 'text-yellow-400', border: 'border-yellow-500/30 bg-yellow-500/5'   },
+  { key: 'testnet', label: 'Testnet', desc: 'Sandbox — test API keys required',     color: 'text-orange-400', border: 'border-orange-500/30 bg-orange-500/5'   },
+  { key: 'real',    label: 'Real',    desc: '⚠ Real funds — proceed with caution', color: 'text-red-400',    border: 'border-red-500/30 bg-red-500/5'         },
 ] as const;
 
 const ACCENT_DOT: Record<string, string> = {
@@ -130,8 +130,10 @@ export default function ExchangePage() {
   }, [selectedEx.id]);
 
   // ── Sync mode singleton when user changes mode selector ──────────────────
+  // Must use setMode() — not update() — so armed/networkUp/balanceFetched/
+  // apiValidated flags are cleared when the user switches modes.
   useEffect(() => {
-    exMode.update({ mode });
+    exMode.setMode(mode);
   }, [mode]);
 
   // ── Disconnect when switching exchanges ───────────────────────────────────

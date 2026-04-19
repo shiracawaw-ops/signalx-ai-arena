@@ -499,7 +499,7 @@ export default function AdminPage() {
                   <div key={ev.id} className="flex items-center gap-3 text-[11px] py-1 border-b border-zinc-800/30 last:border-0">
                     <span className="text-zinc-600 font-mono w-20 flex-shrink-0">{new Date(ev.timestamp).toLocaleTimeString()}</span>
                     <span className={`w-28 flex-shrink-0 font-medium ${
-                      ev.type === 'pause_critical' ? 'text-red-400' :
+                      (ev.type as string) === 'pause_critical' ? 'text-red-400' :
                       ev.type === 'activate_standby' ? 'text-emerald-400' :
                       ev.type === 'load_shed' ? 'text-amber-400' :
                       ev.type === 'watchdog_restart' ? 'text-blue-400' : 'text-purple-400'
