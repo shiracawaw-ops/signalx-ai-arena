@@ -893,11 +893,71 @@ export default function ExchangePage() {
               <RefreshCw size={12} className={refreshing ? 'animate-spin' : ''} /> Refresh
             </Button>
           </div>
-          {isLive && balError && (
+          {isLive && balError && modeState.connectionState !== 'balance_empty' && (
             <div className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2.5 text-xs text-red-400">
               <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
               <span>{balError}</span>
             </div>
+          )}
+          {isLive && modeState.connectionState === 'balance_empty' && liveBalances.length === 0 && (
+            <Card className="border-zinc-800/60 bg-zinc-900/40">
+              <CardContent className="p-5">
+                <div className="flex items-start gap-3">
+                  <div className="flex-shrink-0 mt-0.5 rounded-full bg-zinc-800/80 p-2">
+                    <Wallet size={18} className="text-zinc-300" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold text-zinc-100">
+                      Connected to {selectedEx.name} — no assets found
+                    </div>
+                    <div className="mt-1 text-xs text-zinc-400 leading-relaxed">
+                      The connection and your API key are working. The account just looks empty right now. The most common reasons:
+                    </div>
+                    <ul className="mt-3 space-y-2 text-xs text-zinc-300">
+                      <li className="flex items-start gap-2">
+                        <span className="mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-zinc-500" />
+                        <span><span className="font-medium text-zinc-100">No funds yet.</span> Deposit or transfer assets into this account to start trading.</span>
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-zinc-500" />
+                        <span><span className="font-medium text-zinc-100">Wrong account type.</span> Funds in Futures, Margin, Earn or Funding wallets won&apos;t show up under Spot — move them to the matching wallet, or pick a key tied to the right account.</span>
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-zinc-500" />
+                        <span><span className="font-medium text-zinc-100">Read-only key on a different sub-account.</span> Sub-account API keys only see that sub-account&apos;s balances. Use a master-account key, or a key issued by the sub-account that actually holds the funds.</span>
+                      </li>
+                    </ul>
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1.5"
+                        onClick={() => window.open(`https://${selectedEx.website}`, '_blank', 'noopener,noreferrer')}
+                      >
+                        <ExternalLink size={11} /> Fund on {selectedEx.shortName}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1.5"
+                        onClick={() => window.open(`https://www.google.com/search?q=${encodeURIComponent(`${selectedEx.name} transfer between spot futures wallet`)}`, '_blank', 'noopener,noreferrer')}
+                      >
+                        <ArrowLeftRight size={11} /> Switch account type
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1.5"
+                        onClick={refreshLiveData}
+                        disabled={refreshing}
+                      >
+                        <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} /> Retry
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
           )}
           {isLive && liveBalances.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
