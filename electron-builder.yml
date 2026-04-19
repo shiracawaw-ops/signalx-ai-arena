@@ -1,0 +1,70 @@
+# ─── electron-builder configuration ─────────────────────────────────────────────
+# Produces:
+#   Windows → NSIS installer (.exe) + Portable (.exe)
+#   macOS   → DMG
+#   Linux   → AppImage
+
+appId:       ai.signalx.arena
+productName: SignalX AI Arena
+copyright:   Copyright © 2024 SignalX
+
+# ── Source (electron main process files) ───────────────────────────────────────
+directories:
+  output:         dist-electron
+  buildResources: electron
+
+main: electron/main.js
+
+files:
+  - electron/main.js
+  - electron/preload.js
+
+# Extra resources bundled outside the asar archive (can be read by Node.js)
+extraResources:
+  # Built Vite frontend → resources/frontend/
+  - from: "artifacts/signalx-arena/dist-electron"
+    to:   "frontend"
+    filter: ["**/*"]
+  # Built api-server bundle → resources/api-server/dist/
+  - from: "artifacts/api-server/dist"
+    to:   "api-server/dist"
+    filter: ["**/*.mjs", "**/*.mjs.map"]
+
+# ── Windows ────────────────────────────────────────────────────────────────────
+win:
+  icon:   electron/icon.png
+  target:
+    - target: nsis
+      arch:   [x64]
+    - target: portable
+      arch:   [x64]
+  artifactName: "SignalX-AI-Arena-${name}-${version}.${ext}"
+
+nsis:
+  oneClick:          false
+  perMachine:        false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName:      "SignalX AI Arena"
+  installerHeaderIcon: electron/icon.png
+
+portable:
+  artifactName: "SignalX-AI-Arena-Portable-${version}.exe"
+
+# ── macOS ──────────────────────────────────────────────────────────────────────
+mac:
+  icon:     electron/icon.png
+  category: public.app-category.finance
+  target:
+    - target: dmg
+      arch:   [x64, arm64]
+
+# ── Linux ─────────────────────────────────────────────────────────────────────
+linux:
+  icon:     electron/icon.png
+  category: Finance
+  target:
+    - target: AppImage
+      arch:   [x64]
+  artifactName: "SignalX-AI-Arena-${version}.${ext}"
