@@ -18,6 +18,14 @@ export interface MaskedHint {
 
 type Listener = (exchange: string) => void;
 
+export interface ExchangeDataCache {
+  liveBalances?: Array<{ asset: string; available: number; hold: number; total: number }>;
+  liveOrders?:   unknown[];
+  permissions?:  { read: boolean; trade: boolean; withdraw: boolean; futures: boolean };
+  latency?:      number;
+  fetchedAt?:    number;
+}
+
 const HINT_STORAGE_KEY = 'sx_credential_hints_v1';
 
 function maskKey(key: string): string {
@@ -41,8 +49,25 @@ function saveHints(hints: Record<string, MaskedHint>): void {
 
 class CredentialStoreManager {
   private creds: Map<string, ExchangeCredentials> = new Map();
+  private cache: Map<string, ExchangeDataCache>   = new Map();
   private hints: Record<string, MaskedHint>       = loadHints();
   private listeners: Set<Listener>                = new Set();
+
+  // Cache last successful live data per exchange so the user sees it
+  // again after navigating away and back to /exchange. In-memory only —
+  // never written to disk.
+  setCache(exchange: string, patch: ExchangeDataCache): void {
+    const prev = this.cache.get(exchange) ?? {};
+    this.cache.set(exchange, { ...prev, ...patch, fetchedAt: Date.now() });
+  }
+
+  getCache(exchange: string): ExchangeDataCache | null {
+    return this.cache.get(exchange) ?? null;
+  }
+
+  clearCache(exchange: string): void {
+    this.cache.delete(exchange);
+  }
 
   set(exchange: string, creds: ExchangeCredentials): void {
     this.creds.set(exchange, { ...creds });
@@ -68,6 +93,7 @@ class CredentialStoreManager {
 
   clear(exchange: string, opts: { keepHint?: boolean } = {}): void {
     this.creds.delete(exchange);
+    this.cache.delete(exchange);
     if (!opts.keepHint) {
       delete this.hints[exchange];
       saveHints(this.hints);
@@ -77,6 +103,7 @@ class CredentialStoreManager {
 
   clearAll(): void {
     this.creds.clear();
+    this.cache.clear();
     this.hints = {};
     saveHints(this.hints);
     this.listeners.forEach(fn => { try { fn(''); } catch { /* ignore */ } });

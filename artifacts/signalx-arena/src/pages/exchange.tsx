@@ -177,26 +177,37 @@ export default function ExchangePage() {
   }, [mode]);
 
   // ── Switch exchanges: keep saved creds, restore connection state from store
-  // Same first-mount guard so a passive page return doesn't wipe flags.
+  // Same first-mount guard so a passive page return doesn't wipe flags
+  // or clear cached live balances/orders that the user expects to still
+  // see after returning to /exchange.
   const exMounted = useRef(false);
   useEffect(() => {
-    setBalances([]);
-    setOrders([]);
-    setLiveBalances([]);
-    setLiveOrders([]);
-    setLivePermissions(null);
-    setLatency(null);
-    setBalError(null);
-    setOrdError(null);
     setConfig(tradeConfig.get(selectedEx.id));
 
-    // Only call setExchange() when the user actually changes exchanges —
-    // not on the very first mount (which would clear active connection
-    // flags carried over from a previous page visit).
     if (!exMounted.current) {
+      // First mount: rehydrate cached live data for this exchange so the
+      // user sees the same balances/orders they had before navigating away.
       exMounted.current = true;
-    } else if (exMode.get().exchange !== selectedEx.id) {
-      exMode.setExchange(selectedEx.id);
+      const cached = credentialStore.getCache(selectedEx.id);
+      if (cached) {
+        if (cached.liveBalances)   setLiveBalances(cached.liveBalances);
+        if (cached.liveOrders)     setLiveOrders(cached.liveOrders);
+        if (cached.permissions)    setLivePermissions(cached.permissions);
+        if (typeof cached.latency === 'number') setLatency(cached.latency);
+      }
+    } else {
+      // Active exchange switch: reset everything for the new exchange.
+      setBalances([]);
+      setOrders([]);
+      setLiveBalances([]);
+      setLiveOrders([]);
+      setLivePermissions(null);
+      setLatency(null);
+      setBalError(null);
+      setOrdError(null);
+      if (exMode.get().exchange !== selectedEx.id) {
+        exMode.setExchange(selectedEx.id);
+      }
     }
 
     // Rehydrate creds + connection flag from the singleton store.
@@ -258,6 +269,7 @@ export default function ExchangePage() {
             { level: 'error' });
         }
         setLiveBalances(bals);
+        credentialStore.setCache(selectedEx.id, { liveBalances: bals });
         exMode.update({ balanceFetched: true });
         if (bals.length === 0) {
           setBalError('No assets found. Make sure your API key has read permission and funds exist in any account type.');
@@ -278,7 +290,9 @@ export default function ExchangePage() {
 
       if (ordRes.ok) {
         const rawOrders = (ordRes.data as { orders?: unknown }).orders;
-        setLiveOrders(Array.isArray(rawOrders) ? rawOrders : []);
+        const ordsArr = Array.isArray(rawOrders) ? rawOrders : [];
+        setLiveOrders(ordsArr);
+        credentialStore.setCache(selectedEx.id, { liveOrders: ordsArr });
       } else {
         const errMsg = ordRes.error ?? 'Order history fetch failed';
         setOrdError(errMsg);
@@ -397,6 +411,7 @@ export default function ExchangePage() {
       }).data;
       const perms = vData?.permissions ?? { read: true, trade: false, withdraw: false, futures: false };
       setLivePermissions(perms);
+      credentialStore.setCache(selectedEx.id, { permissions: perms, latency: lat });
 
       // 4. Update global engine state — credentials stay in session store
       exMode.update({
@@ -967,20 +982,31 @@ export default function ExchangePage() {
                   <p className={`text-sm font-semibold ${modeState.armed ? 'text-red-400' : 'text-zinc-400'}`}>
                     {modeState.armed ? '🔴 ARMED — Live orders will be placed' : '⚪ DISARMED — No real orders will be placed'}
                   </p>
-                  <p className="text-[10px] text-zinc-600 mt-0.5">Requires: Live mode + validated API + trade permission</p>
+                  <p className="text-[10px] text-zinc-600 mt-0.5">Requires: Real mode + network up + validated API + balance fetched + trade permission</p>
                 </div>
                 <Switch
                   checked={modeState.armed}
+                  disabled={!exMode.canArm() && !modeState.armed}
                   onCheckedChange={checked => {
-                    if (checked && !modeState.apiValidated) {
-                      toast({ title: 'Cannot arm', description: 'Validate your API key first.', variant: 'destructive' });
-                      return;
+                    if (!checked) { exMode.disarm(); return; }
+                    if (modeState.mode !== 'real') {
+                      toast({ title: 'Cannot arm', description: 'Switch to Real mode first.', variant: 'destructive' }); return;
                     }
-                    if (checked && !modeState.permissions.trade) {
-                      toast({ title: 'Cannot arm', description: 'API key does not have trade permission.', variant: 'destructive' });
-                      return;
+                    if (!modeState.networkUp) {
+                      toast({ title: 'Cannot arm', description: 'Connection is not healthy. Reconnect first.', variant: 'destructive' }); return;
                     }
-                    if (checked) exMode.arm(); else exMode.disarm();
+                    if (!modeState.apiValidated) {
+                      toast({ title: 'Cannot arm', description: 'Validate your API key first.', variant: 'destructive' }); return;
+                    }
+                    if (!modeState.balanceFetched) {
+                      toast({ title: 'Cannot arm', description: 'Fetch your live balance first.', variant: 'destructive' }); return;
+                    }
+                    if (!modeState.permissions.trade) {
+                      toast({ title: 'Cannot arm', description: 'API key does not have trade permission.', variant: 'destructive' }); return;
+                    }
+                    if (!exMode.arm()) {
+                      toast({ title: 'Cannot arm', description: 'Readiness check failed. Open the Live Status tab to see what\u2019s missing.', variant: 'destructive' });
+                    }
                   }}
                   className={modeState.armed ? 'data-[state=checked]:bg-red-500' : ''}
                 />

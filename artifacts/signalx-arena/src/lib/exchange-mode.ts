@@ -151,16 +151,75 @@ class ExchangeModeManager {
   // Does not touch `mode` — failures during connect must NOT silently flip
   // the user back to Demo. The user remains in Real / Testnet and the UI
   // shows the classified error.
+  //
+  // Readiness booleans (networkUp / apiValidated / balanceFetched) and the
+  // `armed` flag are kept STRICTLY SYNCHRONIZED with connectionState so
+  // that isExecutionReady() can never be true while the connection is in
+  // an error state. This is the contract the execution gate relies on.
   setConnectionState(state: ConnectionState, error?: string) {
     const patch: Partial<ExchangeModeState> = { connectionState: state };
     if (error !== undefined) patch.connectionError = error;
-    else if (state === 'connected' || state === 'balance_loaded' || state === 'disconnected') {
+    else if (state === 'connected' || state === 'balance_loaded' || state === 'balance_empty' || state === 'disconnected') {
       patch.connectionError = undefined;
     }
+
+    switch (state) {
+      case 'keys_saved':
+      case 'disconnected':
+        patch.networkUp = false; patch.apiValidated = false; patch.balanceFetched = false; patch.armed = false;
+        break;
+      case 'validating':
+        // mid-flight — clear validated/balance until success but keep network
+        patch.apiValidated = false; patch.balanceFetched = false; patch.armed = false;
+        break;
+      case 'network_error':
+        patch.networkUp = false; patch.apiValidated = false; patch.balanceFetched = false; patch.armed = false;
+        break;
+      case 'invalid_credentials':
+      case 'permission_denied':
+        patch.apiValidated = false; patch.balanceFetched = false; patch.armed = false;
+        break;
+      case 'rate_limited':
+        // Connection still healthy logically; just block trading until clears
+        patch.armed = false;
+        break;
+      case 'balance_error':
+        patch.balanceFetched = false; patch.armed = false;
+        break;
+      case 'connected':
+        patch.networkUp = true;
+        break;
+      case 'balance_loaded':
+        patch.networkUp = true; patch.balanceFetched = true;
+        break;
+      case 'balance_empty':
+        // Successful fetch with zero assets — fetch path is healthy but
+        // user has nothing to trade with, so do not let arm engage.
+        patch.networkUp = true; patch.balanceFetched = true; patch.armed = false;
+        break;
+    }
+
     this.update(patch);
   }
 
-  arm()   { this.update({ armed: true  }); }
+  // Returns true only when every prerequisite is met to safely flip the
+  // arm switch. Used by both the readiness panel and the arm toggle.
+  canArm(): boolean {
+    const s = this.state;
+    return (
+      s.mode             === 'real'  &&
+      s.networkUp        === true    &&
+      s.apiValidated     === true    &&
+      s.balanceFetched   === true    &&
+      s.permissions.trade === true
+    );
+  }
+
+  arm() {
+    if (!this.canArm()) return false;
+    this.update({ armed: true });
+    return true;
+  }
   disarm(){ this.update({ armed: false }); }
 
   // Mode helpers
