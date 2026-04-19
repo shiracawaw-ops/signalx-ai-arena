@@ -114,7 +114,19 @@ export type ExchangeErrorCode =
 
 type ApiResult<T> =
   | { ok: true; data: T }
-  | { ok: false; error: string; status?: number; code?: ExchangeErrorCode };
+  | { ok: false; error: string; status?: number; code?: ExchangeErrorCode; retryAfterMs?: number };
+
+// Parse a `Retry-After` header value (seconds-int or HTTP-date) into ms.
+// Returns undefined when the header is missing or unparseable.
+function parseRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const secs = Number(value);
+  if (Number.isFinite(secs) && secs >= 0) return Math.floor(secs * 1000);
+  const dateMs = Date.parse(value);
+  if (!Number.isFinite(dateMs)) return undefined;
+  const delta = dateMs - Date.now();
+  return delta > 0 ? delta : 0;
+}
 
 const FETCH_TIMEOUT_MS = 15_000;
 
@@ -149,7 +161,14 @@ async function request<T = unknown>(url: string, init: RequestInit = {}): Promis
         (obj?.['message'] as string | undefined) ??
         `Server returned HTTP ${res.status}`;
       const code = obj?.['code'] as ExchangeErrorCode | undefined;
-      return { ok: false, error: errMsg, status: res.status, ...(code ? { code } : {}) };
+      const retryAfterMs =
+        parseRetryAfter(res.headers.get('Retry-After')) ??
+        (typeof obj?.['retryAfter'] === 'number' ? Math.floor((obj['retryAfter'] as number) * 1000) : undefined);
+      return {
+        ok: false, error: errMsg, status: res.status,
+        ...(code ? { code } : {}),
+        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      };
     }
 
     // The backend may return a 200 with `{ ok: false, code, error }` for
@@ -159,7 +178,14 @@ async function request<T = unknown>(url: string, init: RequestInit = {}): Promis
       const obj = data as Record<string, unknown>;
       const errMsg = (obj['error'] as string | undefined) ?? (obj['message'] as string | undefined) ?? 'Exchange error';
       const code   = obj['code']  as ExchangeErrorCode | undefined;
-      return { ok: false, error: errMsg, status: res.status, ...(code ? { code } : {}) };
+      const retryAfterMs =
+        parseRetryAfter(res.headers.get('Retry-After')) ??
+        (typeof obj['retryAfter'] === 'number' ? Math.floor((obj['retryAfter'] as number) * 1000) : undefined);
+      return {
+        ok: false, error: errMsg, status: res.status,
+        ...(code ? { code } : {}),
+        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      };
     }
 
     return { ok: true, data: (data ?? {}) as T };

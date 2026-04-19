@@ -33,6 +33,11 @@ function badRequest(res: Response, msg: string) {
   res.status(400).json({ ok: false, error: msg });
 }
 
+// Default Retry-After hint (seconds) we surface for rate_limit responses when
+// the upstream exchange did not give us a more specific value. The frontend
+// uses this to schedule a single auto-retry after a brief throttle.
+const DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC = 30;
+
 function serverError(res: Response, exchange: string, err: unknown) {
   const { code, message, status } = classifyError(err);
   logger.error({ exchange, code, error: message }, '[exchange-proxy] error');
@@ -45,6 +50,14 @@ function serverError(res: Response, exchange: string, err: unknown) {
      code === 'network'     ? 503 :
      code === 'account_type' ? 422 :
      502);
+  if (code === 'rate_limit') {
+    res.setHeader('Retry-After', String(DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC));
+    res.status(httpStatus).json({
+      ok: false, code, error: message, exchange,
+      retryAfter: DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC,
+    });
+    return;
+  }
   res.status(httpStatus).json({ ok: false, code, error: message, exchange });
 }
 
@@ -94,6 +107,13 @@ router.post('/exchange/:exchange/validate', async (req, res) => {
         code === 'rate_limit'   ? 429 :
         code === 'network'      ? 503 :
         code === 'account_type' ? 422 : 401;
+      if (code === 'rate_limit') {
+        res.setHeader('Retry-After', String(DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC));
+        return res.status(httpStatus).json({
+          ok: false, exchange: ex, code, error: message,
+          retryAfter: DEFAULT_RATE_LIMIT_RETRY_AFTER_SEC, ...result,
+        });
+      }
       return res.status(httpStatus).json({ ok: false, exchange: ex, code, error: message, ...result });
     }
     res.json({ ok: true, exchange: ex, ...result });

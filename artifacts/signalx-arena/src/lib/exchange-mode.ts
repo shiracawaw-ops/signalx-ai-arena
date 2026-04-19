@@ -40,7 +40,26 @@ export interface ExchangeModeState {
   latency?:        number;
   connectionState:  ConnectionState;
   connectionError?: string;
+  // ── Auto-retry scheduling ───────────────────────────────────────────────
+  // When the connection enters `network_error` or `rate_limited` we schedule
+  // a single, silent re-validation. `autoRetryAt` is the wall-clock epoch ms
+  // at which the retry should fire — the UI uses it to render a countdown.
+  // `autoRetryReason` is the originating error so the countdown copy can
+  // be specific. `autoRetryAttempted` flips to true once the one auto-retry
+  // for the current error cycle has been consumed; it resets on success,
+  // disconnect, mode/exchange switch, or a manual user retry. This is what
+  // prevents retry storms during a real outage or persistent throttle.
+  autoRetryAt?:        number;
+  autoRetryReason?:    'network' | 'rate_limit';
+  autoRetryAttempted?: boolean;
 }
+
+// Default delays for the one-shot auto-retry. Network blips are usually a
+// few seconds; rate-limit cooldowns from exchanges are typically tens of
+// seconds and the backend may surface a stricter `Retry-After` hint that
+// overrides the default.
+export const AUTO_RETRY_NETWORK_MS    = 5_000;
+export const AUTO_RETRY_RATE_LIMIT_MS = 30_000;
 
 type Listener = (state: ExchangeModeState) => void;
 
@@ -127,6 +146,9 @@ class ExchangeModeManager {
       uid:             undefined,
       connectionState: 'disconnected',
       connectionError: undefined,
+      autoRetryAt:        undefined,
+      autoRetryReason:    undefined,
+      autoRetryAttempted: false,
     });
   }
 
@@ -144,7 +166,24 @@ class ExchangeModeManager {
       latency:         undefined,
       connectionState: 'disconnected',
       connectionError: undefined,
+      autoRetryAt:        undefined,
+      autoRetryReason:    undefined,
+      autoRetryAttempted: false,
     });
+  }
+
+  // Cancel any pending auto-retry without otherwise touching state. Called
+  // when the user manually clicks Retry (we want their click to fire the
+  // attempt, not a duplicate timer firing right after).
+  cancelAutoRetry() {
+    if (this.state.autoRetryAt === undefined && this.state.autoRetryReason === undefined) return;
+    this.update({ autoRetryAt: undefined, autoRetryReason: undefined });
+  }
+
+  // Flip the one-shot flag so the same error class can't schedule another
+  // auto-retry until a clean state resets it.
+  markAutoRetryConsumed() {
+    this.update({ autoRetryAt: undefined, autoRetryReason: undefined, autoRetryAttempted: true });
   }
 
   // Transition to a new connection state with an optional error message.
@@ -156,11 +195,37 @@ class ExchangeModeManager {
   // `armed` flag are kept STRICTLY SYNCHRONIZED with connectionState so
   // that isExecutionReady() can never be true while the connection is in
   // an error state. This is the contract the execution gate relies on.
-  setConnectionState(state: ConnectionState, error?: string) {
+  setConnectionState(state: ConnectionState, error?: string, retryAfterMs?: number) {
     const patch: Partial<ExchangeModeState> = { connectionState: state };
     if (error !== undefined) patch.connectionError = error;
     else if (state === 'connected' || state === 'balance_loaded' || state === 'balance_empty' || state === 'disconnected') {
       patch.connectionError = undefined;
+    }
+
+    // Auto-retry scheduling. Only the two transient classes get an auto-retry,
+    // and only once per error cycle (cleared on a successful state below).
+    if (state === 'network_error' && !this.state.autoRetryAttempted) {
+      patch.autoRetryAt     = Date.now() + AUTO_RETRY_NETWORK_MS;
+      patch.autoRetryReason = 'network';
+    } else if (state === 'rate_limited' && !this.state.autoRetryAttempted) {
+      const delay = retryAfterMs ?? AUTO_RETRY_RATE_LIMIT_MS;
+      patch.autoRetryAt     = Date.now() + Math.max(1_000, delay);
+      patch.autoRetryReason = 'rate_limit';
+    } else if (
+      state === 'connected' || state === 'balance_loaded' ||
+      state === 'balance_empty' || state === 'disconnected' ||
+      state === 'keys_saved'
+    ) {
+      // A clean state — clear the schedule and let future errors get a
+      // fresh one-shot retry.
+      patch.autoRetryAt        = undefined;
+      patch.autoRetryReason    = undefined;
+      patch.autoRetryAttempted = false;
+    } else {
+      // Validating / invalid_credentials / permission_denied / balance_error:
+      // cancel any pending auto-retry so we don't fire on a stale schedule.
+      patch.autoRetryAt     = undefined;
+      patch.autoRetryReason = undefined;
     }
 
     switch (state) {
@@ -267,6 +332,9 @@ class ExchangeModeManager {
       latency:         undefined,
       connectionState: 'disconnected',
       connectionError: undefined,
+      autoRetryAt:        undefined,
+      autoRetryReason:    undefined,
+      autoRetryAttempted: false,
     });
   }
 }

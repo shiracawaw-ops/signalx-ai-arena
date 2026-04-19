@@ -328,9 +328,10 @@ export default function ExchangePage() {
       } else {
         const errMsg = balRes.error ?? 'Balance fetch failed';
         const code   = balRes.code;
+        const retryAfterMs = (balRes as { retryAfterMs?: number }).retryAfterMs;
         setBalError(errMsg);
-        exMode.setConnectionState(codeToState(code), errMsg);
-        exchangeEvents.log('fetch-balance', selectedEx.id, errMsg, { level: 'error', data: { code } });
+        exMode.setConnectionState(codeToState(code), errMsg, retryAfterMs);
+        exchangeEvents.log('fetch-balance', selectedEx.id, errMsg, { level: 'error', data: { code, retryAfterMs } });
         toast({ title: 'Balance fetch failed', description: errMsg, variant: 'destructive' });
       }
 
@@ -430,8 +431,9 @@ export default function ExchangePage() {
       if (!valRes.ok) {
         const errMsg = valRes.error ?? 'Validation failed';
         const next   = codeToState(valRes.code);
-        exMode.setConnectionState(next, errMsg);
-        exchangeEvents.log('validate', selectedEx.id, errMsg, { level: 'error', data: { code: valRes.code } });
+        const retryAfterMs = (valRes as { retryAfterMs?: number }).retryAfterMs;
+        exMode.setConnectionState(next, errMsg, retryAfterMs);
+        exchangeEvents.log('validate', selectedEx.id, errMsg, { level: 'error', data: { code: valRes.code, retryAfterMs } });
         // Auth / permission failures = bad keys → drop them so the user must
         // re-enter. Network/rate_limit failures = keep them so a retry works.
         if (valRes.code === 'auth' || valRes.code === 'permission') {
@@ -532,14 +534,59 @@ export default function ExchangePage() {
   // handleConnect into a ref and call through it.
   const handleConnectRef = useRef(handleConnect);
   useEffect(() => { handleConnectRef.current = handleConnect; });
-  const retryConnection = useCallback(async () => {
+  // Hard-guard so a manual click and an about-to-fire auto-retry timer can't
+  // both kick off `handleConnect` in the same tick. The first caller wins
+  // and the other becomes a no-op.
+  const retryInFlightRef = useRef(false);
+  // `auto` distinguishes a timer-driven retry from a manual click. Manual
+  // clicks always cancel any pending auto-retry first; timer-driven ones
+  // mark the one-shot flag so they cannot loop into a retry storm.
+  const retryConnection = useCallback(async (auto = false) => {
+    if (retryInFlightRef.current) return;
     if (!credentialStore.has(selectedEx.id)) {
+      exMode.cancelAutoRetry();
       setTab('connection');
-      toast({ title: 'Re-enter your API keys', description: `Provide a valid ${selectedEx.name} API key to retry.` });
+      if (!auto) toast({ title: 'Re-enter your API keys', description: `Provide a valid ${selectedEx.name} API key to retry.` });
       return;
     }
-    await handleConnectRef.current();
+    if (auto) {
+      exMode.markAutoRetryConsumed();
+      exchangeEvents.log('connect', selectedEx.id, 'Auto-retry firing after transient connection error');
+    } else {
+      exMode.cancelAutoRetry();
+    }
+    retryInFlightRef.current = true;
+    try {
+      await handleConnectRef.current();
+    } finally {
+      retryInFlightRef.current = false;
+    }
   }, [selectedEx.id, selectedEx.name, toast]);
+
+  // ── Auto-retry timer ─────────────────────────────────────────────────────
+  // The connection state machine sets `autoRetryAt` when entering a
+  // transient error state. We schedule a single timer to fire the silent
+  // re-validation. Effect cleanup cancels the timer if the user disconnects,
+  // switches mode/exchange, clicks Retry manually, or another error path
+  // clears the schedule — preventing duplicate or stale retries.
+  const autoRetryAt = modeState.autoRetryAt;
+  useEffect(() => {
+    if (!autoRetryAt) return;
+    if (mode !== 'real' && mode !== 'testnet') return;
+    const delay = Math.max(0, autoRetryAt - Date.now());
+    const id = setTimeout(() => { void retryConnection(true); }, delay);
+    return () => clearTimeout(id);
+  }, [autoRetryAt, mode, retryConnection]);
+
+  // Tick once per second so the countdown re-renders without forcing the
+  // whole singleton to publish ticks. The effect is active only while a
+  // retry is pending.
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    if (!autoRetryAt) return;
+    const id = setInterval(() => setNowTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [autoRetryAt]);
 
   const permCheck = checkTradingPermission(['read', 'trade'], mode);
   // Defensive sums — guard every numeric input against NaN / undefined so a
@@ -617,6 +664,11 @@ export default function ExchangePage() {
           connection state will leave CONNECTION_ERROR_STATES. */}
       {(mode === 'real' || mode === 'testnet') && CONNECTION_ERROR_STATES.has(modeState.connectionState) && (() => {
         const info = friendlyConnectionError(modeState.connectionState, selectedEx.name, modeState.connectionError);
+        const retrySecs = modeState.autoRetryAt
+          ? Math.max(0, Math.ceil((modeState.autoRetryAt - Date.now()) / 1000))
+          : null;
+        const retryReasonLabel =
+          modeState.autoRetryReason === 'rate_limit' ? 'rate-limit' : 'network';
         return (
           <div
             role="alert"
@@ -635,15 +687,26 @@ export default function ExchangePage() {
                   </span>
                 </div>
                 <p className="text-xs text-zinc-300 mt-1 break-words">{info.body}</p>
+                {retrySecs !== null && (
+                  <p
+                    className="text-[11px] text-amber-300 mt-1.5 flex items-center gap-1.5"
+                    data-testid="connection-error-auto-retry-countdown"
+                  >
+                    <RefreshCw size={10} className="animate-spin" />
+                    {retrySecs > 0
+                      ? `Retrying in ${retrySecs}s after ${retryReasonLabel} blip…`
+                      : `Retrying now after ${retryReasonLabel} blip…`}
+                  </p>
+                )}
                 <div className="flex flex-wrap items-center gap-2 mt-3">
                   <Button
                     size="sm" variant="outline"
-                    onClick={retryConnection} disabled={connecting || validating || refreshing}
+                    onClick={() => { void retryConnection(false); }} disabled={connecting || validating || refreshing}
                     className="text-xs h-7 border-red-500/40 text-red-300 hover:bg-red-500/10"
                     data-testid="connection-error-retry"
                   >
                     <RefreshCw size={11} className={`mr-1.5 ${(connecting || validating || refreshing) ? 'animate-spin' : ''}`} />
-                    Retry
+                    Retry now
                   </Button>
                   {info.needsKeys && (
                     <Button
