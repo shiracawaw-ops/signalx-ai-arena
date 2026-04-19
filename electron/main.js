@@ -2,7 +2,7 @@
 // Uses utilityProcess.fork() (Electron 22+) to embed the Express API server
 // without needing a separate node.exe binary — works in packaged Windows EXE.
 
-const { app, BrowserWindow, shell, dialog, utilityProcess } = require('electron');
+const { app, BrowserWindow, shell, dialog, utilityProcess, ipcMain, clipboard } = require('electron');
 const path = require('path');
 const fs   = require('fs');
 const http = require('http');
@@ -78,6 +78,80 @@ function waitForApi(retries, callback) {
   });
 }
 
+// ── Error fallback ────────────────────────────────────────────────────────────
+// Loaded when the renderer fails to load (did-fail-load) or the renderer
+// process crashes (render-process-gone). Replaces the otherwise-blank window
+// with a static page that surfaces the error and lets the user retry.
+const ERROR_HTML     = path.join(__dirname, 'error.html');
+const ERROR_PRELOAD  = path.join(__dirname, 'error-preload.js');
+
+let showingError      = false;
+let errorIpcRegistered = false;
+
+function registerErrorIpc() {
+  if (errorIpcRegistered) return;
+  errorIpcRegistered = true;
+
+  ipcMain.on('signalx-error:reopen', () => {
+    if (mainWindow) {
+      mainWindow.close();
+      mainWindow = null;
+    }
+    showingError = false;
+    createWindow(null);
+  });
+  ipcMain.on('signalx-error:quit', () => app.quit());
+  ipcMain.on('signalx-error:copy', (_evt, text) => {
+    if (typeof text === 'string') clipboard.writeText(text);
+  });
+}
+
+function showErrorPage(reason) {
+  if (showingError || !mainWindow || mainWindow.isDestroyed()) return;
+  showingError = true;
+
+  const info = {
+    message:  String(reason || 'Unknown error'),
+    version:  app.getVersion(),
+    platform: `${process.platform} ${process.arch}`,
+    electron: process.versions.electron,
+  };
+
+  console.error('[electron] showing error fallback:', info.message);
+
+  // Re-create window with the error preload so the page can use IPC + diagnostics.
+  try { mainWindow.removeAllListeners('closed'); } catch { /* ignore */ }
+  try { mainWindow.destroy(); } catch { /* ignore */ }
+
+  mainWindow = new BrowserWindow({
+    width:           720,
+    height:          560,
+    minWidth:        480,
+    minHeight:       360,
+    backgroundColor: '#09090b',
+    show:            true,
+    title:           'SignalX AI Arena — Failed to load',
+    webPreferences: {
+      preload:             ERROR_PRELOAD,
+      nodeIntegration:     false,
+      contextIsolation:    true,
+      additionalArguments: [
+        '--signalx-error=' + encodeURIComponent(JSON.stringify(info)),
+      ],
+    },
+  });
+
+  mainWindow.on('closed', () => { mainWindow = null; showingError = false; });
+
+  mainWindow.loadFile(ERROR_HTML).catch((e) => {
+    // Last-ditch: native dialog if even the bundled error page can't load.
+    dialog.showErrorBox(
+      'SignalX — Failed to load',
+      `${info.message}\n\n(The bundled error screen also failed to load: ${e?.message || e})`,
+    );
+  });
+}
+
 // ── BrowserWindow ─────────────────────────────────────────────────────────────
 let mainWindow = null;
 
@@ -141,10 +215,31 @@ function createWindow(startupError) {
   });
 
   mainWindow.on('closed', () => { mainWindow = null; });
+
+  // ── Renderer load failures → show the error fallback page ──────────────────
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame) return;          // ignore subframe/asset failures
+    if (errorCode === -3) return;      // ERR_ABORTED — usually a user/nav cancel
+    showErrorPage(
+      `Failed to load application window.\n\n` +
+      `URL:   ${validatedURL}\n` +
+      `Code:  ${errorCode}\n` +
+      `Cause: ${errorDescription || 'unknown'}`,
+    );
+  });
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    showErrorPage(
+      `The application window crashed.\n\n` +
+      `Reason:    ${details?.reason || 'unknown'}\n` +
+      `Exit code: ${details?.exitCode ?? 'n/a'}`,
+    );
+  });
 }
 
 // ── App lifecycle ─────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
+  registerErrorIpc();
   startApiServer();
 
   // If the API bundle is missing, don't waste 20 seconds polling — open the

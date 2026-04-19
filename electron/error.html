@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>SignalX AI Arena — Failed to load</title>
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #09090b;
+      color: #e4e4e7;
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .wrap {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 56px 32px 32px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 22px;
+      font-weight: 600;
+      color: #fafafa;
+    }
+    .lede {
+      color: #a1a1aa;
+      margin: 0 0 28px;
+    }
+    .panel {
+      background: #18181b;
+      border: 1px solid #27272a;
+      border-radius: 8px;
+      padding: 16px 18px;
+      margin-bottom: 20px;
+    }
+    .panel h2 {
+      margin: 0 0 10px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #a1a1aa;
+    }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: #fca5a5;
+    }
+    dl {
+      margin: 0;
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      column-gap: 16px;
+      row-gap: 4px;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    dt { color: #71717a; }
+    dd { margin: 0; color: #e4e4e7; word-break: break-all; }
+    .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    button {
+      appearance: none;
+      border: 1px solid #3f3f46;
+      background: #27272a;
+      color: #fafafa;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    button.primary {
+      background: #2563eb;
+      border-color: #2563eb;
+    }
+    button:hover { filter: brightness(1.15); }
+    button:active { filter: brightness(0.9); }
+    .copied { color: #4ade80; font-size: 12px; margin-left: 8px; align-self: center; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>SignalX failed to open</h1>
+    <p class="lede">The application window could not load. You can try reopening it, or copy the diagnostics below and include them in a bug report.</p>
+
+    <div class="panel">
+      <h2>Error</h2>
+      <pre id="error-message">Loading…</pre>
+    </div>
+
+    <div class="panel">
+      <h2>Diagnostics</h2>
+      <dl>
+        <dt>App version</dt><dd id="app-version">—</dd>
+        <dt>Platform</dt><dd id="app-platform">—</dd>
+        <dt>Electron</dt><dd id="app-electron">—</dd>
+        <dt>Time</dt><dd id="app-time">—</dd>
+      </dl>
+    </div>
+
+    <div class="row">
+      <button class="primary" id="reopen">Reopen</button>
+      <button id="copy">Copy diagnostics</button>
+      <button id="quit">Quit</button>
+      <span class="copied" id="copied" hidden>Copied to clipboard</span>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      var api = window.signalxErrorPage || {};
+      var info = api.info || {
+        message: 'Unknown error', version: '?', platform: '?', electron: '?',
+      };
+
+      document.getElementById('error-message').textContent = info.message || 'Unknown error';
+      document.getElementById('app-version').textContent   = info.version || '?';
+      document.getElementById('app-platform').textContent  = info.platform || '?';
+      document.getElementById('app-electron').textContent  = info.electron || '?';
+      document.getElementById('app-time').textContent      = new Date().toISOString();
+
+      function diagnosticsText() {
+        return [
+          'SignalX AI Arena — failure report',
+          'Time:     ' + new Date().toISOString(),
+          'Version:  ' + (info.version || '?'),
+          'Platform: ' + (info.platform || '?'),
+          'Electron: ' + (info.electron || '?'),
+          '',
+          'Error:',
+          info.message || 'Unknown error',
+        ].join('\n');
+      }
+
+      document.getElementById('reopen').addEventListener('click', function () {
+        if (api.reopen) api.reopen();
+      });
+      document.getElementById('quit').addEventListener('click', function () {
+        if (api.quit) api.quit();
+      });
+      document.getElementById('copy').addEventListener('click', function () {
+        var text = diagnosticsText();
+        var done = function () {
+          var el = document.getElementById('copied');
+          el.hidden = false;
+          setTimeout(function () { el.hidden = true; }, 2000);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, function () {
+            if (api.copyDiagnostics) { api.copyDiagnostics(text); done(); }
+          });
+        } else if (api.copyDiagnostics) {
+          api.copyDiagnostics(text);
+          done();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
