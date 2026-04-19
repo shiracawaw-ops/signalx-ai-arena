@@ -1,6 +1,7 @@
 // ─── Deribit REST Adapter (v2) ─────────────────────────────────────────────────
 // Deribit uses client_id/client_secret authentication via OAuth2 token
 import { safeFetch, stubSymbolRules } from './base-adapter.js';
+import { classifyHttpFailure, withUsdtValue, ExchangeOperationError } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE         = 'https://www.deribit.com/api/v2';
@@ -15,9 +16,17 @@ async function getToken(apiKey: string, secret: string, base = BASE): Promise<st
   if (cached && cached.expires > Date.now() + 30_000) return cached.token;
 
   const r = await safeFetch(`${base}/public/auth?client_id=${encodeURIComponent(apiKey)}&client_secret=${encodeURIComponent(secret)}&grant_type=client_credentials`, {}, 'deribit');
-  if (!r.ok) throw new Error(`Deribit auth failed: ${r.error?.message}`);
+  if (!r.ok) throw classifyHttpFailure('deribit', r.status, `auth failed: ${r.error?.message ?? ''}`);
+  // JSON-RPC error envelope on HTTP 200
+  const errObj = (r.data as Record<string, Record<string, unknown>>)?.['error'];
+  if (errObj) {
+    throw classifyHttpFailure('deribit', undefined, `auth failed: ${String(errObj['message'] ?? errObj['code'])}`);
+  }
   const d = ((r.data as Record<string, Record<string, unknown>>)?.['result'] ?? {});
   const token   = String(d['access_token'] ?? '');
+  if (!token) {
+    throw new ExchangeOperationError('auth', 'Deribit auth response missing access_token', 401);
+  }
   const expires = Date.now() + (Number(d['expires_in'] ?? 900) * 1000);
   tokenCache.set(cacheKey, { token, expires });
   return token;
@@ -95,22 +104,41 @@ export class DeribitAdapter implements ExchangeAdapter {
     const token   = await getToken(creds.apiKey, creds.secretKey, base);
     const currencies = ['BTC', 'ETH', 'USDC', 'USDT'];
     const results: Balance[] = [];
+    let lastError: ExchangeOperationError | null = null;
     for (const ccy of currencies) {
       const r = await safeFetch(`${base}/private/get_account_summary?currency=${ccy}&extended=false`, {
         headers: authHeaders(token),
       }, 'deribit');
-      if (r.ok) {
-        const d = (r.data as Record<string, Record<string, unknown>>)?.['result'] ?? {};
-        const total = parseFloat(String(d['equity'] ?? d['balance'] ?? '0'));
-        if (total > 0) {
-          results.push({
-            asset: ccy, available: parseFloat(String(d['available_funds'] ?? '0')),
-            hold: Math.max(0, total - parseFloat(String(d['available_funds'] ?? '0'))),
-            total,
-          });
-        }
+      if (!r.ok) {
+        // Per-currency failures shouldn't kill the whole call, but if every
+        // currency fails we surface the last classified error.
+        lastError = classifyHttpFailure('deribit', r.status, r.error?.message);
+        continue;
+      }
+      // Deribit JSON-RPC: errors come back as { error: { code, message } }
+      // even on HTTP 200 — classify and bubble up as last error.
+      const errObj = (r.data as Record<string, Record<string, unknown>>)?.['error'];
+      if (errObj) {
+        lastError = classifyHttpFailure('deribit', undefined, String(errObj['message'] ?? `error code ${String(errObj['code'])}`));
+        continue;
+      }
+      const d = (r.data as Record<string, Record<string, unknown>>)?.['result'] ?? {};
+      const totalN = parseFloat(String(d['equity'] ?? d['balance'] ?? '0'));
+      const availN = parseFloat(String(d['available_funds'] ?? '0'));
+      const total     = Number.isFinite(totalN) ? totalN : 0;
+      const available = Number.isFinite(availN) ? availN : 0;
+      if (total > 0) {
+        results.push(withUsdtValue({
+          asset: ccy,
+          available,
+          hold: Math.max(0, total - available),
+          total,
+        }));
       }
     }
+    // Auth/permission/rate_limit errors should always bubble up — only
+    // swallow the result when at least one currency succeeded.
+    if (results.length === 0 && lastError) throw lastError;
     return results;
   }
 

@@ -1,5 +1,6 @@
 // ─── Coinbase Advanced Trade Adapter ─────────────────────────────────────────
 import { hmacSHA256, safeFetch, stubSymbolRules } from './base-adapter.js';
+import { classifyHttpFailure, withUsdtValue, assertArray } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE         = 'https://api.coinbase.com';
@@ -86,19 +87,22 @@ export class CoinbaseAdapter implements ExchangeAdapter {
     const path = '/api/v3/brokerage/accounts';
     const sig  = sign(creds.secretKey, ts, 'GET', path);
     const r    = await safeFetch(`${base}${path}`, { headers: headers(creds, ts, sig) }, 'coinbase');
-    if (!r.ok) throw new Error(r.error?.message);
-    const accounts = ((r.data as Record<string, unknown[]>)?.['accounts'] ?? []) as Array<Record<string, unknown>>;
+    if (!r.ok) throw classifyHttpFailure('coinbase', r.status, r.error?.message);
+    const accounts = assertArray('coinbase', (r.data as Record<string, unknown>)?.['accounts'] ?? [], '/brokerage/accounts#accounts') as Array<Record<string, unknown>>;
     return accounts
       .filter(a => parseFloat(String((a['available_balance'] as Record<string, string>)?.['value'] ?? '0')) > 0)
       .map(a => {
-        const avail = a['available_balance'] as Record<string, string> ?? {};
-        const hold  = a['hold'] as Record<string, string> ?? {};
-        return {
+        const avail = (a['available_balance'] as Record<string, string>) ?? {};
+        const held  = (a['hold'] as Record<string, string>) ?? {};
+        const availN = parseFloat(avail['value'] ?? '0');
+        const holdN  = parseFloat(held['value'] ?? '0');
+        const available = Number.isFinite(availN) ? availN : 0;
+        const hold      = Number.isFinite(holdN)  ? holdN  : 0;
+        return withUsdtValue({
           asset:     String(a['currency'] ?? ''),
-          available: parseFloat(avail['value'] ?? '0'),
-          hold:      parseFloat(hold['value'] ?? '0'),
-          total:     parseFloat(avail['value'] ?? '0') + parseFloat(hold['value'] ?? '0'),
-        };
+          available, hold,
+          total:     available + hold,
+        });
       });
   }
 

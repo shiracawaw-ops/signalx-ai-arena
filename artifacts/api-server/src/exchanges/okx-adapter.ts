@@ -1,5 +1,6 @@
 // ─── OKX REST Adapter ─────────────────────────────────────────────────────────
 import { hmacSHA256Base64, safeFetch, stubSymbolRules } from './base-adapter.js';
+import { classifyHttpFailure, check200Error, withUsdtValue, assertArray } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE = 'https://www.okx.com';
@@ -97,16 +98,23 @@ export class OkxAdapter implements ExchangeAdapter {
     const path = '/api/v5/account/balance';
     const sig  = sign(creds.secretKey, ts, 'GET', path);
     const r = await safeFetch(`${BASE}${path}`, { headers: headers(creds, ts, sig, !!creds.testnet) }, 'okx');
-    if (!r.ok) throw new Error(r.error?.message ?? 'Balance fetch failed');
-    const details = ((r.data as Record<string, unknown[]>)?.['data']?.[0] as Record<string, unknown[]>)?.['details'] ?? [];
-    return (details as Array<Record<string, unknown>>)
+    if (!r.ok) throw classifyHttpFailure('okx', r.status, r.error?.message);
+    check200Error('okx', r.data, 'code', 'msg', ['0', 0]);
+    const dataArr = assertArray('okx', (r.data as Record<string, unknown>)?.['data'] ?? [], '/api/v5/account/balance#data');
+    const details = ((dataArr[0] as Record<string, unknown[]>)?.['details'] ?? []) as unknown[];
+    return (assertArray('okx', details, '/api/v5/account/balance#details') as Array<Record<string, unknown>>)
       .filter(d => parseFloat(String(d['cashBal'] ?? '0')) > 0)
-      .map(d => ({
-        asset:     String(d['ccy'] ?? ''),
-        available: parseFloat(String(d['availBal'] ?? '0')),
-        hold:      parseFloat(String(d['frozenBal'] ?? '0')),
-        total:     parseFloat(String(d['cashBal'] ?? '0')),
-      }));
+      .map(d => {
+        const availN = parseFloat(String(d['availBal']  ?? '0'));
+        const holdN  = parseFloat(String(d['frozenBal'] ?? '0'));
+        const totalN = parseFloat(String(d['cashBal']   ?? '0'));
+        return withUsdtValue({
+          asset:     String(d['ccy'] ?? ''),
+          available: Number.isFinite(availN) ? availN : 0,
+          hold:      Number.isFinite(holdN)  ? holdN  : 0,
+          total:     Number.isFinite(totalN) ? totalN : 0,
+        });
+      });
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

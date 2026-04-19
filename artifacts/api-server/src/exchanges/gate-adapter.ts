@@ -1,5 +1,6 @@
 // ─── Gate.io REST Adapter (v4) ────────────────────────────────────────────────
 import { hmacSHA512Hex, sha256Hex, safeFetch, stubSymbolRules } from './base-adapter.js';
+import { classifyHttpFailure, check200Error, withUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE = 'https://api.gateio.ws/api/v4';
@@ -85,15 +86,27 @@ export class GateAdapter implements ExchangeAdapter {
     const r    = await safeFetch(`${BASE}/spot/accounts`, {
       headers: headers(creds, 'GET', path, '', '', ts),
     }, 'gate');
-    if (!r.ok) throw new Error(r.error?.message);
-    return ((r.data as Array<Record<string, unknown>>) ?? [])
+    if (!r.ok) throw classifyHttpFailure('gate', r.status, r.error?.message);
+    // Gate returns an array on success; an object with `label` on error.
+    if (!Array.isArray(r.data)) {
+      check200Error('gate', r.data, 'label', 'message', [undefined]);
+      // Non-array, no `label` either — payload is malformed; surface as
+      // classified `unknown` rather than crashing on .filter below.
+      throw classifyHttpFailure('gate', undefined, 'unexpected response shape from /spot/accounts');
+    }
+    return (r.data as Array<Record<string, unknown>>)
       .filter(a => parseFloat(String(a['available'] ?? '0')) + parseFloat(String(a['locked'] ?? '0')) > 0)
-      .map(a => ({
-        asset:     String(a['currency'] ?? ''),
-        available: parseFloat(String(a['available'] ?? '0')),
-        hold:      parseFloat(String(a['locked'] ?? '0')),
-        total:     parseFloat(String(a['available'] ?? '0')) + parseFloat(String(a['locked'] ?? '0')),
-      }));
+      .map(a => {
+        const availableN = parseFloat(String(a['available'] ?? '0'));
+        const holdN      = parseFloat(String(a['locked']    ?? '0'));
+        const available  = Number.isFinite(availableN) ? availableN : 0;
+        const hold       = Number.isFinite(holdN)      ? holdN      : 0;
+        return withUsdtValue({
+          asset:     String(a['currency'] ?? ''),
+          available, hold,
+          total:     available + hold,
+        });
+      });
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

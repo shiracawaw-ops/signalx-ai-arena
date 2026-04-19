@@ -1,5 +1,6 @@
 // ─── Kraken REST Adapter ──────────────────────────────────────────────────────
 import { sha256, safeFetch, stubSymbolRules } from './base-adapter.js';
+import { classifyHttpFailure, withUsdtValue } from './exchange-error.js';
 import { createHmac } from 'node:crypto';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
@@ -100,12 +101,17 @@ export class KrakenAdapter implements ExchangeAdapter {
 
   async getBalances(creds: ExchangeCredentials): Promise<Balance[]> {
     const r = await this.privatePost(creds, 'Balance', {});
-    if (!r.ok) throw new Error(String(r.error));
+    if (!r.ok) throw classifyHttpFailure('kraken', undefined, r.error ? String(r.error) : undefined);
+    if (!r.data || typeof r.data !== 'object' || Array.isArray(r.data)) {
+      throw classifyHttpFailure('kraken', undefined, 'unexpected response shape from /0/private/Balance');
+    }
     return Object.entries(r.data as Record<string, string>)
       .filter(([, v]) => parseFloat(v) > 0)
       .map(([k, v]) => {
         const asset = k.replace(/^X|Z$|Z(?=USD)/g, '').replace('XBT', 'BTC');
-        return { asset, available: parseFloat(v), hold: 0, total: parseFloat(v) };
+        const total = parseFloat(v);
+        const safe  = Number.isFinite(total) ? total : 0;
+        return withUsdtValue({ asset, available: safe, hold: 0, total: safe });
       });
   }
 

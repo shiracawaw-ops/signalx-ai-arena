@@ -1,6 +1,6 @@
 // ─── Bybit REST Adapter (Unified v5) ─────────────────────────────────────────
 import { hmacSHA256, safeFetch, stubSymbolRules, toUsdtPair } from './base-adapter.js';
-import { ExchangeOperationError } from './exchange-error.js';
+import { ExchangeOperationError, withUsdtValue } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE         = 'https://api.bybit.com';
@@ -155,9 +155,11 @@ export class BybitAdapter implements ExchangeAdapter {
         continue;
       }
 
-      const list   = (r.data as Record<string, Record<string, unknown[]>>)?.['result']?.['list'] ?? [];
-      const first  = (list[0] ?? {}) as Record<string, unknown[]>;
-      const coins  = (first['coin'] as Array<Record<string, unknown>> | undefined) ?? [];
+      const rawList = (r.data as Record<string, Record<string, unknown>>)?.['result']?.['list'];
+      const list    = Array.isArray(rawList) ? rawList : [];
+      const first   = (list[0] ?? {}) as Record<string, unknown>;
+      const coinsRaw = first['coin'];
+      const coins    = Array.isArray(coinsRaw) ? coinsRaw as Array<Record<string, unknown>> : [];
 
       for (const c of coins) {
         const asset = String(c['coin'] ?? '');
@@ -191,7 +193,7 @@ export class BybitAdapter implements ExchangeAdapter {
       throw new ExchangeOperationError(lastError.code, lastError.message, lastError.status);
     }
 
-    return [...merged.values()];
+    return [...merged.values()].map(withUsdtValue);
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

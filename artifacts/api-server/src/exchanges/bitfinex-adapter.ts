@@ -1,5 +1,6 @@
 // ─── Bitfinex v2 REST Adapter ─────────────────────────────────────────────────
 import { hmacSHA384Base64, safeFetch, stubSymbolRules } from './base-adapter.js';
+import { classifyHttpFailure, withUsdtValue, assertArray } from './exchange-error.js';
 import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE = 'https://api.bitfinex.com';
@@ -90,15 +91,26 @@ export class BitfinexAdapter implements ExchangeAdapter {
 
   async getBalances(creds: ExchangeCredentials): Promise<Balance[]> {
     const r = await this.auth(creds, 'wallets');
-    if (!r.ok) throw new Error(r.error);
-    return ((r.data as unknown[][]) ?? [])
-      .filter(w => w[0] === 'exchange' && parseFloat(String(w[2] ?? '0')) > 0)
-      .map(w => ({
-        asset:     String(w[1] ?? '').replace('UST', 'USDT'),
-        available: parseFloat(String(w[4] ?? w[2] ?? '0')),
-        hold:      Math.max(0, parseFloat(String(w[2] ?? '0')) - parseFloat(String(w[4] ?? '0'))),
-        total:     parseFloat(String(w[2] ?? '0')),
-      }));
+    if (!r.ok) throw classifyHttpFailure('bitfinex', undefined, r.error);
+    // Bitfinex signals errors with a 200 + body of the form
+    // ['error', code, message]. Detect and classify.
+    if (Array.isArray(r.data) && r.data[0] === 'error') {
+      const arr = r.data as unknown[];
+      throw classifyHttpFailure('bitfinex', undefined, String(arr[2] ?? `error code ${String(arr[1])}`));
+    }
+    return (assertArray('bitfinex', r.data ?? [], 'auth/r/wallets') as unknown[][])
+      .filter(w => Array.isArray(w) && w[0] === 'exchange' && parseFloat(String(w[2] ?? '0')) > 0)
+      .map(w => {
+        const totalN = parseFloat(String(w[2] ?? '0'));
+        const availN = parseFloat(String(w[4] ?? w[2] ?? '0'));
+        const total     = Number.isFinite(totalN) ? totalN : 0;
+        const available = Number.isFinite(availN) ? availN : 0;
+        const hold      = Math.max(0, total - available);
+        return withUsdtValue({
+          asset:     String(w[1] ?? '').replace('UST', 'USDT'),
+          available, hold, total,
+        });
+      });
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {
