@@ -274,8 +274,9 @@ export function checkTradingPermission(
   mode: string,
 ): { allowed: boolean; reason: string } {
   if (mode === 'demo')    return { allowed: true,  reason: 'Demo mode — no real funds at risk' };
+  if (mode === 'paper')   return { allowed: true,  reason: 'Paper mode — simulated fills, no real orders' };
   if (!permissions.includes('trade')) return { allowed: false, reason: 'API key missing TRADE permission' };
-  if (mode === 'testnet') return { allowed: true,  reason: 'Testnet mode — using test funds' };
-  if (mode === 'live')    return { allowed: true,  reason: 'Live mode — real funds active' };
+  if (mode === 'testnet') return { allowed: true,  reason: 'Testnet mode — sandbox orders only' };
+  if (mode === 'real')    return { allowed: true,  reason: 'Real mode — live funds active' };
   return { allowed: false, reason: 'Unknown mode' };
 }

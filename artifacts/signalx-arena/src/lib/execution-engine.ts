@@ -1,7 +1,10 @@
 // ─── Unified Trading Execution Engine ─────────────────────────────────────────
 // Signal → Validation → Risk → API → Log
-// DEMO: logs only, zero real orders.
-// LIVE: validates every condition, then calls backend proxy → exchange.
+//
+// DEMO:    logs only, zero real orders, no API keys.
+// PAPER:   logs as paper trade, no real orders, real price feed used.
+// TESTNET: validates & places orders on exchange sandbox endpoint (x-testnet: 1).
+// REAL:    full validation + risk checks, places live orders on production exchange.
 
 import { exchangeMode }    from './exchange-mode.js';
 import type { ExchangeCredentials } from './exchange-mode.js';
@@ -55,6 +58,18 @@ function resetDailyCounterIfNeeded() {
   }
 }
 
+// ── Pre-order safety guards ────────────────────────────────────────────────────
+
+const STALE_PRICE_MS = 30_000; // 30 seconds
+
+function isPriceStale(signal: Signal): boolean {
+  return Date.now() - signal.ts > STALE_PRICE_MS;
+}
+
+function isValidSide(side: string): side is 'buy' | 'sell' {
+  return side === 'buy' || side === 'sell';
+}
+
 // ── Main execute function ──────────────────────────────────────────────────────
 
 export async function executeSignal(signal: Signal): Promise<EngineResult> {
@@ -63,10 +78,22 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
   const modeState = exchangeMode.get();
   const exchange  = modeState.exchange;
   const config    = tradeConfig.get(exchange);
-  const isDemo    = modeState.mode === 'demo';
+  const mode      = modeState.mode;
 
-  // ── DEMO MODE ────────────────────────────────────────────────────────────────
-  if (isDemo) {
+  // ── Universal pre-flight guards (all modes) ───────────────────────────────
+
+  // Invalid side guard
+  if (!isValidSide(signal.side)) {
+    return reject(signal, exchange, mode, REJECT.INVALID_SIDE, `Invalid order side: "${signal.side}". Must be "buy" or "sell".`);
+  }
+
+  // Stale price guard
+  if (isPriceStale(signal)) {
+    return reject(signal, exchange, mode, REJECT.STALE_PRICE, `Signal price is stale (>${STALE_PRICE_MS / 1000}s old). Refusing to execute.`);
+  }
+
+  // ── DEMO MODE ─────────────────────────────────────────────────────────────
+  if (mode === 'demo') {
     const logEntry = executionLog.add({
       mode:      'demo',
       exchange,
@@ -84,56 +111,77 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     return { ok: true, orderId: logEntry.orderId, logId: logEntry.id, demo: true };
   }
 
-  // ── LIVE MODE — Pre-execution safety checks ───────────────────────────────
-
-  // 1. Live mode flag
-  if (modeState.mode !== 'live') {
-    return reject(signal, exchange, REJECT.LIVE_DISABLED, 'Mode is not set to Live.');
-  }
-
-  // 2. Trading Armed
-  if (!modeState.armed) {
-    return reject(signal, exchange, REJECT.BOT_NOT_ARMED, 'Trading is not armed. Enable "Trading Armed" in Live Status tab.');
-  }
-
-  // 3. API validated
-  if (!modeState.apiValidated) {
-    return reject(signal, exchange, REJECT.ADAPTER_NOT_READY, 'API not validated. Connect and validate credentials first.');
-  }
-
-  // 4. Trade permission
-  if (!modeState.permissions.trade) {
-    return reject(signal, exchange, REJECT.NO_TRADE_PERMISSION, 'API key does not have trade permission on this exchange.');
-  }
-
-  // 5. Credentials injected
-  if (!credentials) {
-    return reject(signal, exchange, REJECT.MISSING_CREDENTIALS, 'Credentials not provided to engine. Reconnect.');
-  }
-
-  // 5b. Backend reachability — fall back to demo if API server is down
-  const backendUp = await isBackendReachable().catch(() => false);
-  if (!backendUp) {
-    console.warn('[engine][live] Backend unreachable — falling back to demo mode for this signal');
-    const demoEntry = executionLog.add({
-      mode:      'demo',
+  // ── PAPER MODE ────────────────────────────────────────────────────────────
+  // Simulated fill at current price — no order sent to exchange.
+  if (mode === 'paper') {
+    const qty = config.tradeAmountUSD / signal.price;
+    const logEntry = executionLog.add({
+      mode:      'paper',
       exchange,
       symbol:    signal.symbol,
       side:      signal.side,
       orderType: config.orderType,
-      quantity:  config.tradeAmountUSD / signal.price,
+      quantity:  qty,
       price:     signal.price,
       amountUSD: config.tradeAmountUSD,
-      status:    'rejected',
-      rejectReason: REJECT.EXCHANGE_UNAVAILABLE,
+      status:    'executed',
+      orderId:   `paper_${Date.now()}`,
       signalId:  signal.id,
     });
-    return { ok: false, logId: demoEntry.id, rejectReason: REJECT.EXCHANGE_UNAVAILABLE, detail: 'API server unreachable. Check connection — signal queued as demo.' };
+    console.log(`[engine][paper] Paper trade logged (no real order): ${signal.side} ${signal.symbol} @ $${signal.price}`);
+    return { ok: true, orderId: logEntry.orderId, logId: logEntry.id, demo: true };
+  }
+
+  // ── TESTNET + REAL MODE — Pre-execution safety checks ─────────────────────
+
+  // 1. Must be testnet or real
+  if (mode !== 'testnet' && mode !== 'real') {
+    return reject(signal, exchange, mode, REJECT.LIVE_DISABLED, `Mode "${mode}" does not support live execution.`);
+  }
+
+  // 2. Trading Armed (required for real; testnet is also gated by arm for safety)
+  if (!modeState.armed) {
+    return reject(signal, exchange, mode, REJECT.BOT_NOT_ARMED, 'Trading is not armed. Enable "Trading Armed" in Live Status tab.');
+  }
+
+  // 3. API validated
+  if (!modeState.apiValidated) {
+    return reject(signal, exchange, mode, REJECT.ADAPTER_NOT_READY, 'API not validated. Connect and validate credentials first.');
+  }
+
+  // 4. Trade permission
+  if (!modeState.permissions.trade) {
+    return reject(signal, exchange, mode, REJECT.NO_TRADE_PERMISSION, 'API key does not have trade permission on this exchange.');
+  }
+
+  // 5. Credentials injected
+  if (!credentials) {
+    return reject(signal, exchange, mode, REJECT.MISSING_CREDENTIALS, 'Credentials not provided to engine. Reconnect.');
+  }
+
+  // 5b. Backend reachability — fall back gracefully if API server is down
+  const backendUp = await isBackendReachable().catch(() => false);
+  if (!backendUp) {
+    console.warn('[engine] Backend unreachable — cannot execute signal');
+    const fallbackEntry = executionLog.add({
+      mode,
+      exchange,
+      symbol:       signal.symbol,
+      side:         signal.side,
+      orderType:    config.orderType,
+      quantity:     config.tradeAmountUSD / signal.price,
+      price:        signal.price,
+      amountUSD:    config.tradeAmountUSD,
+      status:       'rejected',
+      rejectReason: REJECT.EXCHANGE_UNAVAILABLE,
+      signalId:     signal.id,
+    });
+    return { ok: false, logId: fallbackEntry.id, rejectReason: REJECT.EXCHANGE_UNAVAILABLE, detail: 'API server unreachable. Signal dropped.' };
   }
 
   // 6. Emergency stop
   if (config.emergencyStop) {
-    return reject(signal, exchange, REJECT.EMERGENCY_STOP, 'Emergency stop is active.');
+    return reject(signal, exchange, mode, REJECT.EMERGENCY_STOP, 'Emergency stop is active.');
   }
 
   // 7. Fetch symbol rules from backend
@@ -143,7 +191,6 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     if (rulesRes.ok) {
       symbolRules = (rulesRes.data as { rules: RiskSymbolRules }).rules;
     } else {
-      // Fallback stub rules — still lets us compute, exchange will validate
       symbolRules = { symbol: signal.symbol, minQty: 0.00001, maxQty: 9_000_000, stepSize: 0.00001, minNotional: 1, tickSize: 0.01 };
     }
   } catch {
@@ -179,14 +226,15 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
   });
 
   if (!risk.ok) {
-    return reject(signal, exchange, risk.reason!, risk.detail ?? risk.reason!);
+    return reject(signal, exchange, mode, risk.reason!, risk.detail ?? risk.reason!);
   }
 
   // ── All checks passed — place the order ───────────────────────────────────
 
-  // Create pending log entry
+  const isTestnet = mode === 'testnet';
+
   const pending = executionLog.add({
-    mode:      'live',
+    mode,
     exchange,
     symbol:    signal.symbol,
     side:      signal.side,
@@ -200,15 +248,26 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
 
   const t0 = Date.now();
 
+  // Attempt order — retry once on network failure after 2 seconds
+  const attemptOrder = async () => apiClient.placeOrder(exchange, credentials!, {
+    symbol:   signal.symbol,
+    side:     signal.side,
+    type:     config.orderType,
+    quantity: risk.quantity!,
+    ...(config.orderType === 'limit' ? { price: risk.price! } : {}),
+    clientId: pending.id,
+    testnet:  isTestnet,
+  });
+
   try {
-    const orderRes = await apiClient.placeOrder(exchange, credentials, {
-      symbol:   signal.symbol,
-      side:     signal.side,
-      type:     config.orderType,
-      quantity: risk.quantity!,
-      ...(config.orderType === 'limit' ? { price: risk.price! } : {}),
-      clientId: pending.id,
-    });
+    let orderRes = await attemptOrder();
+
+    // Retry once on network error (2s delay)
+    if (!orderRes.ok && (orderRes.error?.includes('network') || orderRes.error?.includes('timed out') || orderRes.error?.includes('reach'))) {
+      console.warn('[engine] Network error on first attempt — retrying in 2s…');
+      await new Promise(r => setTimeout(r, 2000));
+      orderRes = await attemptOrder();
+    }
 
     const latency = Date.now() - t0;
 
@@ -219,14 +278,13 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
         latencyMs:        latency,
         exchangeResponse: orderRes,
       });
-      console.error(`[engine][live] Order failed: ${(orderRes as { error: string }).error}`);
+      console.error(`[engine][${mode}] Order failed: ${(orderRes as { error: string }).error}`);
       return { ok: false, logId: pending.id, rejectReason: REJECT.EXCHANGE_REJECTED, detail: (orderRes as { error: string }).error };
     }
 
-    const data       = (orderRes as { data: { order: { orderId: string } } }).data;
-    const orderId    = data?.order?.orderId ?? '';
+    const data    = (orderRes as { data: { order: { orderId: string } } }).data;
+    const orderId = data?.order?.orderId ?? '';
 
-    // Mark as executed
     executionLog.update(pending.id, {
       status:           'executed',
       orderId,
@@ -234,12 +292,11 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       exchangeResponse: data,
     });
 
-    // Update counters
     dailyTradeCount++;
     lastTradeTs = Date.now();
     recentSignals = [signal.id, ...recentSignals].slice(0, 100);
 
-    console.log(`[engine][live] Order placed: ${exchange} ${signal.side} ${risk.quantity} ${signal.symbol} @ ${risk.price} → orderId=${orderId} (${latency}ms)`);
+    console.log(`[engine][${mode}] Order placed: ${exchange} ${signal.side} ${risk.quantity} ${signal.symbol} @ ${risk.price} → orderId=${orderId} (${latency}ms)`);
     return { ok: true, orderId, logId: pending.id };
 
   } catch (e) {
@@ -252,9 +309,15 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 
-function reject(signal: Signal, exchange: string, reason: string, detail: string): EngineResult {
+function reject(
+  signal: Signal,
+  exchange: string,
+  mode: 'demo' | 'paper' | 'testnet' | 'real',
+  reason: string,
+  detail: string,
+): EngineResult {
   const entry = executionLog.add({
-    mode:          'live',
+    mode,
     exchange,
     symbol:        signal.symbol,
     side:          signal.side,
@@ -266,7 +329,7 @@ function reject(signal: Signal, exchange: string, reason: string, detail: string
     rejectReason:  reason,
     signalId:      signal.id,
   });
-  console.warn(`[engine][live] REJECTED — ${reason}: ${detail}`);
+  console.warn(`[engine][${mode}] REJECTED — ${reason}: ${detail}`);
   return { ok: false, logId: entry.id, rejectReason: reason, detail };
 }
 

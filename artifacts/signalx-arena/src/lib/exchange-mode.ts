@@ -1,8 +1,9 @@
 // ─── Exchange Mode Singleton ───────────────────────────────────────────────────
-// Single source of truth for demo/live state, arm status, and per-exchange creds.
-// Persists to localStorage. Import and use everywhere — never duplicate state.
+// Single source of truth for demo/paper/testnet/real state, arm status, and
+// per-exchange creds.  Persists to localStorage.
+// Import and use everywhere — never duplicate state.
 
-export type ExchangeMode = 'demo' | 'live';
+export type ExchangeMode = 'demo' | 'paper' | 'testnet' | 'real';
 
 export interface ExchangeCredentials {
   apiKey:      string;
@@ -13,7 +14,7 @@ export interface ExchangeCredentials {
 export interface ExchangeModeState {
   mode:          ExchangeMode;
   exchange:      string;   // currently selected exchange id
-  armed:         boolean;  // Trading Armed — must be true for live orders
+  armed:         boolean;  // Trading Armed — must be true for real orders
   apiValidated:  boolean;
   permissions:   { read: boolean; trade: boolean; withdraw: boolean; futures: boolean };
   uid?:          string;
@@ -35,13 +36,21 @@ function defaultState(): ExchangeModeState {
   };
 }
 
+function migrateMode(raw: Partial<ExchangeModeState>): ExchangeMode {
+  const m = raw.mode as string | undefined;
+  if (m === 'live') return 'real';
+  if (m === 'demo' || m === 'paper' || m === 'testnet' || m === 'real') return m;
+  return 'demo';
+}
+
 function loadState(): ExchangeModeState {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return defaultState();
-    const parsed = JSON.parse(raw) as Partial<ExchangeModeState>;
+    const rawStr = localStorage.getItem(STORAGE_KEY);
+    if (!rawStr) return defaultState();
+    const parsed = JSON.parse(rawStr) as Partial<ExchangeModeState>;
     // Never persist armed=true — require explicit arm on every session
-    return { ...defaultState(), ...parsed, armed: false };
+    // Migrate legacy 'live' → 'real'
+    return { ...defaultState(), ...parsed, mode: migrateMode(parsed), armed: false };
   } catch { return defaultState(); }
 }
 
@@ -110,11 +119,18 @@ class ExchangeModeManager {
   arm()   { this.update({ armed: true  }); }
   disarm(){ this.update({ armed: false }); }
 
-  // Full readiness: all conditions must be true for live trading
+  // Mode helpers
+  isDemo():   boolean { return this.state.mode === 'demo'; }
+  isPaper():  boolean { return this.state.mode === 'paper'; }
+  isTestnet():boolean { return this.state.mode === 'testnet'; }
+  isReal():   boolean { return this.state.mode === 'real'; }
+  isSimulated(): boolean { return this.state.mode === 'demo' || this.state.mode === 'paper'; }
+
+  // Full readiness: all conditions must be true for real trading
   isExecutionReady(): boolean {
     const s = this.state;
     return (
-      s.mode          === 'live' &&
+      s.mode          === 'real' &&
       s.apiValidated  === true   &&
       s.armed         === true   &&
       s.permissions.trade        === true
@@ -124,12 +140,12 @@ class ExchangeModeManager {
   readinessReport(): Record<string, boolean | string> {
     const s = this.state;
     return {
-      liveMode:       s.mode === 'live',
-      apiValidated:   s.apiValidated,
-      tradingArmed:   s.armed,
+      liveMode:        s.mode === 'real',
+      apiValidated:    s.apiValidated,
+      tradingArmed:    s.armed,
       tradePermission: s.permissions.trade,
       exchangeSelected: !!s.exchange,
-      ready:          this.isExecutionReady(),
+      ready:           this.isExecutionReady(),
     };
   }
 
@@ -146,3 +162,13 @@ class ExchangeModeManager {
 }
 
 export const exchangeMode = new ExchangeModeManager();
+
+// ── Mode label helper (canonical display strings) ─────────────────────────────
+export function modeLabel(mode: ExchangeMode): string {
+  switch (mode) {
+    case 'demo':    return 'DEMO';
+    case 'paper':   return 'PAPER';
+    case 'testnet': return 'TESTNET';
+    case 'real':    return 'REAL';
+  }
+}

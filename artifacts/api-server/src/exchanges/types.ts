@@ -3,7 +3,7 @@
 export type OrderSide   = 'buy' | 'sell';
 export type OrderType   = 'market' | 'limit';
 export type OrderStatus = 'open' | 'filled' | 'canceled' | 'rejected' | 'partial';
-export type ExchangeMode = 'demo' | 'live';
+export type ExchangeMode = 'demo' | 'paper' | 'testnet' | 'real';
 
 // Credentials passed per-request (never stored server-side)
 export interface ExchangeCredentials {
@@ -36,8 +36,9 @@ export interface OrderRequest {
   side:     OrderSide;
   type:     OrderType;
   quantity: number;
-  price?:   number;  // required for limit orders
+  price?:   number;    // required for limit orders
   clientId?: string;
+  testnet?:  boolean;  // route to exchange sandbox endpoint when true
 }
 
 export interface OrderResult {

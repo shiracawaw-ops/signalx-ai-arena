@@ -31,9 +31,10 @@ function fmt(n: number, dec = 2) {
 }
 
 const MODES = [
-  { key: 'demo',    label: 'Demo',    desc: 'Virtual funds — no real risk',        color: 'text-emerald-400', border: 'border-emerald-500/30 bg-emerald-500/5' },
-  { key: 'testnet', label: 'Testnet', desc: 'Sandbox — test API keys',             color: 'text-amber-400',   border: 'border-amber-500/30 bg-amber-500/5'    },
-  { key: 'live',    label: 'Live',    desc: '⚠ Real funds — proceed with caution', color: 'text-red-400',     border: 'border-red-500/30 bg-red-500/5'        },
+  { key: 'demo',    label: 'Demo',    desc: 'Virtual funds — no API keys needed',   color: 'text-emerald-400', border: 'border-emerald-500/30 bg-emerald-500/5' },
+  { key: 'paper',   label: 'Paper',   desc: 'Real prices, simulated fills',         color: 'text-blue-400',    border: 'border-blue-500/30 bg-blue-500/5'       },
+  { key: 'testnet', label: 'Testnet', desc: 'Sandbox — test API keys required',     color: 'text-amber-400',   border: 'border-amber-500/30 bg-amber-500/5'    },
+  { key: 'real',    label: 'Real',    desc: '⚠ Real funds — proceed with caution', color: 'text-red-400',     border: 'border-red-500/30 bg-red-500/5'        },
 ] as const;
 
 const ACCENT_DOT: Record<string, string> = {
@@ -94,7 +95,7 @@ function CfgRow({ label, children }: { label: string; children: React.ReactNode 
 export default function ExchangePage() {
   const [tab,         setTab]         = useState<typeof TABS[number]['key']>('exchanges');
   const [selectedEx,  setSelectedEx]  = useState<ExchangeMeta>(KNOWN_EXCHANGES[0]);
-  const [mode,        setMode]        = useState<'demo' | 'testnet' | 'live'>('demo');
+  const [mode,        setMode]        = useState<'demo' | 'paper' | 'testnet' | 'real'>('demo');
   const [apiKey,      setApiKey]      = useState('');
   const [secretKey,   setSecretKey]   = useState('');
   const [passphrase,  setPassphrase]  = useState('');
@@ -130,11 +131,7 @@ export default function ExchangePage() {
 
   // ── Sync mode singleton when user changes mode selector ──────────────────
   useEffect(() => {
-    if (mode === 'live') {
-      exMode.update({ mode: 'live' });
-    } else {
-      exMode.update({ mode: 'demo' });
-    }
+    exMode.update({ mode });
   }, [mode]);
 
   // ── Disconnect when switching exchanges ───────────────────────────────────
@@ -170,7 +167,7 @@ export default function ExchangePage() {
 
   // ── Live data refresh ─────────────────────────────────────────────────────
   const refreshLiveData = useCallback(async () => {
-    if (mode !== 'live' || !apiKey || !secretKey) return;
+    if ((mode !== 'real' && mode !== 'testnet') || !apiKey || !secretKey) return;
     setRefreshing(true);
     setBalError(null);
     setOrdError(null);
@@ -211,7 +208,7 @@ export default function ExchangePage() {
 
   // ── Connect ───────────────────────────────────────────────────────────────
   const handleConnect = async () => {
-    if (mode !== 'demo') {
+    if (mode !== 'demo' && mode !== 'paper') {
       if (!apiKey.trim()) {
         toast({ title: 'API key required', description: `Enter your ${selectedEx.name} API key.`, variant: 'destructive' });
         return;
@@ -227,18 +224,19 @@ export default function ExchangePage() {
     }
     setConnecting(true);
 
-    if (mode === 'demo') {
+    if (mode === 'demo' || mode === 'paper') {
       await new Promise(r => setTimeout(r, 800));
       setIsConnected(true);
       setConnecting(false);
       await loadData();
-      exMode.update({ mode: 'demo', apiValidated: true, permissions: { read: true, trade: false, withdraw: false, futures: false }, connectedAt: Date.now() });
+      const simLabel = mode === 'paper' ? 'Paper' : 'Demo';
+      exMode.update({ mode, apiValidated: true, permissions: { read: true, trade: false, withdraw: false, futures: false }, connectedAt: Date.now() });
       setCredentials(null);
-      toast({ title: `Connected to ${selectedEx.name} (Demo)`, description: 'Simulated portfolio loaded. No real funds.' });
+      toast({ title: `Connected to ${selectedEx.name} (${simLabel})`, description: mode === 'paper' ? 'Paper trading active. Simulated fills only — no real orders.' : 'Simulated portfolio loaded. No real funds.' });
       return;
     }
 
-    // Live / Testnet — validate via backend
+    // Testnet / Real — validate via backend
     setValidating(true);
     const creds = {
       apiKey:     apiKey.trim(),
@@ -286,7 +284,7 @@ export default function ExchangePage() {
 
       // 4. Update global engine state — credentials stay in React state only
       exMode.update({
-        mode:         'live',
+        mode,
         apiValidated: true,
         permissions:  perms,
         connectedAt:  Date.now(),
@@ -299,7 +297,7 @@ export default function ExchangePage() {
       // 5. Load live balances / orders
       await refreshLiveData();
 
-      const modeLabel = mode === 'testnet' ? 'Testnet' : 'Live';
+      const modeLabel = mode === 'testnet' ? 'Testnet' : 'Real';
       toast({
         title: `Connected to ${selectedEx.name} (${modeLabel})`,
         description: perms.trade
@@ -343,7 +341,7 @@ export default function ExchangePage() {
   const STABLES       = new Set(['USDT', 'USD', 'USDC', 'BUSD', 'TUSD', 'USDP', 'DAI', 'FDUSD', 'USDD']);
   const liveTotalUSD  = liveBalances.filter(b => STABLES.has(b.asset)).reduce((s, b) => s + b.total, 0);
   const ac = selectedEx.accent;
-  const isLive = mode === 'live';
+  const isLive = mode === 'real';  // true only in real mode — real exchange data & orders
 
   // ── Readiness checks for Live Status tab ─────────────────────────────────
   const ready = exMode.readinessReport();
@@ -357,7 +355,7 @@ export default function ExchangePage() {
         </div>
         <div>
           <h1 className="text-lg font-bold">Exchange Integration</h1>
-          <p className="text-xs text-zinc-500">{selectedEx.name} · {mode === 'demo' ? 'Demo Mode' : mode === 'testnet' ? 'Testnet' : 'Live'}</p>
+          <p className="text-xs text-zinc-500">{selectedEx.name} · {mode === 'demo' ? 'Demo Mode' : mode === 'paper' ? 'Paper Mode' : mode === 'testnet' ? 'Testnet' : 'Real Mode'}</p>
         </div>
         <div className="ml-auto flex items-center gap-2">
           {isConnected ? (
@@ -379,7 +377,7 @@ export default function ExchangePage() {
         <div className={`mb-4 px-4 py-2.5 rounded-xl border flex items-center gap-2.5 text-xs ${isConnected && modeState.permissions.trade ? 'border-red-500/30 bg-red-500/5 text-red-400' : 'border-amber-500/30 bg-amber-500/5 text-amber-400'}`}>
           <AlertTriangle size={13} className="flex-shrink-0" />
           <span>
-            <strong>Live Mode</strong> — {selectedEx.name}.
+            <strong>Real Mode</strong> — {selectedEx.name}.
             {isConnected
               ? modeState.permissions.trade
                 ? ' API validated. Trade permission confirmed. Arm trading to execute real orders.'
@@ -387,12 +385,19 @@ export default function ExchangePage() {
               : ' Connect with real API keys to activate live trading.'}
           </span>
         </div>
+      ) : mode === 'testnet' ? (
+        <div className="mb-4 px-4 py-2.5 rounded-xl border flex items-center gap-2.5 text-xs border-amber-500/30 bg-amber-500/5 text-amber-400">
+          <AlertTriangle size={13} className="flex-shrink-0" />
+          <span>
+            <strong>Testnet Mode</strong> — {selectedEx.name} sandbox.
+            {isConnected ? ' Testnet API validated. Sandbox orders only — no real funds.' : ' Connect with testnet API keys. No real funds at risk.'}
+          </span>
+        </div>
       ) : (
         <div className={`mb-4 px-4 py-2.5 rounded-xl border flex items-center gap-2.5 text-xs ${ACCENT_BORDER[ac]} ${ACCENT_TEXT[ac]}`}>
           <Shield size={13} className="flex-shrink-0" />
           <span>
-            <strong>Demo Mode Active</strong> — Simulated {selectedEx.name} environment.
-            No real API keys required. No real funds at risk. Architecture is production-ready.
+            <strong>{mode === 'paper' ? 'Paper Mode Active' : 'Demo Mode Active'}</strong> — {mode === 'paper' ? `Simulated fills on ${selectedEx.name}. Real price feed. No real orders sent.` : `Simulated ${selectedEx.name} environment. No real API keys required. No real funds at risk.`}
           </span>
         </div>
       )}
@@ -543,17 +548,17 @@ export default function ExchangePage() {
                         Connected to {selectedEx.name}
                       </p>
                       <p className="text-[10px] text-zinc-500 mt-0.5">
-                        {mode === 'demo' ? 'Demo mode — simulated portfolio data.' : `${mode === 'testnet' ? 'Testnet' : 'Live'} mode — API key active.`}
+                        {(mode === 'demo' || mode === 'paper') ? `${mode === 'paper' ? 'Paper' : 'Demo'} mode — simulated portfolio data.` : `${mode === 'testnet' ? 'Testnet' : 'Real'} mode — API key active.`}
                       </p>
                       {isLive && livePermissions && !livePermissions.trade && (
                         <p className="text-[10px] text-amber-400 mt-1">⚠ API connected but trading permission missing</p>
                       )}
                     </div>
                   </div>
-                ) : mode === 'demo' ? (
+                ) : (mode === 'demo' || mode === 'paper') ? (
                   <div className="px-4 py-3 rounded-xl bg-zinc-800/40 border border-zinc-700 text-xs text-zinc-400 space-y-1">
-                    <p className="font-medium text-zinc-200">Demo mode — no API keys required</p>
-                    <p>Click Connect to load simulated {selectedEx.name} portfolio data.</p>
+                    <p className="font-medium text-zinc-200">{mode === 'paper' ? 'Paper mode' : 'Demo mode'} — no API keys required</p>
+                    <p>Click Connect to {mode === 'paper' ? 'activate paper trading on' : 'load simulated'} {selectedEx.name} {mode === 'paper' ? '— fills are simulated, no real orders sent.' : 'portfolio data.'}</p>
                     <p className="text-zinc-600">All trading is virtual. No real funds involved.</p>
                   </div>
                 ) : (
@@ -782,7 +787,7 @@ export default function ExchangePage() {
               {[
                 { perm: 'Read Balance',   granted: true,           risk: 'Low'  },
                 { perm: 'Read Orders',    granted: true,           risk: 'Low'  },
-                { perm: 'Place Orders',   granted: mode !== 'live', risk: mode === 'live' ? 'High' : 'Demo' },
+                { perm: 'Place Orders',   granted: mode !== 'real', risk: mode === 'real' ? 'High' : mode === 'testnet' ? 'Sandbox' : 'Simulated' },
                 { perm: 'Cancel Orders',  granted: true,           risk: 'Low'  },
                 { perm: 'Withdraw Funds', granted: false,          risk: 'Critical — disabled for safety' },
               ].map(p => (
@@ -865,7 +870,7 @@ export default function ExchangePage() {
             <CardContent className="p-4 space-y-2 text-xs">
               {[
                 { label: 'Exchange',        value: selectedEx.name },
-                { label: 'Mode',            value: mode === 'demo' ? 'Demo' : mode === 'testnet' ? 'Testnet' : 'Live' },
+                { label: 'Mode',            value: mode === 'demo' ? 'Demo' : mode === 'paper' ? 'Paper' : mode === 'testnet' ? 'Testnet' : 'Real' },
                 { label: 'Connected',       value: isConnected ? 'Yes' : 'No' },
                 { label: 'Latency',         value: latency !== null ? `${latency}ms` : '—' },
                 { label: 'Last Sync',       value: modeState.connectedAt ? new Date(modeState.connectedAt).toLocaleTimeString() : '—' },
@@ -1005,7 +1010,12 @@ export default function ExchangePage() {
                         <tr key={e.id} className="border-b border-zinc-800/40 hover:bg-zinc-900/40">
                           <td className="px-3 py-2 text-zinc-500 whitespace-nowrap">{new Date(e.ts).toLocaleTimeString()}</td>
                           <td className="px-3 py-2">
-                            <span className={`text-[9px] px-1.5 py-0.5 rounded-full border ${e.mode === 'live' ? 'border-red-500/40 text-red-400 bg-red-500/5' : 'border-emerald-500/30 text-emerald-400 bg-emerald-500/5'}`}>
+                            <span className={`text-[9px] px-1.5 py-0.5 rounded-full border ${
+                              e.mode === 'real'    ? 'border-red-500/40 text-red-400 bg-red-500/5'       :
+                              e.mode === 'testnet' ? 'border-amber-500/40 text-amber-400 bg-amber-500/5' :
+                              e.mode === 'paper'   ? 'border-blue-500/40 text-blue-400 bg-blue-500/5'    :
+                                                     'border-emerald-500/30 text-emerald-400 bg-emerald-500/5'
+                            }`}>
                               {e.mode.toUpperCase()}
                             </span>
                           </td>

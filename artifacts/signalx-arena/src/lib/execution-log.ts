@@ -3,7 +3,7 @@
 // Capped at 500 entries (oldest removed). Persisted to localStorage.
 
 export type LogStatus = 'pending' | 'executing' | 'executed' | 'rejected' | 'failed';
-export type ExchangeMode = 'demo' | 'live';
+export type ExchangeMode = 'demo' | 'paper' | 'testnet' | 'real';
 
 export interface ExecutionEntry {
   id:           string;
@@ -114,6 +114,8 @@ export const REJECT = {
   PRICE_UNAVAILABLE:       'price_unavailable',
   AMOUNT_TOO_SMALL:        'amount_too_small',
   MAX_POSITIONS:           'max_open_positions_reached',
+  STALE_PRICE:             'stale_price',
+  INVALID_SIDE:            'invalid_side',
 } as const;
 
 export type RejectReason = typeof REJECT[keyof typeof REJECT];

@@ -1,11 +1,12 @@
 
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation } from 'wouter';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useArena } from '@/hooks/use-arena';
 import { usePerf } from '@/hooks/use-perf';
-import { getBotPnL, getBotTotalValue } from '@/lib/engine';
+import { getBotPnL } from '@/lib/engine';
 import { ASSETS, STRATEGIES } from '@/lib/storage';
+import { exchangeMode, modeLabel } from '@/lib/exchange-mode';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -55,6 +56,25 @@ function StatPill({
 
 function Divider() {
   return <div className="w-px h-5 bg-zinc-800/70 flex-shrink-0 mx-0.5" />;
+}
+
+// ── Mode badge — reads live from exchangeMode singleton ───────────────────────
+function ModeBadge() {
+  const [mode, setMode] = useState(exchangeMode.get().mode);
+  useEffect(() => exchangeMode.subscribe(s => setMode(s.mode)), []);
+  const label = modeLabel(mode);
+  const color =
+    mode === 'real'    ? 'text-red-400 border-red-600/40 bg-red-600/10'    :
+    mode === 'testnet' ? 'text-amber-400 border-amber-600/40 bg-amber-600/10' :
+    mode === 'paper'   ? 'text-blue-400 border-blue-600/40 bg-blue-600/10' :
+                         'text-purple-400 border-zinc-700 bg-zinc-900/70';
+  return (
+    <div className={`flex items-center gap-1 px-2 h-7 rounded border flex-shrink-0 ${color}`}>
+      <Shield size={10} className="flex-shrink-0" />
+      <span className="text-[9px] text-zinc-500 uppercase tracking-wide hidden xl:inline">Mode</span>
+      <span className="text-[10px] font-bold">{label}</span>
+    </div>
+  );
 }
 
 // ── AI Performance badge ──────────────────────────────────────────────────────
@@ -319,12 +339,8 @@ export function GlobalControlBar({ onMobileOpen, alerts = 0 }: GlobalControlBarP
 
         <Divider />
 
-        {/* Market mode */}
-        <div className="flex items-center gap-1 px-2 h-7 rounded border border-zinc-700 bg-zinc-900/70 flex-shrink-0">
-          <Shield size={10} className="text-purple-400" />
-          <span className="text-[9px] text-zinc-500 uppercase tracking-wide hidden xl:inline">Mode</span>
-          <span className="text-[10px] font-bold text-purple-400">DEMO</span>
-        </div>
+        {/* Market mode — reads live from exchangeMode singleton */}
+        <ModeBadge />
 
         {/* AI Perf badge */}
         <PerfBadge />

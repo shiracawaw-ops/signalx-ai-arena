@@ -51,12 +51,16 @@ export function maskKey(key: string): string {
   return key.slice(0, 4) + '***' + key.slice(-4);
 }
 
-function credHeaders(creds: ExchangeCredentials): Record<string, string> {
+function credHeaders(
+  creds: ExchangeCredentials,
+  extra?: Record<string, string>,
+): Record<string, string> {
   return {
     'x-api-key':    creds.apiKey,
     'x-secret-key': creds.secretKey,
     ...(creds.passphrase ? { 'x-passphrase': creds.passphrase } : {}),
     'Content-Type': 'application/json',
+    ...extra,
   };
 }
 
@@ -218,16 +222,18 @@ export const apiClient = {
       quantity:  number;
       price?:    number;
       clientId?: string;
+      testnet?:  boolean;
     },
   ): Promise<ApiResult<{ order: { orderId: string } }>> {
+    const { testnet, ...orderBody } = order;
     console.log(
       `[api-client] placeOrder ${exchange} ${order.side} ${order.quantity} ${order.symbol}` +
-      ` key=${maskKey(creds.apiKey)}`,
+      ` key=${maskKey(creds.apiKey)}${testnet ? ' [TESTNET]' : ''}`,
     );
     return request(`${BACKEND}/exchange/${exchange}/order/place`, {
       method:  'POST',
-      headers: credHeaders(creds),
-      body:    JSON.stringify(order),
+      headers: credHeaders(creds, testnet ? { 'x-testnet': '1' } : {}),
+      body:    JSON.stringify(orderBody),
     });
   },
 

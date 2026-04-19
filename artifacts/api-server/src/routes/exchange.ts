@@ -19,6 +19,10 @@ function extractCreds(req: Request): ExchangeCredentials | null {
   return { apiKey, secretKey, ...(passphrase ? { passphrase } : {}) };
 }
 
+function isTestnetRequest(req: Request): boolean {
+  return req.headers['x-testnet'] === '1';
+}
+
 function logAction(exchange: string, action: string, apiKey: string) {
   logger.info({ exchange, action, key: maskKey(apiKey) }, '[exchange-proxy]');
 }
@@ -107,10 +111,13 @@ router.post('/exchange/:exchange/order/place', async (req, res) => {
   if (!order?.symbol || !order?.side || !order?.type || !order?.quantity) {
     return badRequest(res, 'Missing order fields: symbol, side, type, quantity');
   }
-  logAction(ex, `placeOrder(${order.side} ${order.quantity} ${order.symbol})`, creds.apiKey);
+  // Propagate testnet flag from header into the order object
+  const testnet = isTestnetRequest(req);
+  const finalOrder: OrderRequest = { ...order, testnet };
+  logAction(ex, `placeOrder(${order.side} ${order.quantity} ${order.symbol}${testnet ? ' [testnet]' : ''})`, creds.apiKey);
   const adapter = getAdapter(ex)!;
   try {
-    const result = await adapter.placeOrder(creds, order);
+    const result = await adapter.placeOrder(creds, finalOrder);
     res.json({ ok: true, exchange: ex, order: result });
   } catch (e) { serverError(res, ex, e); }
 });
