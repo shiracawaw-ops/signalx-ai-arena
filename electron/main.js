@@ -145,7 +145,12 @@ app.on('before-quit', killApi);
 
 function killApi() {
   if (apiProc) {
-    try { apiProc.kill(); } catch {}
+    try {
+      apiProc.kill();
+      console.log('[electron] API server process terminated');
+    } catch (e) {
+      console.warn('[electron] killApi error (non-fatal):', e?.message ?? e);
+    }
     apiProc = null;
   }
 }
