@@ -143,6 +143,15 @@ See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and pa
 - **Bot Doctor**: Standby Pool tab (10 bots), Heal All button, self-healing log at bottom
 - **Warm-up**: 10–25 ticks (reduced from 80 to avoid PnL skew that triggers false healing)
 
+### CI / Windows EXE build (GitHub Actions)
+- Live workflow: `.github/workflows/main.yml` runs `Build Windows EXE` job on `windows-latest` for every push to main; uploads `SignalX-AI-Arena-Windows` artifact (~159 MB: NSIS installer + portable EXE).
+- `electron-builder.yml` outputs to `dist-electron/` (matches the upload-artifact path). Electron entry point is in `package.json`'s `main` field, NOT in this YAML.
+- `pnpm-workspace.yaml` keeps all `win32-x64` native binaries enabled (rollup/lightningcss/oxide/esbuild) — Linux installs auto-skip them via os/cpu fields. `minimumReleaseAge: 1440` is a 1-day supply-chain defense — DO NOT DISABLE.
+- **`vite-plugin-pwa` is intentionally OFF in `vite.electron.config.ts`** — Service Worker registration throws under `file://` and produces a blank window. PWA stays ON in `vite.config.ts` (web build).
+- **Renderer error overlay**: `src/main.tsx` wraps `createRoot()` and adds global `onerror`/`unhandledrejection` listeners that paint a red panel into `#root`. A "blank Electron window" always means a renderer crash; the overlay shows the error.
+- **Debug DevTools**: launch the EXE with `SIGNALX_DEBUG=1` env var or `--debug` CLI arg to auto-open detached DevTools.
+- `artifacts/api-server/vitest.config.ts` excludes `src/exchanges/**` from coverage (adapter tests deferred — task #22). Threshold 60% passes on routes (100%) + lib (94%).
+
 ### Critical notes (localStorage keys)
 - `signalx_bot_count` — selected bot count (default **30**)
 - `signalx_demo_balance` — starting balance per bot (default 1000)
