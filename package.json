@@ -1,0 +1,30 @@
+{
+  "name": "signalx-ai-arena",
+  "version": "1.0.0",
+  "productName": "SignalX AI Arena",
+  "description": "AI-powered virtual trading simulator with 12 exchange integrations",
+  "author": "SignalX",
+  "license": "MIT",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "preinstall": "sh -c 'rm -f package-lock.json yarn.lock; case \"$npm_config_user_agent\" in pnpm/*) ;; *) echo \"Use pnpm instead\" >&2; exit 1 ;; esac'",
+    "build": "pnpm run typecheck && pnpm -r --if-present run build",
+    "typecheck:libs": "tsc --build",
+    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
+    "build:electron": "pnpm run build:frontend:electron && pnpm --filter @workspace/api-server run build",
+    "build:frontend:electron": "pnpm --filter @workspace/signalx-arena run build:electron",
+    "package:win": "pnpm run build:electron && electron-builder --win --config electron-builder.yml",
+    "package:mac": "pnpm run build:electron && electron-builder --mac --config electron-builder.yml",
+    "package:linux": "pnpm run build:electron && electron-builder --linux --config electron-builder.yml"
+  },
+  "devDependencies": {
+    "electron": "^34.3.0",
+    "electron-builder": "^25.1.8",
+    "prettier": "^3.8.1",
+    "typescript": "~5.9.2"
+  },
+  "dependencies": {
+    "@replit/connectors-sdk": "^0.4.0"
+  }
+}
