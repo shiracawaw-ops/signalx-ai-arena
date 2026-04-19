@@ -1135,6 +1135,44 @@ export default function ExchangePage() {
       {/* ── Live Status (NEW) ── */}
       {tab === 'livestatus' && (<ErrorBoundary label="exchange:tab:livestatus">
         <div className="space-y-4">
+          {isLive && modeState.connectionState === 'balance_empty' && liveBalances.length === 0 && (
+            <Card className="border-zinc-800/60 bg-zinc-900/40">
+              <CardContent className="p-4">
+                <div className="flex items-start gap-3">
+                  <div className="flex-shrink-0 mt-0.5 rounded-full bg-zinc-800/80 p-2">
+                    <Wallet size={16} className="text-zinc-300" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold text-zinc-100">
+                      Connected to {selectedEx.name} — no assets found
+                    </div>
+                    <div className="mt-1 text-xs text-zinc-400 leading-relaxed">
+                      The connection and your API key are working — the account just looks empty. Common causes: no funds yet, funds in a different wallet (Futures, Margin, Earn, Funding), or a sub-account key that can&apos;t see this balance.
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1.5"
+                        onClick={() => setTab('balances')}
+                      >
+                        See Balances tab for details
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1.5"
+                        onClick={refreshLiveData}
+                        disabled={refreshing}
+                      >
+                        <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} /> Retry
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
           {/* Readiness summary */}
           <Card className="border-zinc-800/60">
             <CardHeader className="py-3 px-4"><CardTitle className="text-sm flex items-center gap-2"><Activity size={13} /> Execution Readiness — {selectedEx.name}</CardTitle></CardHeader>
