@@ -4,6 +4,59 @@ import { Bot, Trade, loadBots, saveBots, loadTrades, saveTrades, BOT_COLORS } fr
 import { perfMonitor } from '@/lib/perf-monitor';
 import { MarketData, initMarket, tickMarket, executeBotTick } from '@/lib/engine';
 import { generateBots, makeFreshStandbyBot } from '@/lib/seed';
+import { executeSignal } from '@/lib/execution-engine';
+import { exchangeMode } from '@/lib/exchange-mode';
+
+// ── Real-trade bridge ─────────────────────────────────────────────────────────
+// When a bot produces a synthetic Trade in REAL or TESTNET mode, mirror it to
+// the unified Execution Engine so an actual order is sent to the exchange.
+// All safety guards (mode/armed/validated/balance/perms/creds, stale-price,
+// risk, min-notional, precision) live in executeSignal — we just bridge.
+//
+// Only crypto-style symbols are forwarded; non-crypto bot symbols (stocks,
+// metals, forex, indices) are skipped because no crypto exchange has a
+// matching tradable pair and the rejections would just spam the log.
+const NON_CRYPTO_SYMBOLS = new Set<string>([
+  'AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META', 'NFLX', 'BABA',
+  'TSM',  'JPM',  'V',    'SAMSUNG', 'TOYOTA',
+  'GOLD', 'SILVER', 'PLAT', 'COPPER', 'OIL', 'NG',
+  'EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF',
+]);
+
+function isLiveTradingMode(mode: string): boolean {
+  return mode === 'real' || mode === 'testnet';
+}
+
+function bridgeBotTradeToExchange(trade: Trade): void {
+  const mode = exchangeMode.get().mode;
+  if (!isLiveTradingMode(mode)) return;
+  if (NON_CRYPTO_SYMBOLS.has(trade.symbol)) return;
+
+  // Fire-and-forget — we never block the tick loop on a network round-trip.
+  // executeSignal logs rejections via REJECT.* codes into executionLog and
+  // returns a structured result that is observable in the Execution Log tab.
+  void executeSignal({
+    id:     `bot_${trade.id}`,
+    symbol: trade.symbol,
+    side:   trade.type === 'BUY' ? 'buy' : 'sell',
+    price:  trade.price,
+    ts:     trade.timestamp,
+    source: 'bot-engine',
+  }).then(res => {
+    if (!res.ok) {
+      console.warn(
+        `[arena→engine][${mode}] ${trade.type} ${trade.symbol} blocked: `
+        + `${res.rejectReason ?? 'unknown'}${res.detail ? ' — ' + res.detail : ''}`,
+      );
+    } else if (!res.demo) {
+      console.log(
+        `[arena→engine][${mode}] ${trade.type} ${trade.symbol} → orderId=${res.orderId}`,
+      );
+    }
+  }).catch((err: unknown) => {
+    console.error(`[arena→engine] dispatch error:`, err);
+  });
+}
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
 const BOT_COUNT_KEY    = 'signalx_bot_count';
@@ -278,7 +331,13 @@ export function ArenaProvider({ children }: { children: React.ReactNode }) {
       if (!bot.isRunning) return bot;
       const candles = newMarket[bot.symbol] || [];
       const { bot: updatedBot, trade } = executeBotTick(bot, candles, trds, pct);
-      if (trade) newTrades.push(trade);
+      if (trade) {
+        newTrades.push(trade);
+        // Mirror to the live Execution Engine in REAL / TESTNET mode.
+        // No-op for DEMO and PAPER. Fire-and-forget; safety gates live
+        // inside executeSignal.
+        bridgeBotTradeToExchange(trade);
+      }
       return updatedBot;
     });
 

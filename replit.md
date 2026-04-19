@@ -169,3 +169,11 @@ See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and pa
 - Trade storage capped at 2000 (saveTrades has 3-level fallback)
 - In-memory trades capped at 3000 in context tick
 - `DEFAULT_ACTIVE_ON_START = 6` in seed.ts — first 6 bots active, rest standby
+
+## 2026-04-19 — Real-trade execution bridge wired
+
+**Critical fix**: `executeSignal()` (the only function that submits real orders via `apiClient.placeOrder`) was previously orphaned — referenced exclusively by `execution-engine.test.ts` and never invoked from any production code path. Bots produced synthetic in-memory trades only; switching to REAL/TESTNET mode and arming did nothing because no call site bridged bot signals to the execution engine.
+
+**Fix**: `artifacts/signalx-arena/src/context/arena-context.tsx::tick` now calls `executeSignal()` for every bot-generated `Trade` when `exchangeMode.get().mode` is `real` or `testnet`. Fire-and-forget, with rejection logging via `console.warn` and structured surfacing through `executionLog` (already rendered in the Execution Log tab on `/exchange`). Stocks/forex/metals symbols are filtered out client-side to avoid spam rejections from crypto adapters.
+
+Verified live in the running app: bot trades dispatched in REAL mode now hit all six engine guards (mode/networkUp/apiValidated/balanceFetched/tradePermission/tradingArmed) and produce exact `adapter_not_ready` rejections naming the missing conditions — the expected behavior until the user completes the connect+arm flow.
