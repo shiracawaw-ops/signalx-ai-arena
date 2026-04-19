@@ -10,7 +10,9 @@ copyright:   Copyright © 2024 SignalX
 
 # ── Source (electron main process files) ───────────────────────────────────────
 directories:
-  output:         artifacts/electron/dist-app
+  # Output to top-level dist-electron/ so the GitHub Actions upload-artifact
+  # step (which reads from dist-electron/*.exe) picks up the installer.
+  output:         dist-electron
   buildResources: electron
 
 # Note: the electron entry point is declared in package.json's "main" field,
