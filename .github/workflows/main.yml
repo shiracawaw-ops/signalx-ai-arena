@@ -1,13 +1,35 @@
-name: Build Windows EXE
+name: Build Desktop Installers
 on:
   push:
     branches: [main, master]
     tags: ['v*']
+  pull_request:
   workflow_dispatch:
 permissions:
   contents: write
 jobs:
+  test:
+    # Fast routing/unit smoke checks. Runs on every push & PR so we catch
+    # regressions like the blank-window Electron router bug (task #31)
+    # without waiting for the Windows packaging job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - run: pnpm install --frozen-lockfile
+      - name: Build Electron bundle (needed by routing smoke test)
+        working-directory: artifacts/signalx-arena
+        run: pnpm run build:electron
+        env: { NODE_ENV: production }
+      - name: Run unit & routing smoke tests
+        run: pnpm -r --if-present run test
   build-windows:
+    needs: test
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -25,8 +47,153 @@ jobs:
         env: { NODE_ENV: production }
       - run: npx electron-builder --win --config electron-builder.yml
         env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}", NODE_ENV: production }
+      - name: Verify packaged frontend assets
+        shell: pwsh
+        run: |
+          $unpacked = "dist-electron/win-unpacked/resources/frontend"
+          if (-not (Test-Path "$unpacked/index.html")) {
+            Write-Error "Missing $unpacked/index.html"; exit 1
+          }
+          $assets = Get-ChildItem "$unpacked/assets" -Filter "index-*.js" -ErrorAction SilentlyContinue
+          if (-not $assets) {
+            Write-Error "Missing $unpacked/assets/index-*.js"; exit 1
+          }
+          $html = Get-Content "$unpacked/index.html" -Raw
+          if ($html -match "serviceWorker\.register|/sw\.js|/registerSW\.js") {
+            Write-Error "index.html unexpectedly contains a service worker registration"; exit 1
+          }
+          Write-Host "Frontend assets OK: index.html + $($assets.Count) entry chunk(s)"
+      - name: Smoke-test packaged Electron app
+        # Launches the packaged .exe inside a real Chromium BrowserWindow and
+        # asserts the sign-in UI is visible. Catches blank-window regressions
+        # (preload errors, asset-path issues, CSP violations, missing native
+        # modules) that the jsdom routing test in `test` cannot detect.
+        shell: pwsh
+        run: |
+          # Install playwright-core into an isolated dir so it doesn't trip
+          # the repo's `preinstall` hook (which insists on pnpm) or mutate
+          # the workspace lockfile.
+          New-Item -ItemType Directory -Force -Path .smoke-test | Out-Null
+          Set-Location .smoke-test
+          npm init -y | Out-Null
+          npm install --no-package-lock playwright-core@1.49.1
+          Set-Location ..
+          $env:NODE_PATH = "$PWD/.smoke-test/node_modules"
+          node scripts/electron-smoke-test.mjs
+        env: { NODE_ENV: production }
       - uses: actions/upload-artifact@v4
         with:
           name: SignalX-AI-Arena-Windows
           path: dist-electron/*.exe
+          retention-days: 30
+  build-mac:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - run: pnpm install --frozen-lockfile
+      - working-directory: artifacts/signalx-arena
+        run: pnpm run build:electron
+        env: { NODE_ENV: production }
+      - working-directory: artifacts/api-server
+        run: pnpm run build
+        env: { NODE_ENV: production }
+      - name: Package macOS DMG
+        # Skip code signing & notarization in CI — we only need the unpacked
+        # .app for the smoke test and an unsigned .dmg as a build artifact.
+        run: npx electron-builder --mac --config electron-builder.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_ENV: production
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Verify packaged frontend assets
+        run: |
+          set -euo pipefail
+          APP_DIR=$(ls -d dist-electron/mac*/SignalX\ AI\ Arena.app | head -n1)
+          UNPACKED="$APP_DIR/Contents/Resources/frontend"
+          test -f "$UNPACKED/index.html" || { echo "Missing $UNPACKED/index.html"; exit 1; }
+          ls "$UNPACKED"/assets/index-*.js >/dev/null || { echo "Missing $UNPACKED/assets/index-*.js"; exit 1; }
+          if grep -E "serviceWorker\.register|/sw\.js|/registerSW\.js" "$UNPACKED/index.html"; then
+            echo "index.html unexpectedly contains a service worker registration"; exit 1
+          fi
+          echo "Frontend assets OK in $UNPACKED"
+      - name: Smoke-test packaged Electron app
+        # Launches the .app inside a real Chromium BrowserWindow and asserts
+        # the sign-in UI is visible. Catches blank-window regressions on macOS
+        # (preload errors, asset paths, CSP, missing native modules).
+        run: |
+          set -euo pipefail
+          mkdir -p .smoke-test
+          cd .smoke-test
+          npm init -y >/dev/null
+          npm install --no-package-lock playwright-core@1.49.1
+          cd ..
+          export NODE_PATH="$PWD/.smoke-test/node_modules"
+          node scripts/electron-smoke-test.mjs
+        env: { NODE_ENV: production }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SignalX-AI-Arena-macOS
+          path: dist-electron/*.dmg
+          retention-days: 30
+  build-linux:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - run: pnpm install --frozen-lockfile
+      - name: Install xvfb (virtual display for Electron)
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - working-directory: artifacts/signalx-arena
+        run: pnpm run build:electron
+        env: { NODE_ENV: production }
+      - working-directory: artifacts/api-server
+        run: pnpm run build
+        env: { NODE_ENV: production }
+      - name: Package Linux AppImage
+        run: npx electron-builder --linux --config electron-builder.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_ENV: production
+      - name: Verify packaged frontend assets
+        run: |
+          set -euo pipefail
+          UNPACKED="dist-electron/linux-unpacked/resources/frontend"
+          test -f "$UNPACKED/index.html" || { echo "Missing $UNPACKED/index.html"; exit 1; }
+          ls "$UNPACKED"/assets/index-*.js >/dev/null || { echo "Missing $UNPACKED/assets/index-*.js"; exit 1; }
+          if grep -E "serviceWorker\.register|/sw\.js|/registerSW\.js" "$UNPACKED/index.html"; then
+            echo "index.html unexpectedly contains a service worker registration"; exit 1
+          fi
+          echo "Frontend assets OK in $UNPACKED"
+      - name: Smoke-test packaged Electron app (under xvfb)
+        # Linux runners are headless — wrap the launch in xvfb-run so Electron
+        # has a display server. Catches blank-window regressions in the
+        # AppImage build the same way Windows / macOS do.
+        run: |
+          set -euo pipefail
+          mkdir -p .smoke-test
+          cd .smoke-test
+          npm init -y >/dev/null
+          npm install --no-package-lock playwright-core@1.49.1
+          cd ..
+          export NODE_PATH="$PWD/.smoke-test/node_modules"
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x960x24" \
+            node scripts/electron-smoke-test.mjs
+        env: { NODE_ENV: production }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SignalX-AI-Arena-Linux
+          path: dist-electron/*.AppImage
           retention-days: 30
