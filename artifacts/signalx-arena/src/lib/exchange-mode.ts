@@ -34,7 +34,16 @@ export interface ExchangeModeState {
   apiValidated:    boolean;
   balanceFetched:  boolean;  // true after at least one successful balance fetch
   networkUp:       boolean;  // true after backend reachability confirmed
-  permissions:     { read: boolean; trade: boolean; withdraw: boolean; futures: boolean };
+  permissions:     {
+    read:        boolean;
+    trade:       boolean;
+    withdraw:    boolean;
+    futures:     boolean;
+    spot?:       boolean;     // granular: spot trading specifically
+    margin?:     boolean;     // granular: margin trading
+    options?:    boolean;     // granular: options trading
+    accountType?: string;     // e.g. 'SPOT', 'MARGIN', 'UNIFIED'
+  };
   uid?:            string;
   connectedAt?:    number;
   latency?:        number;

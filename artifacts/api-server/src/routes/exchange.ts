@@ -221,6 +221,64 @@ router.get('/exchange/:exchange/price/:symbol', async (req, res) => {
   } catch (e) { serverError(res, ex, e); }
 });
 
+// POST /api/exchange/:exchange/diagnostic — run a full transparent permission/IP check
+// Currently only the Binance adapter implements this richly; for other adapters
+// we synthesize a best-effort report from validateCredentials so the UI panel
+// works uniformly for every exchange.
+router.post('/exchange/:exchange/diagnostic', async (req, res) => {
+  const ex      = requireExchange(req, res); if (!ex) return;
+  const creds   = extractCreds(req);
+  if (!creds) return badRequest(res, 'Missing API credentials');
+  logAction(ex, 'diagnostic', creds.apiKey);
+  const adapter = getAdapter(ex)!;
+  const adapterAny = adapter as unknown as {
+    runDiagnostic?: (c: typeof creds) => Promise<unknown>;
+  };
+  try {
+    if (typeof adapterAny.runDiagnostic === 'function') {
+      const diag = await adapterAny.runDiagnostic(creds);
+      return res.json({ ok: true, exchange: ex, diagnostic: diag });
+    }
+    // Best-effort fallback for adapters without a dedicated diagnostic.
+    const r = await adapter.validateCredentials(creds);
+    return res.json({
+      ok: true, exchange: ex,
+      diagnostic: {
+        exchange: ex, apiKeyMasked: maskKey(creds.apiKey), testnet: !!creds.testnet,
+        permissions: r.permissions,
+        steps: [{
+          step: 'Credential validation', ok: r.success,
+          detail: r.success ? 'Credentials accepted' : (r.error ?? 'Validation failed'),
+        }],
+        recommendation: r.success ? undefined : 'Re-check API key, secret, and IP whitelist on the exchange.',
+        timestamp: Date.now(),
+      },
+    });
+  } catch (e) { serverError(res, ex, e); }
+});
+
+// POST /api/exchange/:exchange/self-test — run ping + signed account + test order
+router.post('/exchange/:exchange/self-test', async (req, res) => {
+  const ex      = requireExchange(req, res); if (!ex) return;
+  const creds   = extractCreds(req);
+  if (!creds) return badRequest(res, 'Missing API credentials');
+  logAction(ex, 'self-test', creds.apiKey);
+  const adapter = getAdapter(ex)!;
+  const adapterAny = adapter as unknown as {
+    runSelfTest?: (c: typeof creds) => Promise<unknown>;
+  };
+  try {
+    if (typeof adapterAny.runSelfTest === 'function') {
+      const result = await adapterAny.runSelfTest(creds);
+      return res.json({ ok: true, exchange: ex, selfTest: result });
+    }
+    return res.status(501).json({
+      ok: false, exchange: ex,
+      error: `Self-test is not yet implemented for ${ex}. Use the standard validate + balance flow instead.`,
+    });
+  } catch (e) { serverError(res, ex, e); }
+});
+
 // POST /api/exchange/:exchange/symbol/rules — get symbol trading rules
 router.post('/exchange/:exchange/symbol/rules', async (req, res) => {
   const ex      = requireExchange(req, res); if (!ex) return;

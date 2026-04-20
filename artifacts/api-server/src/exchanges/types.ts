@@ -67,9 +67,15 @@ export interface OrderResult {
 
 export interface Permission {
   read:     boolean;
-  trade:    boolean;
+  trade:    boolean;       // canonical "can place ANY order" — primary trading flag
   withdraw: boolean;
   futures:  boolean;
+  // Optional granular flags for richer diagnostics in the UI. Adapters that
+  // can detect them populate these; older adapters may leave them undefined.
+  spot?:     boolean;       // spot trading specifically
+  margin?:   boolean;       // cross/iso margin
+  options?:  boolean;       // options trading
+  accountType?: string;     // e.g. "SPOT", "MARGIN", "UNIFIED"
 }
 
 export interface ConnectResult {
@@ -77,6 +83,47 @@ export interface ConnectResult {
   permissions: Permission;
   uid?:        string;
   error?:      string;
+  // Raw account snapshot kept for the diagnostics panel. Adapters MUST NOT
+  // include secrets here; this is account metadata only (canTrade flags,
+  // accountType, permissions array, etc.).
+  raw?:        Record<string, unknown>;
+}
+
+// ── Diagnostic types ─────────────────────────────────────────────────────────
+// Exposed by the `runDiagnostic` and `runSelfTest` adapter methods so the
+// frontend can render a transparent "what does the exchange actually say"
+// panel without having to ship credentials around for ad-hoc curl tests.
+
+export interface DiagnosticStep {
+  step:       string;        // human-readable step name
+  ok:         boolean;
+  detail?:    string;        // pass message OR error explanation
+  code?:      string | number;
+  httpStatus?: number;
+  raw?:       unknown;       // raw response excerpt (NEVER includes secrets)
+  durationMs?: number;
+}
+
+export interface ExchangeDiagnostic {
+  exchange:        string;
+  apiKeyMasked:    string;
+  testnet:         boolean;
+  outboundIp?:     string;          // public IP the api-server is reaching the exchange from
+  permissions:     Permission;
+  accountType?:    string;
+  steps:           DiagnosticStep[];
+  recommendation?: string;          // human guidance e.g. "IP whitelist mismatch likely"
+  timestamp:       number;
+}
+
+export interface SelfTestResult {
+  exchange:     string;
+  apiKeyMasked: string;
+  testnet:      boolean;
+  pass:         boolean;
+  steps:        DiagnosticStep[];   // ping → signed account → test order
+  summary:      string;
+  timestamp:    number;
 }
 
 export interface ExchangeError {

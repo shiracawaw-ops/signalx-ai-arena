@@ -1,0 +1,42 @@
+Audit and fix Binance real trading permission detection in SignalX AutoPilot.
+
+Current situation:
+- Binance API key has Read enabled
+- Spot/Fast trading is enabled in Binance
+- IP whitelist is enabled and the correct public IP is added
+- App shows "Connected to Binance"
+- But UI still shows: "API connected but trading permission is missing from this API key"
+
+I need you to do all of the following without changing the UI design:
+
+1) Trace the exact permission-check flow used by the Binance integration.
+2) Verify whether the app is checking Spot permission, Futures permission, Margin permission, or a wrong field.
+3) Confirm the app is not reading stale API keys from old env vars, cached config, local storage, database, or secrets.
+4) Log the exact Binance response body and error code for:
+   - account info
+   - permission check
+   - order test
+   - exchange info
+5) Add a real diagnostic panel that shows:
+   - API key source actually being used
+   - environment (demo/paper/testnet/real)
+   - detected public IP used by the running app
+   - Binance permissions detected: read / spot / margin / futures / withdraw
+   - whether IP restriction mismatch is occurring
+6) Add a “Run Binance Trading Permission Self-Test” button that performs:
+   - connectivity test
+   - signed account endpoint test
+   - spot order test on a safe symbol using test validation only, not a live filled order
+   - clear pass/fail messages with Binance error code and human explanation
+7) Fix the permission logic so the app does not mark trading as missing when Spot trading is actually enabled.
+8) If Futures permission is missing but Spot is enabled, show:
+   - "Spot trading enabled"
+   - "Futures trading not enabled"
+   instead of a generic trading-missing error.
+9) Ensure the app uses the newly saved API key immediately after save and fully clears old cached credentials.
+10) Add verbose logs to execution log and diagnostics tab.
+
+Deliver the fix fully implemented and production-safe.
+Do not simplify.
+Do not change layout.
+Do not remove existing features.

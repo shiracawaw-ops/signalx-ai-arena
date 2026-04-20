@@ -18,6 +18,7 @@ export type ExchangeStage =
   | 'disconnect'
   | 'fallback'
   | 'state-change'
+  | 'selftest'
   | 'error';
 
 export interface ExchangeEvent {

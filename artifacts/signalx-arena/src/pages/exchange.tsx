@@ -367,7 +367,16 @@ export default function ExchangePage() {
   const [logEntries,  setLogEntries]  = useState<ExecutionEntry[]>(executionLog.all());
   const [liveBalances, setLiveBalances] = useState<Array<{ asset: string; available: number; hold: number; total: number; usdtValue?: number }>>([]);
   const [liveOrders,   setLiveOrders]  = useState<unknown[]>([]);
-  const [livePermissions, setLivePermissions] = useState<{ read: boolean; trade: boolean; withdraw: boolean; futures: boolean } | null>(null);
+  const [livePermissions, setLivePermissions] = useState<{
+    read: boolean; trade: boolean; withdraw: boolean; futures: boolean;
+    spot?: boolean; margin?: boolean; options?: boolean; accountType?: string;
+  } | null>(null);
+  // ── Diagnostics state — populated by the "Run Self-Test" button. Kept in
+  // a single object so we can render a transparent panel with every step
+  // Binance returned (canTrade flag, accountType, IP, error codes, …).
+  const [diagnostic, setDiagnostic] = useState<import('../lib/api-client.js').ExchangeDiagnostic | null>(null);
+  const [selfTest,   setSelfTest]   = useState<import('../lib/api-client.js').SelfTestResult | null>(null);
+  const [diagBusy,   setDiagBusy]   = useState(false);
   const [refreshing,   setRefreshing]  = useState(false);
   const [validating,   setValidating]  = useState(false);
   const [balError,     setBalError]    = useState<string | null>(null);
@@ -1071,7 +1080,10 @@ export default function ExchangePage() {
 
       // 3. Extract permissions from validated response
       const vData = (valRes as {
-        data: { permissions?: { read: boolean; trade: boolean; withdraw: boolean; futures: boolean } };
+        data: { permissions?: {
+          read: boolean; trade: boolean; withdraw: boolean; futures: boolean;
+          spot?: boolean; margin?: boolean; options?: boolean; accountType?: string;
+        } };
       }).data;
       const perms = vData?.permissions ?? { read: true, trade: false, withdraw: false, futures: false };
       setLivePermissions(perms);
@@ -1098,8 +1110,10 @@ export default function ExchangePage() {
       toast({
         title: `Connected to ${selectedEx.name} (${modeLabelStr})`,
         description: perms.trade
-          ? 'API validated — trading permission confirmed.'
-          : 'API connected but trading permission is missing on this key.',
+          ? (perms.spot === false && perms.futures
+              ? 'API validated — Futures trading enabled, Spot trading is NOT enabled on this key.'
+              : 'API validated — trading permission confirmed.')
+          : 'API connected but no trading permission on this key. Open the Permissions tab and run the Self-Test for the exact reason.',
         variant: perms.trade ? 'default' : 'destructive',
       });
 
@@ -1278,8 +1292,10 @@ export default function ExchangePage() {
             <strong>Real Mode</strong> — {selectedEx.name}.
             {isConnected
               ? modeState.permissions.trade
-                ? ' API validated. Trade permission confirmed. Arm trading to execute real orders.'
-                : ' API connected but trading permission is missing from this API key.'
+                ? (modeState.permissions.spot === false && modeState.permissions.futures
+                    ? ' API validated. Futures trading enabled — Spot trading not enabled on this key.'
+                    : ' API validated. Trade permission confirmed. Arm trading to execute real orders.')
+                : ' API connected but trading permission missing. Open Permissions tab → Run Self-Test for the exact reason from the exchange.'
               : ' Connect with real API keys to activate live trading.'}
           </span>
         </div>
@@ -1524,7 +1540,10 @@ export default function ExchangePage() {
                         {(mode === 'demo' || mode === 'paper') ? `${mode === 'paper' ? 'Paper' : 'Demo'} mode — simulated portfolio data.` : `${mode === 'testnet' ? 'Testnet' : 'Real'} mode — API key active.`}
                       </p>
                       {isLive && livePermissions && !livePermissions.trade && (
-                        <p className="text-[10px] text-amber-400 mt-1">⚠ API connected but trading permission missing</p>
+                        <p className="text-[10px] text-amber-400 mt-1">⚠ API connected but no trading permission — see Permissions tab → Self-Test</p>
+                      )}
+                      {isLive && livePermissions && livePermissions.trade && livePermissions.spot === false && livePermissions.futures && (
+                        <p className="text-[10px] text-amber-400 mt-1">⚠ Futures trading enabled — Spot trading is NOT enabled on this key</p>
                       )}
                     </div>
                   </div>
@@ -2095,21 +2114,146 @@ export default function ExchangePage() {
               </div>
               {isLive && livePermissions && (
                 <div className="p-3 rounded-xl bg-zinc-800/30 border border-zinc-700 text-xs space-y-2">
-                  <p className="text-zinc-400 font-medium">Live API permissions from {selectedEx.name}:</p>
+                  <div className="flex items-center justify-between">
+                    <p className="text-zinc-400 font-medium">Live API permissions from {selectedEx.name}:</p>
+                    {livePermissions.accountType && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-700/50 text-zinc-300 font-mono">{livePermissions.accountType}</span>
+                    )}
+                  </div>
                   {[
-                    { label: 'Read / General',   ok: livePermissions.read     },
-                    { label: 'Trade',             ok: livePermissions.trade    },
-                    { label: 'Withdraw',          ok: livePermissions.withdraw },
-                    { label: 'Futures',           ok: livePermissions.futures  },
-                  ].map(p => (
+                    { label: 'Read / Account',   ok: livePermissions.read,     show: true,                                  hint: '' },
+                    { label: 'Trade (any)',      ok: livePermissions.trade,    show: true,                                  hint: 'canonical canTrade flag' },
+                    { label: 'Spot',             ok: !!livePermissions.spot,    show: livePermissions.spot     !== undefined, hint: 'spot order placement' },
+                    { label: 'Margin',           ok: !!livePermissions.margin,  show: livePermissions.margin   !== undefined, hint: 'cross / iso margin' },
+                    { label: 'Futures',          ok: livePermissions.futures,   show: true,                                  hint: 'derivatives' },
+                    { label: 'Options',          ok: !!livePermissions.options, show: livePermissions.options  !== undefined, hint: '' },
+                    { label: 'Withdraw',         ok: livePermissions.withdraw,  show: true,                                  hint: 'never required for trading' },
+                  ].filter(p => p.show).map(p => (
                     <div key={p.label} className="flex items-center gap-2">
                       <StatusDot ok={p.ok} />
                       <span className={p.ok ? 'text-zinc-200' : 'text-zinc-500'}>{p.label}</span>
-                      {!p.ok && p.label === 'Trade' && (
-                        <span className="text-amber-400 text-[10px]">— trading blocked</span>
+                      {p.hint && <span className="text-[10px] text-zinc-600">— {p.hint}</span>}
+                      {!p.ok && p.label === 'Trade (any)' && (
+                        <span className="text-amber-400 text-[10px] ml-auto">trading blocked</span>
+                      )}
+                      {!p.ok && p.label === 'Spot' && livePermissions.trade && (
+                        <span className="text-amber-400 text-[10px] ml-auto">enable Spot on Binance</span>
                       )}
                     </div>
                   ))}
+                </div>
+              )}
+
+              {/* ── Diagnostics & Self-Test ─────────────────────────────────
+                  Transparent panel that surfaces EVERY signal the exchange
+                  returns — outbound IP, account snapshot, signed-call
+                  results, no-fill order test — so the user can see the
+                  exact reason a permission check passes or fails. */}
+              {isLive && (
+                <div className="p-3 rounded-xl bg-zinc-900/60 border border-zinc-700/80 text-xs space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-zinc-200 font-medium flex items-center gap-1.5">
+                        <Activity size={12} className="text-cyan-400" /> Trading Permission Diagnostics
+                      </p>
+                      <p className="text-[10px] text-zinc-500 mt-0.5">
+                        Runs ping → server time → signed account → no-fill order test against {selectedEx.name}. Surfaces the exchange&apos;s own error codes.
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5 shrink-0"
+                      disabled={diagBusy}
+                      onClick={async () => {
+                        const creds = credentialStore.get(selectedEx.id);
+                        if (!creds) {
+                          toast({ title: 'No API credentials in this session', description: 'Reconnect on the Connection tab first.', variant: 'destructive' });
+                          return;
+                        }
+                        setDiagBusy(true);
+                        setSelfTest(null);
+                        setDiagnostic(null);
+                        exchangeEvents.log('selftest', selectedEx.id, `Running Trading Permission Self-Test on ${selectedEx.name}…`, { apiKey: creds.apiKey });
+                        try {
+                          const r = await apiClient.runSelfTest(selectedEx.id, creds);
+                          if (r.ok) {
+                            setSelfTest(r.data.selfTest);
+                            const dr = await apiClient.getDiagnostic(selectedEx.id, creds);
+                            if (dr.ok) setDiagnostic(dr.data.diagnostic);
+                            exchangeEvents.log('selftest', selectedEx.id, `Self-Test ${r.data.selfTest.pass ? 'PASS' : 'FAIL'} — ${r.data.selfTest.summary}`, { apiKey: creds.apiKey });
+                            toast({
+                              title: r.data.selfTest.pass ? 'Self-Test passed' : 'Self-Test failed',
+                              description: r.data.selfTest.summary,
+                              variant: r.data.selfTest.pass ? 'default' : 'destructive',
+                            });
+                          } else {
+                            const msg = r.error ?? 'Self-test failed';
+                            exchangeEvents.log('selftest', selectedEx.id, `Self-Test error — ${msg}`, { apiKey: creds.apiKey });
+                            toast({ title: 'Self-Test error', description: msg, variant: 'destructive' });
+                          }
+                        } finally {
+                          setDiagBusy(false);
+                        }
+                      }}
+                    >
+                      {diagBusy ? <RefreshCw size={11} className="animate-spin" /> : <Crosshair size={11} />}
+                      Run Binance Trading Permission Self-Test
+                    </Button>
+                  </div>
+
+                  {/* Diagnostic data summary */}
+                  {(diagnostic || selfTest) && (
+                    <div className="mt-2 space-y-2">
+                      {diagnostic && (
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 px-2 py-2 rounded-lg bg-zinc-800/40 border border-zinc-700/50">
+                          <div className="text-[10px] text-zinc-500">API key in use</div>
+                          <div className="text-[10px] font-mono text-zinc-200 text-right">{diagnostic.apiKeyMasked}</div>
+                          <div className="text-[10px] text-zinc-500">Mode</div>
+                          <div className="text-[10px] text-zinc-200 text-right">{diagnostic.testnet ? 'TESTNET' : 'REAL'}</div>
+                          <div className="text-[10px] text-zinc-500">Outbound IP (server → exchange)</div>
+                          <div className="text-[10px] font-mono text-zinc-200 text-right">{diagnostic.outboundIp ?? 'unknown'}</div>
+                          {diagnostic.accountType && (<>
+                            <div className="text-[10px] text-zinc-500">Account type</div>
+                            <div className="text-[10px] font-mono text-zinc-200 text-right">{diagnostic.accountType}</div>
+                          </>)}
+                        </div>
+                      )}
+                      {selfTest && (
+                        <div className={`px-2 py-2 rounded-lg text-[11px] font-medium ${selfTest.pass ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300' : 'bg-red-500/10 border border-red-500/30 text-red-300'}`}>
+                          {selfTest.pass ? '✓ ' : '✗ '}{selfTest.summary}
+                        </div>
+                      )}
+                      {(selfTest?.steps ?? diagnostic?.steps ?? []).length > 0 && (
+                        <div className="space-y-1 mt-2">
+                          {(selfTest?.steps ?? diagnostic?.steps ?? []).map((s, i) => (
+                            <div key={i} className="px-2 py-1.5 rounded bg-zinc-800/30 border border-zinc-700/40">
+                              <div className="flex items-start gap-2">
+                                <StatusDot ok={s.ok} />
+                                <div className="flex-1 min-w-0">
+                                  <div className="text-[11px] text-zinc-200 font-medium flex items-center gap-2">
+                                    {s.step}
+                                    {s.code !== undefined && <span className="text-[9px] font-mono text-zinc-500">code {String(s.code)}</span>}
+                                    {s.httpStatus !== undefined && <span className="text-[9px] font-mono text-zinc-500">HTTP {s.httpStatus}</span>}
+                                    {s.durationMs !== undefined && <span className="text-[9px] text-zinc-600 ml-auto">{s.durationMs}ms</span>}
+                                  </div>
+                                  {s.detail && <div className={`text-[10px] mt-0.5 ${s.ok ? 'text-zinc-400' : 'text-amber-300'} break-words`}>{s.detail}</div>}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {diagnostic?.recommendation && (
+                        <div className="px-2 py-2 rounded-lg bg-cyan-500/5 border border-cyan-500/30 text-[11px] text-cyan-200">
+                          <strong>Recommendation:</strong> {diagnostic.recommendation}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {!diagnostic && !selfTest && !diagBusy && (
+                    <p className="text-[10px] text-zinc-600 italic">Click the button to run a complete trading-permission audit.</p>
+                  )}
                 </div>
               )}
               {[

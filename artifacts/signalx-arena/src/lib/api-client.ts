@@ -364,4 +364,77 @@ export const apiClient = {
     const r = await request<{ exchanges: string[] }>(`${BACKEND}/exchange`);
     return r.ok ? (r.data.exchanges ?? []) : [];
   },
+
+  // ── Diagnostics ──────────────────────────────────────────────────────────
+  // Pull the full transparency report (outbound IP, account JSON snapshot,
+  // every step's pass/fail with the exchange's own error code) so the
+  // Diagnostics panel can show the user EXACTLY why a permission check is
+  // failing, instead of an opaque "trading permission missing" string.
+
+  async getDiagnostic(
+    exchange: string,
+    creds: ExchangeCredentials,
+  ): Promise<ApiResult<{ diagnostic: ExchangeDiagnostic }>> {
+    console.log(`[api-client] diagnostic ${exchange} key=${maskKey(creds.apiKey)}`);
+    return request(`${BACKEND}/exchange/${exchange}/diagnostic`, {
+      method:  'POST',
+      headers: credHeaders(creds),
+      body:    '{}',
+    });
+  },
+
+  async runSelfTest(
+    exchange: string,
+    creds: ExchangeCredentials,
+  ): Promise<ApiResult<{ selfTest: SelfTestResult }>> {
+    console.log(`[api-client] self-test ${exchange} key=${maskKey(creds.apiKey)}`);
+    return request(`${BACKEND}/exchange/${exchange}/self-test`, {
+      method:  'POST',
+      headers: credHeaders(creds),
+      body:    '{}',
+    });
+  },
 };
+
+// ── Diagnostic types (mirror of backend types.ts) ─────────────────────────────
+
+export interface DiagnosticStep {
+  step:        string;
+  ok:          boolean;
+  detail?:     string;
+  code?:       string | number;
+  httpStatus?: number;
+  raw?:        unknown;
+  durationMs?: number;
+}
+
+export interface ExchangeDiagnostic {
+  exchange:        string;
+  apiKeyMasked:    string;
+  testnet:         boolean;
+  outboundIp?:     string;
+  permissions: {
+    read:        boolean;
+    trade:       boolean;
+    withdraw:    boolean;
+    futures:     boolean;
+    spot?:       boolean;
+    margin?:     boolean;
+    options?:    boolean;
+    accountType?: string;
+  };
+  accountType?:    string;
+  steps:           DiagnosticStep[];
+  recommendation?: string;
+  timestamp:       number;
+}
+
+export interface SelfTestResult {
+  exchange:     string;
+  apiKeyMasked: string;
+  testnet:      boolean;
+  pass:         boolean;
+  steps:        DiagnosticStep[];
+  summary:      string;
+  timestamp:    number;
+}
