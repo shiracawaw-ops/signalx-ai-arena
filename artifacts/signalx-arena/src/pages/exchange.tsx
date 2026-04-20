@@ -20,7 +20,12 @@ import {
   ArrowLeftRight, CheckCircle2, XCircle, RefreshCw, Shield,
   Eye, EyeOff, Zap, Wallet, Clock, Lock, ExternalLink, Globe,
   Activity, Settings, FileText, AlertTriangle, Crosshair, Send, X,
+  ChevronDown,
 } from 'lucide-react';
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent,
+  DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu';
 
 // ── New engine imports ────────────────────────────────────────────────────────
 import { exchangeMode as exMode }   from '@/lib/exchange-mode';
@@ -240,6 +245,9 @@ export default function ExchangePage() {
   // against the orderIds that didn't cancel — without re-issuing requests
   // for the ones that already succeeded.
   const [lastFailedTargets, setLastFailedTargets] = useState<Array<{ orderId: string; symbol: string; side: 'buy' | 'sell' }>>([]);
+  // When the bulk-cancel action is scoped to a single symbol this holds the
+  // symbol; null means "every cancellable order across all symbols".
+  const [cancelAllSymbol, setCancelAllSymbol] = useState<string | null>(null);
 
   // ── Per-asset close-position progress ─────────────────────────────────────
   // Inline status panel under each asset card: submitting → pending → partial
@@ -526,8 +534,10 @@ export default function ExchangePage() {
   // that calls this handler — the function itself does not re-prompt.
   const cancelAllOpenOrders = useCallback(async (
     targets: Array<{ orderId: string; symbol: string; side: 'buy' | 'sell' }>,
+    scopeSymbol: string | null = null,
   ) => {
     if (targets.length === 0) return;
+    const scopeLabel = scopeSymbol ? `${scopeSymbol} order(s)` : 'open order(s)';
     if (mode !== 'real' && mode !== 'testnet') {
       toast({ title: 'Cancel unavailable', description: 'Switch to Real or Testnet mode to cancel live orders.', variant: 'destructive' });
       return;
@@ -550,7 +560,7 @@ export default function ExchangePage() {
     });
 
     const creds = { apiKey, secretKey, ...(passphrase ? { passphrase } : {}) };
-    exchangeEvents.log('connect', selectedEx.id, `Bulk cancel: ${targets.length} order(s)`);
+    exchangeEvents.log('connect', selectedEx.id, `Bulk cancel: ${targets.length} ${scopeLabel}`);
 
     // Per-result state updates: each cancel resolves independently and
     // immediately bumps the progress counter + clears its row spinner so the
@@ -619,12 +629,15 @@ export default function ExchangePage() {
 
     if (failed === 0) {
       toast({
-        title: 'All open orders cancelled',
+        title: scopeSymbol
+          ? `All ${scopeSymbol} orders cancelled`
+          : 'All open orders cancelled',
         description: `${succeeded} succeeded / 0 failed on ${selectedEx.name}.`,
       });
     } else {
+      const action = scopeSymbol ? `Cancel ${scopeSymbol}` : 'Cancel All';
       toast({
-        title: succeeded > 0 ? 'Cancel All partially completed' : 'Cancel All failed',
+        title: succeeded > 0 ? `${action} partially completed` : `${action} failed`,
         description: `${succeeded} succeeded / ${failed} failed on ${selectedEx.name}. See Execution Log for details.`,
         variant: succeeded > 0 ? 'default' : 'destructive',
       });
@@ -1737,12 +1750,36 @@ export default function ExchangePage() {
           const cancellableCount = cancellableTargets.length;
           const showCancelAll = isLive && cancellableCount > 0;
 
-          const handleCancelAllClick = () => {
+          // Group cancellable targets by symbol so the dropdown can offer a
+          // per-symbol bulk cancel that targets only that symbol's orders.
+          const symbolGroups = new Map<string, typeof cancellableTargets>();
+          for (const t of cancellableTargets) {
+            const key = t.symbol || '—';
+            const arr = symbolGroups.get(key) ?? [];
+            arr.push(t);
+            symbolGroups.set(key, arr);
+          }
+          const symbolGroupList = Array.from(symbolGroups.entries())
+            .sort(([a], [b]) => a.localeCompare(b));
+          const hasMultipleSymbols = symbolGroupList.length > 1;
+
+          // Resolve the targets the dialog will act on based on the current
+          // scope (null = all cancellable, string = just that symbol).
+          const dialogTargets = cancelAllSymbol
+            ? (symbolGroups.get(cancelAllSymbol) ?? [])
+            : cancellableTargets;
+          const dialogScopeLabel = cancelAllSymbol
+            ? `${cancelAllSymbol} order(s)`
+            : 'open order(s)';
+
+          const startCancel = (symbol: string | null, targets: typeof cancellableTargets) => {
+            if (targets.length === 0) return;
             if (mode === 'real') {
+              setCancelAllSymbol(symbol);
               setCancelAllConfirmText('');
               setCancelAllOpen(true);
             } else {
-              cancelAllOpenOrders(cancellableTargets);
+              cancelAllOpenOrders(targets, symbol);
             }
           };
 
@@ -1754,6 +1791,8 @@ export default function ExchangePage() {
           const retryTargets = lastFailedTargets.filter(t => cancellableIds.has(t.orderId));
           const showRetryFailed = isLive && !cancellingAll && retryTargets.length > 0;
 
+          const handleCancelAllClick = () => startCancel(null, cancellableTargets);
+
           return (
         <>
         <Card className="border-zinc-800/60">
@@ -1763,27 +1802,63 @@ export default function ExchangePage() {
             </CardTitle>
             <div className="flex items-center gap-2">
               {showCancelAll && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleCancelAllClick}
-                  disabled={cancellingAll || refreshing}
-                  className="flex items-center gap-1.5 text-xs h-7 border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300"
-                  data-testid="button-cancel-all-orders"
-                  title={`Cancel all ${cancellableCount} open order(s) on ${selectedEx.name}`}
-                >
-                  {cancellingAll
-                    ? <RefreshCw size={11} className="animate-spin" />
-                    : <X size={11} />}
-                  {cancellingAll
-                    ? (
-                      <span data-testid="text-cancel-all-progress">
-                        {cancelAllProgress.done} / {cancelAllProgress.total} cancelled
-                        {cancelAllProgress.failed > 0 ? `, ${cancelAllProgress.failed} failed` : ''}
-                      </span>
-                    )
-                    : `Cancel All (${cancellableCount})`}
-                </Button>
+                <div className="flex items-center">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleCancelAllClick}
+                    disabled={cancellingAll || refreshing}
+                    className={`flex items-center gap-1.5 text-xs h-7 border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300 ${hasMultipleSymbols ? 'rounded-r-none border-r-0' : ''}`}
+                    data-testid="button-cancel-all-orders"
+                    title={`Cancel all ${cancellableCount} open order(s) on ${selectedEx.name}`}
+                  >
+                    {cancellingAll
+                      ? <RefreshCw size={11} className="animate-spin" />
+                      : <X size={11} />}
+                    {cancellingAll
+                      ? (
+                        <span data-testid="text-cancel-all-progress">
+                          {cancelAllProgress.done} / {cancelAllProgress.total} cancelled
+                          {cancelAllProgress.failed > 0 ? `, ${cancelAllProgress.failed} failed` : ''}
+                        </span>
+                      )
+                      : `Cancel All (${cancellableCount})`}
+                  </Button>
+                  {hasMultipleSymbols && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={cancellingAll || refreshing}
+                          className="h-7 px-1.5 rounded-l-none border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300"
+                          data-testid="button-cancel-by-symbol-trigger"
+                          title="Cancel all orders for one symbol"
+                          aria-label="Cancel orders for a specific symbol"
+                        >
+                          <ChevronDown size={11} />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="min-w-[200px]">
+                        <DropdownMenuLabel className="text-xs">
+                          Cancel by symbol
+                        </DropdownMenuLabel>
+                        <DropdownMenuSeparator />
+                        {symbolGroupList.map(([sym, list]) => (
+                          <DropdownMenuItem
+                            key={sym}
+                            onSelect={() => startCancel(sym, list)}
+                            data-testid={`button-cancel-symbol-${sym}`}
+                            className="text-xs flex items-center justify-between gap-3 cursor-pointer"
+                          >
+                            <span className="font-medium">Cancel all {sym}</span>
+                            <span className="text-zinc-500 font-mono">{list.length}</span>
+                          </DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
+                </div>
               )}
               {showRetryFailed && (
                 <Button
@@ -1911,16 +1986,24 @@ export default function ExchangePage() {
           </CardContent>
         </Card>
 
-        {/* Real-mode strong confirmation: must type CANCEL ALL exactly. */}
-        <Dialog open={cancelAllOpen} onOpenChange={(o) => { setCancelAllOpen(o); if (!o) setCancelAllConfirmText(''); }}>
+        {/* Real-mode strong confirmation: must type CANCEL ALL exactly.
+            Same dialog handles both "cancel everything" and the per-symbol
+            scoped variant — only the wording and target list differ. */}
+        <Dialog open={cancelAllOpen} onOpenChange={(o) => { setCancelAllOpen(o); if (!o) { setCancelAllConfirmText(''); setCancelAllSymbol(null); } }}>
           <DialogContent className="border-red-500/40">
             <DialogHeader>
               <DialogTitle className="text-red-400 flex items-center gap-2">
-                <AlertTriangle size={16} /> Cancel ALL open orders on {selectedEx.name}?
+                <AlertTriangle size={16} />
+                {cancelAllSymbol
+                  ? `Cancel ALL ${cancelAllSymbol} orders on ${selectedEx.name}?`
+                  : `Cancel ALL open orders on ${selectedEx.name}?`}
               </DialogTitle>
               <DialogDescription className="text-zinc-300">
-                This will send cancel requests for <span className="font-semibold text-zinc-100">{cancellableCount}</span> live order(s) in parallel.
-                Filled positions are NOT closed. This action cannot be undone.
+                This will send cancel requests for <span className="font-semibold text-zinc-100">{dialogTargets.length}</span> live {dialogScopeLabel} in parallel.
+                {cancelAllSymbol
+                  ? ` Orders for other symbols are NOT touched.`
+                  : ''}
+                {' '}Filled positions are NOT closed. This action cannot be undone.
                 <br /><br />
                 Type <span className="font-mono font-bold text-red-400">CANCEL ALL</span> below to confirm.
               </DialogDescription>
@@ -1936,24 +2019,27 @@ export default function ExchangePage() {
             <DialogFooter>
               <Button
                 variant="outline"
-                onClick={() => { setCancelAllOpen(false); setCancelAllConfirmText(''); }}
+                onClick={() => { setCancelAllOpen(false); setCancelAllConfirmText(''); setCancelAllSymbol(null); }}
                 data-testid="button-cancel-all-dismiss"
               >
                 Keep orders
               </Button>
               <Button
                 variant="destructive"
-                disabled={cancelAllConfirmText !== 'CANCEL ALL' || cancellingAll}
+                disabled={cancelAllConfirmText !== 'CANCEL ALL' || cancellingAll || dialogTargets.length === 0}
                 onClick={() => {
+                  const scope = cancelAllSymbol;
+                  const targets = dialogTargets;
                   setCancelAllOpen(false);
                   setCancelAllConfirmText('');
-                  cancelAllOpenOrders(cancellableTargets);
+                  setCancelAllSymbol(null);
+                  cancelAllOpenOrders(targets, scope);
                 }}
                 data-testid="button-cancel-all-confirm"
               >
                 {cancellingAll
                   ? `Cancelling… ${cancelAllProgress.done} / ${cancelAllProgress.total}${cancelAllProgress.failed > 0 ? ` (${cancelAllProgress.failed} failed)` : ''}`
-                  : `Cancel ${cancellableCount} order(s)`}
+                  : `Cancel ${dialogTargets.length} order(s)`}
               </Button>
             </DialogFooter>
           </DialogContent>
