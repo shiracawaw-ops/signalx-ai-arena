@@ -116,6 +116,7 @@ export const REJECT = {
   MAX_POSITIONS:           'max_open_positions_reached',
   STALE_PRICE:             'stale_price',
   INVALID_SIDE:            'invalid_side',
+  UNSUPPORTED_ASSET:       'unsupported_asset_class',
 } as const;
 
 export type RejectReason = typeof REJECT[keyof typeof REJECT];

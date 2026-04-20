@@ -11,6 +11,8 @@ import { calcFeeAdjusted, PLATFORM_FEE_RATE } from '@/lib/platform';
 import { ShieldAlert } from 'lucide-react';
 import { executeSignal } from '@/lib/execution-engine';
 import { exchangeMode } from '@/lib/exchange-mode';
+import { executionLog, REJECT } from '@/lib/execution-log';
+import { tradeConfig } from '@/lib/trade-config';
 import { ASSET_MAP } from '@/lib/storage';
 
 // ── Formatters ─────────────────────────────────────────────────────────────
@@ -285,7 +287,34 @@ export default function AutoPilotPage() {
       const last = lastDispatchRef.current;
       const transitioned = !last || last.botId !== sig.botId || last.action !== sig.action;
 
-      if (isLive && isCrypto && transitioned) {
+      if (isLive && !isCrypto && transitioned) {
+        // Non-crypto symbol on a crypto-only exchange: explicitly reject so
+        // the user sees why their AAPL/GOLD/EURUSD signal didn't become a
+        // real order, instead of AutoPilot silently doing nothing.
+        const exchange = exchangeMode.get().exchange;
+        const cfg      = tradeConfig.get(exchange);
+        const category = ASSET_MAP[sym]?.category ?? 'Unknown';
+        const price    = gcRef.current(sym);
+        executionLog.add({
+          mode,
+          exchange,
+          symbol:    sym,
+          side:      sig.action === 'BUY' ? 'buy' : 'sell',
+          orderType: cfg.orderType,
+          quantity:  cfg.tradeAmountUSD / (price || 1),
+          price,
+          amountUSD: cfg.tradeAmountUSD,
+          status:    'rejected',
+          rejectReason: REJECT.UNSUPPORTED_ASSET,
+          errorMsg:  `${category} symbol ${sym} cannot be traded on ${exchange} (crypto-only exchange).`,
+          signalId:  `autopilot_${sig.botId}_${sig.action}`,
+        });
+        const msg = `AutoPilot ${sig.action} ${sym} blocked — ${category} not tradable on ${exchange}.`;
+        setLog(prev => [makeLogEntry('select', msg, 'warn'), ...prev].slice(0, MAX_LOG));
+        // Latch so we don't repeat this rejection on every 5-second cycle
+        // for the same (bot, action) pair.
+        lastDispatchRef.current = sig;
+      } else if (isLive && isCrypto && transitioned) {
         const price = gcRef.current(sym);
         void executeSignal({
           id:     `autopilot_${sig.botId}_${sig.action}_${Date.now()}`,
