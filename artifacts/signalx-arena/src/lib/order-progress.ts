@@ -23,6 +23,7 @@
 
 import { apiClient } from './api-client.js';
 import type { ExchangeCredentials } from './exchange-mode.js';
+import { exchangeEvents } from './exchange-events.js';
 
 export type ProgressPhase =
   | 'submitting' | 'pending'  | 'partial' | 'filled'
@@ -49,6 +50,11 @@ export interface OrderProgress {
   // show a "Resume polling" affordance only on rows that genuinely timed
   // out and aren't already being retried.
   resumable?: boolean;
+  // Set while the poller is in an error-backoff cycle (consecutive transient
+  // `getOrderStatus` failures). Cleared on the next successful response.
+  // Lets the UI surface "Retrying in 6s — exchange unreachable" so users
+  // know the app is still working rather than silently stuck on "Pending".
+  retry?: { consecutiveErrors: number; nextDelayMs: number };
 }
 
 export const TERMINAL_PHASES: ReadonlySet<ProgressPhase> = new Set<ProgressPhase>([
@@ -343,6 +349,7 @@ export class OrderProgressStore {
     const source: ProgressSource = cur?.source ?? 'manual';
     const timeoutMs = POLL_TIMEOUTS_MS[source];
     let consecutiveErrors = 0;
+    let lastLoggedDelay = 0;
 
     if (cur?.resumable) this.update(opts.key, { resumable: false });
 
@@ -378,9 +385,15 @@ export class OrderProgressStore {
         return;
       }
       let nextDelay = POLL_INTERVAL_MS;
+      let errorReason: string | undefined;
       try {
         const r = await apiClient.getOrderStatus(opts.exchange, opts.creds, opts.orderId, opts.symbol);
         if (r.ok && r.data.order) {
+          if (consecutiveErrors > 0) {
+            exchangeEvents.log('fetch-balance', opts.exchange,
+              `Order poll recovered for ${opts.symbol} after ${consecutiveErrors} retry attempt(s)`,
+              { data: { key: opts.key, orderId: opts.orderId } });
+          }
           consecutiveErrors = 0;
           const o = r.data.order;
           const filled = Number(o.filledQty) || 0;
@@ -399,6 +412,7 @@ export class OrderProgressStore {
             quantity:  qty,
             filledQty: filled,
             avgPrice:  avg,
+            retry:     undefined,
           });
           if (TERMINAL_PHASES.has(phase)) {
             this.stopHeartbeat(opts.key);
@@ -416,12 +430,36 @@ export class OrderProgressStore {
           nextDelay = ERROR_BACKOFF_MS[
             Math.min(consecutiveErrors - 1, ERROR_BACKOFF_MS.length - 1)
           ];
+          errorReason = !r.ok ? (r.error ?? 'exchange error') : 'no order returned';
         }
-      } catch {
+      } catch (e) {
         consecutiveErrors += 1;
         nextDelay = ERROR_BACKOFF_MS[
           Math.min(consecutiveErrors - 1, ERROR_BACKOFF_MS.length - 1)
         ];
+        errorReason = e instanceof Error ? e.message : 'network error';
+      }
+      if (consecutiveErrors > 0) {
+        // Surface the backoff cycle to the UI so users see "Retrying in Ns"
+        // instead of a stale "Pending". Also emit a diagnostics entry on
+        // every escalation so recurring exchange issues are debuggable.
+        const cur2 = this.state[opts.key];
+        if (cur2 && !TERMINAL_PHASES.has(cur2.phase)) {
+          this.update(opts.key, {
+            retry: { consecutiveErrors, nextDelayMs: nextDelay },
+          });
+        }
+        // Log only on backoff escalations (delay just increased) to keep
+        // the diagnostics tab readable when the exchange is flapping.
+        if (nextDelay !== lastLoggedDelay) {
+          exchangeEvents.log('fetch-balance', opts.exchange,
+            `Order poll error #${consecutiveErrors} for ${opts.symbol} — retrying in ${Math.round(nextDelay / 1000)}s`,
+            {
+              level: consecutiveErrors >= ERROR_BACKOFF_MS.length ? 'error' : 'warn',
+              data: { key: opts.key, orderId: opts.orderId, nextDelayMs: nextDelay, reason: errorReason },
+            });
+          lastLoggedDelay = nextDelay;
+        }
       }
       this.pollers.set(opts.key, setTimeout(tick, nextDelay));
     };
@@ -442,7 +480,7 @@ export class OrderProgressStore {
     if (!cur) return false;
     if (cur.phase !== 'timeout' || !cur.resumable) return false;
     // Flip phase back to pending so the panel stops looking terminal.
-    this.update(key, { phase: 'pending', message: undefined, resumable: false });
+    this.update(key, { phase: 'pending', message: undefined, resumable: false, retry: undefined });
     this.poll(opts);
     return true;
   }

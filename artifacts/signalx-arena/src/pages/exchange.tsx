@@ -296,6 +296,20 @@ function OrderProgressPanel({
       {p.message && (
         <div className={`mt-1 ${isErr ? 'text-red-300' : 'text-zinc-400'}`}>{p.message}</div>
       )}
+      {!isDone && p.retry && p.retry.consecutiveErrors > 0 && (
+        <div
+          className="mt-1 flex items-center gap-1 text-amber-300"
+          data-testid={`order-progress-retry-${testIdSuffix}`}
+        >
+          <RefreshCw size={10} className="animate-spin" />
+          <span>
+            Retrying in {Math.round(p.retry.nextDelayMs / 1000)}s — exchange unreachable
+            {p.retry.consecutiveErrors > 1 && (
+              <span className="text-zinc-500"> (attempt {p.retry.consecutiveErrors})</span>
+            )}
+          </span>
+        </div>
+      )}
       {p.phase === 'timeout' && p.resumable && onResume && (
         <div className="mt-2">
           <button
