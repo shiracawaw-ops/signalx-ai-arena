@@ -26,6 +26,7 @@ import { tradeConfig, type TradeConfig } from '@/lib/trade-config';
 import { executionLog, type ExecutionEntry } from '@/lib/execution-log';
 import { apiClient, type ExchangeErrorCode } from '@/lib/api-client';
 import { setCredentials, executeSignal } from '@/lib/execution-engine';
+import { submitManualOrder }      from '@/lib/live-execution-bridge';
 import { credentialStore }          from '@/lib/credential-store';
 import { exchangeEvents, type ExchangeEvent } from '@/lib/exchange-events';
 
@@ -1796,54 +1797,24 @@ export default function ExchangePage() {
                   setManualSubmitting(true);
                   setManualResult(null);
                   try {
-                    // Resolve a reference price. The engine sizes the
-                    // order from amountUSD / price, so a wrong price in
-                    // live modes silently produces a wrong-sized live
-                    // order. We therefore REFUSE to fall back to a
-                    // placeholder in real/testnet — the user must either
-                    // type a valid override or the exchange must return
-                    // a real price. Demo/paper get a $1 fallback so the
-                    // form remains usable when the API server is down.
-                    let price = Number(manualPriceOverride) || 0;
-                    if (price <= 0) {
-                      try {
-                        const pr = await apiClient.getPrice(selectedEx.id, manualSymbol);
-                        if (pr.ok) {
-                          price = Number((pr.data as { price?: number }).price) || 0;
-                        }
-                      } catch { /* fall through */ }
-                    }
-                    const isLiveMode = mode === 'real' || mode === 'testnet';
-                    if (price <= 0) {
-                      if (isLiveMode) {
-                        const m = `Cannot resolve a live price for ${manualSymbol} on ${selectedEx.name}. Enter a reference price or retry once the exchange responds — refusing to size a live order from a placeholder.`;
-                        setManualResult({ ok: false, message: m });
-                        toast({ title: 'Order blocked', description: m, variant: 'destructive' });
-                        setManualSubmitting(false);
-                        return;
-                      }
-                      price = 1; // demo / paper fallback only
-                    }
-
-                    const res = await executeSignal({
-                      id:     `manual_${manualSide}_${manualSymbol}_${Date.now()}`,
-                      symbol: manualSymbol,
-                      side:   manualSide,
-                      price,
-                      ts:     Date.now(),
-                      source: 'manual',
+                    // Delegate price resolution + engine submission to the
+                    // shared bridge so the bot tick, AutoPilot and Manual
+                    // Order paths all run through the same code path. The
+                    // bridge refuses to size a live order from a placeholder
+                    // price and returns a uniform { ok, message } result.
+                    const out = await submitManualOrder({
+                      exchangeId:    selectedEx.id,
+                      exchangeName:  selectedEx.name,
+                      symbol:        manualSymbol,
+                      side:          manualSide,
+                      priceOverride: manualPriceOverride,
+                      mode,
                     });
-
-                    if (res.ok) {
-                      const m = res.demo
-                        ? `Simulated ${manualSide.toUpperCase()} ${manualSymbol} logged.`
-                        : `Live ${manualSide.toUpperCase()} ${manualSymbol} placed — orderId ${res.orderId ?? '—'}`;
-                      setManualResult({ ok: true, message: m });
-                      toast({ title: 'Order accepted', description: m });
+                    setManualResult({ ok: out.ok, message: out.message });
+                    if (out.ok) {
+                      toast({ title: 'Order accepted', description: out.message });
                     } else {
-                      const m = `${res.rejectReason ?? 'Rejected'}${res.detail ? ' — ' + res.detail : ''}`;
-                      setManualResult({ ok: false, message: m });
-                      toast({ title: 'Order blocked', description: m, variant: 'destructive' });
+                      toast({ title: 'Order blocked', description: out.message, variant: 'destructive' });
                     }
                   } catch (e) {
                     const m = (e as Error).message ?? 'Unexpected error';

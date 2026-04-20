@@ -9,10 +9,8 @@ import {
 import { getBotTotalValue } from '@/lib/engine';
 import { calcFeeAdjusted, PLATFORM_FEE_RATE } from '@/lib/platform';
 import { ShieldAlert } from 'lucide-react';
-import { executeSignal } from '@/lib/execution-engine';
 import { exchangeMode, type ExchangeModeState } from '@/lib/exchange-mode';
-import { executionLog, REJECT } from '@/lib/execution-log';
-import { tradeConfig } from '@/lib/trade-config';
+import { dispatchAutoPilotLiveSignal, type AutoPilotDispatchKey } from '@/lib/live-execution-bridge';
 import { ASSET_MAP } from '@/lib/storage';
 import { EXCHANGE_MAP } from '@/lib/exchange';
 
@@ -260,7 +258,7 @@ export default function AutoPilotPage() {
   // retries — otherwise readiness coming online later would never fire.
   // The latch is also explicitly cleared on any false→true transition of
   // exchangeMode.isExecutionReady().
-  const lastDispatchRef  = useRef<{ botId: string; action: string } | null>(null);
+  const lastDispatchRef  = useRef<AutoPilotDispatchKey | null>(null);
   const lastReadyRef     = useRef<boolean>(exchangeMode.isExecutionReady());
   // eslint-disable-next-line react-hooks/refs
   botsRef.current        = bots;
@@ -310,83 +308,39 @@ export default function AutoPilotPage() {
 
     // ── Live execution bridge ─────────────────────────────────────────────
     // In REAL / TESTNET mode, forward the master decision to the unified
-    // Execution Engine so an actual order is sent to the exchange. Demo /
-    // Paper modes never enter this branch — those continue to be handled
-    // by the bot tick simulator. Stocks/metals/forex are skipped because
-    // crypto exchanges have no matching tradable pair. We only dispatch
-    // when (botId, action) transitions to avoid hammering the engine on
-    // every 5-second decision cycle while a signal stays the same.
-    // Clear the dispatch latch whenever execution readiness flips from
-    // false to true so a previously blocked signal gets a fresh attempt.
+    // Execution Engine via the shared `dispatchAutoPilotLiveSignal` helper.
+    // Demo / Paper modes never enter the live branch — those continue to be
+    // handled by the bot tick simulator. The helper enforces the dedupe
+    // latch (one dispatch per BUY/SELL transition) and the crypto/live
+    // gating; here we only handle the readiness-flip latch reset and the
+    // UI log row for the result.
     const readyNow = exchangeMode.isExecutionReady();
     if (readyNow && !lastReadyRef.current) {
       lastDispatchRef.current = null;
     }
     lastReadyRef.current = readyNow;
 
-    if (d.selectedBot && (d.masterAction === 'BUY' || d.masterAction === 'SELL')) {
-      const sym  = d.selectedBot.bot.symbol;
-      const mode = exchangeMode.get().mode;
-      const isLive   = mode === 'real' || mode === 'testnet';
-      const isCrypto = ASSET_MAP[sym]?.category === 'Crypto';
-
-      const sig = { botId: d.selectedBot.bot.id, action: d.masterAction };
-      const last = lastDispatchRef.current;
-      const transitioned = !last || last.botId !== sig.botId || last.action !== sig.action;
-
-      if (isLive && !isCrypto && transitioned) {
-        // Non-crypto symbol on a crypto-only exchange: explicitly reject so
-        // the user sees why their AAPL/GOLD/EURUSD signal didn't become a
-        // real order, instead of AutoPilot silently doing nothing.
-        const exchange = exchangeMode.get().exchange;
-        const cfg      = tradeConfig.get(exchange);
-        const category = ASSET_MAP[sym]?.category ?? 'Unknown';
-        const price    = gcRef.current(sym);
-        executionLog.add({
-          mode,
-          exchange,
-          symbol:    sym,
-          side:      sig.action === 'BUY' ? 'buy' : 'sell',
-          orderType: cfg.orderType,
-          quantity:  cfg.tradeAmountUSD / (price || 1),
-          price,
-          amountUSD: cfg.tradeAmountUSD,
-          status:    'rejected',
-          rejectReason: REJECT.UNSUPPORTED_ASSET,
-          errorMsg:  `${category} symbol ${sym} cannot be traded on ${exchange} (crypto-only exchange).`,
-          signalId:  `autopilot_${sig.botId}_${sig.action}`,
-        });
-        const msg = `AutoPilot ${sig.action} ${sym} blocked — ${category} not tradable on ${exchange}.`;
-        setLog(prev => [makeLogEntry('select', msg, 'warn'), ...prev].slice(0, MAX_LOG));
-        // Latch so we don't repeat this rejection on every 5-second cycle
-        // for the same (bot, action) pair.
-        lastDispatchRef.current = sig;
-      } else if (isLive && isCrypto && transitioned) {
-        const price = gcRef.current(sym);
-        void executeSignal({
-          id:     `autopilot_${sig.botId}_${sig.action}_${Date.now()}`,
-          symbol: sym,
-          side:   sig.action === 'BUY' ? 'buy' : 'sell',
-          price,
-          ts:     Date.now(),
-          source: 'autopilot',
-        }).then(res => {
-          // Only latch on success. Rejections leave the latch clear so
-          // the next decision tick will retry once readiness comes
-          // online (e.g., user finishes arming, balance fetch finishes).
-          if (res.ok) lastDispatchRef.current = sig;
-          const msg = res.ok
-            ? `AutoPilot ${sig.action} ${sym} → live order ${res.orderId ?? ''}`
-            : `AutoPilot ${sig.action} ${sym} blocked — ${res.rejectReason ?? 'unknown'}${res.detail ? ': ' + res.detail : ''}`;
-          setLog(prev => [makeLogEntry('select', msg, res.ok ? 'success' : 'warn'), ...prev].slice(0, MAX_LOG));
-        }).catch((err: unknown) => {
-          console.error('[autopilot→engine] dispatch error:', err);
-        });
-      }
-    } else {
-      // Reset the dedupe latch on HOLD so the next BUY/SELL transition fires.
-      lastDispatchRef.current = null;
-    }
+    void dispatchAutoPilotLiveSignal({
+      decision:        d,
+      lastDispatch:    lastDispatchRef.current,
+      getCurrentPrice: gcRef.current,
+    }).then(out => {
+      if (out.reset) lastDispatchRef.current = null;
+      // Adopt the helper's new latch in all cases (including the
+      // unsupported-asset rejection, which latches without dispatching
+      // so we don't spam the Execution Log every 5s cycle).
+      if (out.newLast) lastDispatchRef.current = out.newLast;
+      if (!out.dispatched) return;
+      const res = out.result!;
+      const action = out.signal!.side === 'buy' ? 'BUY' : 'SELL';
+      const sym    = out.signal!.symbol;
+      const msg = res.ok
+        ? `AutoPilot ${action} ${sym} → live order ${res.orderId ?? ''}`
+        : `AutoPilot ${action} ${sym} blocked — ${res.rejectReason ?? 'unknown'}${res.detail ? ': ' + res.detail : ''}`;
+      setLog(prev => [makeLogEntry('select', msg, res.ok ? 'success' : 'warn'), ...prev].slice(0, MAX_LOG));
+    }).catch((err: unknown) => {
+      console.error('[autopilot→engine] dispatch error:', err);
+    });
   }, []);
 
   // Run immediately + every 5s — stable interval, fresh data via refs

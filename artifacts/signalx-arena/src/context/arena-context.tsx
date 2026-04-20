@@ -1,88 +1,27 @@
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
-import { Bot, Trade, loadBots, saveBots, loadTrades, saveTrades, BOT_COLORS, ASSET_MAP } from '@/lib/storage';
+import { Bot, Trade, loadBots, saveBots, loadTrades, saveTrades, BOT_COLORS } from '@/lib/storage';
 import { perfMonitor } from '@/lib/perf-monitor';
 import { MarketData, initMarket, tickMarket, executeBotTick } from '@/lib/engine';
 import { generateBots, makeFreshStandbyBot } from '@/lib/seed';
-import { executeSignal } from '@/lib/execution-engine';
 import { exchangeMode } from '@/lib/exchange-mode';
-import { executionLog, REJECT } from '@/lib/execution-log';
-import { tradeConfig } from '@/lib/trade-config';
+import { bridgeBotTradeToExchange } from '@/lib/live-execution-bridge';
 
 // ── Real-trade bridge ─────────────────────────────────────────────────────────
-// When a bot produces a synthetic Trade in REAL or TESTNET mode, mirror it to
-// the unified Execution Engine so an actual order is sent to the exchange.
-// All safety guards (mode/armed/validated/balance/perms/creds, stale-price,
-// risk, min-notional, precision) live in executeSignal — we just bridge.
-//
-// Only crypto bot symbols are actually submitted to the live exchange;
-// stocks/metals/forex are explicitly rejected (one entry per
-// mode+exchange+symbol+side combo) so the user can see in the Execution
-// Log why their AAPL/GOLD/EURUSD bot didn't place a real order, instead
-// of AutoPilot looking like it silently behaves like demo. Category
-// lookup is driven from the canonical ASSET_MAP so it stays in sync as
-// new assets are added.
-function isLiveTradingMode(mode: string): boolean {
-  return mode === 'real' || mode === 'testnet';
-}
-
-function isCryptoSymbol(symbol: string): boolean {
-  return ASSET_MAP[symbol]?.category === 'Crypto';
-}
-
-// Tracks which (mode, exchange, symbol, side) combos we've already
-// explained-and-rejected, so we log one clear "asset class not supported"
-// entry per combo instead of spamming the Execution Log on every bot
-// tick. Switching exchange or mode (e.g. real → testnet, or binance →
-// coinbase) yields fresh entries because operational context changed.
-const warnedUnsupportedCombos = new Set<string>();
-
-function bridgeBotTradeToExchange(trade: Trade): void {
-  const modeState = exchangeMode.get();
-  const mode = modeState.mode;
-  if (!isLiveTradingMode(mode)) return;
-  if (!isCryptoSymbol(trade.symbol)) {
-    // Surface an explicit rejected entry so the user understands why an
-    // on-screen "BUY AAPL" or "SELL EURUSD" did not become a real order.
-    const exchange = modeState.exchange;
-    const side = trade.type === 'BUY' ? 'buy' : 'sell';
-    const dedupeKey = `${mode}|${exchange}|${trade.symbol}|${side}`;
-    if (!warnedUnsupportedCombos.has(dedupeKey)) {
-      warnedUnsupportedCombos.add(dedupeKey);
-      const cfg = tradeConfig.get(exchange);
-      const category = ASSET_MAP[trade.symbol]?.category ?? 'Unknown';
-      executionLog.add({
-        mode,
-        exchange,
-        symbol:    trade.symbol,
-        side,
-        orderType: cfg.orderType,
-        quantity:  cfg.tradeAmountUSD / (trade.price || 1),
-        price:     trade.price,
-        amountUSD: cfg.tradeAmountUSD,
-        status:    'rejected',
-        rejectReason: REJECT.UNSUPPORTED_ASSET,
-        errorMsg: `${category} symbol ${trade.symbol} cannot be traded on ${exchange} (crypto-only exchange). Bot signal ignored in ${mode} mode.`,
-        signalId: `bot_${trade.id}`,
-      });
-      console.warn(
-        `[arena→engine][${mode}] ${trade.type} ${trade.symbol} skipped — ${category} not supported on ${exchange}.`,
-      );
-    }
-    return;
-  }
-
-  // Fire-and-forget — we never block the tick loop on a network round-trip.
-  // executeSignal logs rejections via REJECT.* codes into executionLog and
-  // returns a structured result that is observable in the Execution Log tab.
-  void executeSignal({
-    id:     `bot_${trade.id}`,
-    symbol: trade.symbol,
-    side:   trade.type === 'BUY' ? 'buy' : 'sell',
-    price:  trade.price,
-    ts:     trade.timestamp,
-    source: 'bot-engine',
-  }).then(res => {
+// When a bot produces a synthetic Trade in REAL or TESTNET mode we forward it
+// to the unified Execution Engine via `bridgeBotTradeToExchange` (see
+// live-execution-bridge.ts for the routing rules, including the explicit
+// "asset class not supported" rejection for non-crypto symbols on a
+// crypto-only exchange — surfaced via the Execution Log so the user
+// understands why an on-screen "BUY AAPL" or "SELL EURUSD" didn't become a
+// real order, rather than AutoPilot silently behaving like demo).
+// We keep the dispatch fire-and-forget here so the tick loop never blocks on
+// a network round-trip, and we log rejections/successes for the Execution Log.
+function dispatchBotTradeFireAndForget(trade: Trade): void {
+  const promise = bridgeBotTradeToExchange(trade);
+  if (!promise) return;
+  const mode = exchangeMode.get().mode;
+  promise.then(res => {
     if (!res.ok) {
       console.warn(
         `[arena→engine][${mode}] ${trade.type} ${trade.symbol} blocked: `
@@ -376,7 +315,7 @@ export function ArenaProvider({ children }: { children: React.ReactNode }) {
         // Mirror to the live Execution Engine in REAL / TESTNET mode.
         // No-op for DEMO and PAPER. Fire-and-forget; safety gates live
         // inside executeSignal.
-        bridgeBotTradeToExchange(trade);
+        dispatchBotTradeFireAndForget(trade);
       }
       return updatedBot;
     });
