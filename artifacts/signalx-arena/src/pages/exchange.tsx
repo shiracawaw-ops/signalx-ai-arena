@@ -12,6 +12,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
+} from '@/components/ui/dialog';
 import { useToast } from '@/hooks/use-toast';
 import {
   ArrowLeftRight, CheckCircle2, XCircle, RefreshCw, Shield,
@@ -212,6 +215,16 @@ export default function ExchangePage() {
   // user can't double-click and so spinners only show on the row being acted on.
   const [cancellingOrders, setCancellingOrders] = useState<Set<string>>(new Set());
   const [closingPositions, setClosingPositions] = useState<Set<string>>(new Set());
+
+  // ── Cancel-all-open-orders state ───────────────────────────────────────────
+  // `cancelAllOpen` toggles the Real-mode "type CANCEL ALL" confirmation dialog.
+  // `cancelAllConfirmText` is the controlled value of that input — only an
+  // exact match unlocks the destructive action.
+  // `cancellingAll` is the in-flight flag so the bulk button can show a
+  // spinner and double-click guards work even while parallel cancels race.
+  const [cancelAllOpen, setCancelAllOpen] = useState(false);
+  const [cancelAllConfirmText, setCancelAllConfirmText] = useState('');
+  const [cancellingAll, setCancellingAll] = useState(false);
 
   const { toast } = useToast();
   const adapter = getExchangeAdapter(selectedEx.id);
@@ -468,6 +481,95 @@ export default function ExchangePage() {
       // Refresh so the cancelled order drops/updates in the live table.
       refreshLiveData();
     }
+  }, [mode, apiKey, secretKey, passphrase, selectedEx.id, selectedEx.name, toast, refreshLiveData]);
+
+  // ── Cancel ALL open orders ────────────────────────────────────────────
+  // Bulk-cancel every cancellable live order in parallel. Each cancel goes
+  // through the same apiClient.cancelOrder path as the per-row action and
+  // gets its own Execution Log entry so successes/failures are individually
+  // auditable. A single summary toast reports N succeeded / M failed.
+  // Real-mode confirmation is enforced by the dialog (typed "CANCEL ALL")
+  // that calls this handler — the function itself does not re-prompt.
+  const cancelAllOpenOrders = useCallback(async (
+    targets: Array<{ orderId: string; symbol: string; side: 'buy' | 'sell' }>,
+  ) => {
+    if (targets.length === 0) return;
+    if (mode !== 'real' && mode !== 'testnet') {
+      toast({ title: 'Cancel unavailable', description: 'Switch to Real or Testnet mode to cancel live orders.', variant: 'destructive' });
+      return;
+    }
+    if (!apiKey || !secretKey) {
+      toast({ title: 'Not connected', description: 'Connect with API credentials before cancelling orders.', variant: 'destructive' });
+      return;
+    }
+
+    setCancellingAll(true);
+    setCancellingOrders(prev => {
+      const n = new Set(prev);
+      for (const t of targets) n.add(t.orderId);
+      return n;
+    });
+
+    const creds = { apiKey, secretKey, ...(passphrase ? { passphrase } : {}) };
+    exchangeEvents.log('connect', selectedEx.id, `Bulk cancel: ${targets.length} order(s)`);
+
+    const results = await Promise.all(targets.map(async ({ orderId, symbol, side }) => {
+      const pending = executionLog.add({
+        mode,
+        exchange:  selectedEx.id,
+        symbol:    symbol || '—',
+        side,
+        orderType: 'market',
+        quantity:  0,
+        price:     0,
+        amountUSD: 0,
+        status:    'executing',
+        orderId,
+        signalId:  `cancel_all_${orderId}`,
+      });
+      try {
+        const res = await apiClient.cancelOrder(selectedEx.id, creds, orderId, symbol || undefined);
+        if (res.ok) {
+          executionLog.update(pending.id, { status: 'executed', exchangeResponse: res.data });
+          exchangeEvents.log('connect', selectedEx.id, `Order ${orderId} cancelled (bulk)`);
+          return { orderId, ok: true as const };
+        }
+        const errMsg = res.error ?? 'Cancel failed';
+        executionLog.update(pending.id, { status: 'failed', errorMsg: errMsg, exchangeResponse: res });
+        exchangeEvents.log('connect', selectedEx.id, `Bulk cancel failed for ${orderId}: ${errMsg}`, { level: 'error', data: { code: res.code } });
+        return { orderId, ok: false as const, error: errMsg };
+      } catch (e) {
+        const msg = (e as Error).message ?? 'Unexpected error';
+        executionLog.update(pending.id, { status: 'failed', errorMsg: msg });
+        exchangeEvents.log('connect', selectedEx.id, `Bulk cancel error for ${orderId}: ${msg}`, { level: 'error' });
+        return { orderId, ok: false as const, error: msg };
+      }
+    }));
+
+    const succeeded = results.filter(r => r.ok).length;
+    const failed    = results.length - succeeded;
+
+    setCancellingOrders(prev => {
+      const n = new Set(prev);
+      for (const t of targets) n.delete(t.orderId);
+      return n;
+    });
+    setCancellingAll(false);
+
+    if (failed === 0) {
+      toast({
+        title: 'All open orders cancelled',
+        description: `${succeeded} succeeded / 0 failed on ${selectedEx.name}.`,
+      });
+    } else {
+      toast({
+        title: succeeded > 0 ? 'Cancel All partially completed' : 'Cancel All failed',
+        description: `${succeeded} succeeded / ${failed} failed on ${selectedEx.name}. See Execution Log for details.`,
+        variant: succeeded > 0 ? 'default' : 'destructive',
+      });
+    }
+
+    refreshLiveData();
   }, [mode, apiKey, secretKey, passphrase, selectedEx.id, selectedEx.name, toast, refreshLiveData]);
 
   // ── Close a non-zero asset position ────────────────────────────────────
@@ -1312,14 +1414,67 @@ export default function ExchangePage() {
 
       {/* ── Orders ── */}
       {tab === 'orders' && (<ErrorBoundary label="exchange:tab:orders">
+        {(() => {
+          // Pre-compute the cancellable order set ONCE so the header button
+          // and the confirmation dialog stay in sync with what the table is
+          // about to act on.
+          const cancellableTargets: Array<{ orderId: string; symbol: string; side: 'buy' | 'sell' }> = isLive
+            ? (liveOrders as Array<Record<string, unknown>>)
+                .map(o => {
+                  const orderId = String(o['orderId'] ?? '');
+                  const symbol  = String(o['symbol'] ?? '');
+                  const sideStr = String(o['side'] ?? '').toLowerCase();
+                  const status  = String(o['status'] ?? 'open').toLowerCase();
+                  const ok = !!orderId && (
+                    status === 'open' || status === 'new' || status === 'partially_filled' ||
+                    status === 'partial' || status === 'pending' || status === 'accepted'
+                  );
+                  return ok
+                    ? { orderId, symbol, side: (sideStr === 'sell' ? 'sell' : 'buy') as 'buy' | 'sell' }
+                    : null;
+                })
+                .filter((x): x is { orderId: string; symbol: string; side: 'buy' | 'sell' } => x !== null)
+            : [];
+          const cancellableCount = cancellableTargets.length;
+          const showCancelAll = isLive && cancellableCount > 0;
+
+          const handleCancelAllClick = () => {
+            if (mode === 'real') {
+              setCancelAllConfirmText('');
+              setCancelAllOpen(true);
+            } else {
+              cancelAllOpenOrders(cancellableTargets);
+            }
+          };
+
+          return (
+        <>
         <Card className="border-zinc-800/60">
-          <CardHeader className="py-3 px-4 flex items-center justify-between">
+          <CardHeader className="py-3 px-4 flex items-center justify-between gap-2">
             <CardTitle className="text-sm">
               {isLive ? 'Live Orders' : 'Recent Orders'} — {selectedEx.name}
             </CardTitle>
-            <Button variant="outline" size="sm" onClick={() => isLive ? refreshLiveData() : loadData()} disabled={refreshing} className="flex items-center gap-1.5 text-xs h-7">
-              <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} /> Refresh
-            </Button>
+            <div className="flex items-center gap-2">
+              {showCancelAll && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleCancelAllClick}
+                  disabled={cancellingAll || refreshing}
+                  className="flex items-center gap-1.5 text-xs h-7 border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300"
+                  data-testid="button-cancel-all-orders"
+                  title={`Cancel all ${cancellableCount} open order(s) on ${selectedEx.name}`}
+                >
+                  {cancellingAll
+                    ? <RefreshCw size={11} className="animate-spin" />
+                    : <X size={11} />}
+                  {cancellingAll ? 'Cancelling…' : `Cancel All (${cancellableCount})`}
+                </Button>
+              )}
+              <Button variant="outline" size="sm" onClick={() => isLive ? refreshLiveData() : loadData()} disabled={refreshing} className="flex items-center gap-1.5 text-xs h-7">
+                <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} /> Refresh
+              </Button>
+            </div>
           </CardHeader>
           <CardContent className="p-0">
             {isLive && ordError && (
@@ -1427,6 +1582,55 @@ export default function ExchangePage() {
             )}
           </CardContent>
         </Card>
+
+        {/* Real-mode strong confirmation: must type CANCEL ALL exactly. */}
+        <Dialog open={cancelAllOpen} onOpenChange={(o) => { setCancelAllOpen(o); if (!o) setCancelAllConfirmText(''); }}>
+          <DialogContent className="border-red-500/40">
+            <DialogHeader>
+              <DialogTitle className="text-red-400 flex items-center gap-2">
+                <AlertTriangle size={16} /> Cancel ALL open orders on {selectedEx.name}?
+              </DialogTitle>
+              <DialogDescription className="text-zinc-300">
+                This will send cancel requests for <span className="font-semibold text-zinc-100">{cancellableCount}</span> live order(s) in parallel.
+                Filled positions are NOT closed. This action cannot be undone.
+                <br /><br />
+                Type <span className="font-mono font-bold text-red-400">CANCEL ALL</span> below to confirm.
+              </DialogDescription>
+            </DialogHeader>
+            <Input
+              autoFocus
+              value={cancelAllConfirmText}
+              onChange={(e) => setCancelAllConfirmText(e.target.value)}
+              placeholder="CANCEL ALL"
+              className="font-mono"
+              data-testid="input-cancel-all-confirm"
+            />
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => { setCancelAllOpen(false); setCancelAllConfirmText(''); }}
+                data-testid="button-cancel-all-dismiss"
+              >
+                Keep orders
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={cancelAllConfirmText !== 'CANCEL ALL' || cancellingAll}
+                onClick={() => {
+                  setCancelAllOpen(false);
+                  setCancelAllConfirmText('');
+                  cancelAllOpenOrders(cancellableTargets);
+                }}
+                data-testid="button-cancel-all-confirm"
+              >
+                {cancellingAll ? 'Cancelling…' : `Cancel ${cancellableCount} order(s)`}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+        </>
+          );
+        })()}
       </ErrorBoundary>)}
 
       {/* ── Permissions ── */}
