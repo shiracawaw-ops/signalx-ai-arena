@@ -426,7 +426,7 @@ export default function ExchangePage() {
   // mount (common after a full reload — secrets live in-memory only) starts
   // polling as soon as the user re-enters their keys.
   useEffect(() => {
-    const tryResume = () => orderProgress.resume(ex => credentialStore.get(ex));
+    const tryResume = () => orderProgress.resumeAll(ex => credentialStore.get(ex));
     tryResume();
     return credentialStore.subscribe(tryResume);
   }, []);

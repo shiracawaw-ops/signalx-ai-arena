@@ -22,6 +22,7 @@
 // browsers, some test environments) the store degrades to per-tab behaviour.
 
 import { apiClient } from './api-client.js';
+import { credentialStore } from './credential-store.js';
 import type { ExchangeCredentials } from './exchange-mode.js';
 import { exchangeEvents } from './exchange-events.js';
 
@@ -97,6 +98,47 @@ const LEADER_STALE_MS = 5_000;
 // Only non-terminal rows (no filled/canceled/rejected/timeout/error) are
 // stored — terminal/dismissed rows must NOT reappear after reload.
 const STORAGE_KEY = 'sx_order_progress_v1';
+
+// localStorage key holding the minimum metadata needed for a *passive*
+// observer tab (one that never called `poll()` itself) to resume polling
+// after the leader tab is closed. Only orderId / exchange / symbol are
+// persisted — credentials stay in `credentialStore` (in-memory only).
+const RESUME_STORAGE_KEY = 'signalx-order-resume-v1';
+
+interface ResumeEntry {
+  orderId:  string;
+  exchange: string;
+  symbol:   string;
+}
+
+function loadResume(): Record<string, ResumeEntry> {
+  if (typeof localStorage === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(RESUME_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, ResumeEntry>;
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch { return {}; }
+}
+
+function saveResume(map: Record<string, ResumeEntry>): void {
+  if (typeof localStorage === 'undefined') return;
+  try { localStorage.setItem(RESUME_STORAGE_KEY, JSON.stringify(map)); }
+  catch { /* storage full / denied */ }
+}
+
+function setResumeEntry(key: string, entry: ResumeEntry): void {
+  const m = loadResume();
+  m[key] = entry;
+  saveResume(m);
+}
+
+function deleteResumeEntry(key: string): void {
+  const m = loadResume();
+  if (!(key in m)) return;
+  delete m[key];
+  saveResume(m);
+}
 
 type PollOpts = {
   key:         string;
@@ -177,6 +219,18 @@ export class OrderProgressStore {
       // Ask any existing tabs for their current state so a freshly-opened
       // tab immediately reflects in-flight orders started elsewhere.
       this.send({ type: 'snapshot-request', from: this.tabId });
+      // When credentials are added (or restored) for an exchange, see if
+      // any persisted resume entry is now actionable in this tab.
+      credentialStore.subscribe(exchange => {
+        if (exchange) this.sweepResume(exchange);
+      });
+      // Periodic sweep so a leader that crashed without firing
+      // `beforeunload` (or a tab opened *after* the leader closed) is
+      // eventually picked up by any surviving tab that has credentials.
+      setInterval(() => this.sweepResume(), LEADER_STALE_MS);
+      // Initial sweep after we've had a chance to receive snapshots /
+      // heartbeats from existing tabs.
+      setTimeout(() => this.sweepResume(), LEADER_STALE_MS + 500);
       // Best-effort cleanup so other tabs can take over polling and so
       // stale leadership records don't survive a tab close.
       window.addEventListener('beforeunload', () => {
@@ -236,6 +290,9 @@ export class OrderProgressStore {
       const next = { ...this.state };
       delete next[key];
       this.state = next;
+      // Row dismissed — drop the persisted resume metadata so a future tab
+      // doesn't try to resurrect a row the user explicitly cleared.
+      deleteResumeEntry(key);
     } else {
       this.state = { ...this.state, [key]: value };
     }
@@ -246,6 +303,9 @@ export class OrderProgressStore {
     // terminal phase — even if the remote leader was the one that observed
     // it. Each opts entry is consumed exactly once.
     if (value && TERMINAL_PHASES.has(value.phase)) {
+      // Order reached a terminal phase — no further polling will be needed
+      // by any tab, so clear the persisted resume metadata.
+      deleteResumeEntry(key);
       const opts = this.localPollOpts.get(key);
       if (opts) {
         this.localPollOpts.delete(key);
@@ -261,7 +321,7 @@ export class OrderProgressStore {
   // are no longer in the in-memory store are left as-is — they'll show
   // their last known phase but won't poll. Cross-tab leadership is honoured
   // via `poll()` so a tab that already polls a given key keeps doing so.
-  resume(getCreds: (exchange: string) => ExchangeCredentials | null): void {
+  resumeAll(getCreds: (exchange: string) => ExchangeCredentials | null): void {
     for (const p of Object.values(this.state)) {
       if (TERMINAL_PHASES.has(p.phase)) continue;
       if (!p.orderId) continue;
@@ -321,6 +381,15 @@ export class OrderProgressStore {
   poll(opts: PollOpts): void {
     this.localPollOpts.set(opts.key, opts);
     this.pollOpts.set(opts.key, opts);
+    // Persist the minimum metadata other tabs need to resume polling if
+    // this tab closes. Credentials are *not* written — they stay in the
+    // in-memory `credentialStore`. A peer can only resume if it already
+    // holds creds for `opts.exchange`.
+    setResumeEntry(opts.key, {
+      orderId:  opts.orderId,
+      exchange: opts.exchange,
+      symbol:   opts.symbol,
+    });
     this.cancelPoller(opts.key);
 
     const remote = this.leaders.get(opts.key);
@@ -500,6 +569,7 @@ export class OrderProgressStore {
     this.cancelPoller(key);
     this.pollOpts.delete(key);
     this.localPollOpts.delete(key);
+    deleteResumeEntry(key);
     const wasLeader = this.leaders.get(key)?.tabId === this.tabId;
     this.leaders.delete(key);
     if (!this.state[key]) {
@@ -557,6 +627,10 @@ export class OrderProgressStore {
           }
         }
         if (changed) this.emit();
+        // Now that we have visibility into in-flight orders the peer is
+        // tracking, see if any persisted resume entries are actionable in
+        // *this* tab (e.g. the peer is an observer with no creds).
+        this.sweepResume();
         break;
       }
 
@@ -592,15 +666,64 @@ export class OrderProgressStore {
       case 'poll-release': {
         const cur = this.leaders.get(msg.key);
         if (cur?.tabId === msg.from) this.leaders.delete(msg.key);
-        // If we have local opts and the order is still in-flight, take
-        // over polling so a closing tab doesn't strand the order.
-        const opts = this.localPollOpts.get(msg.key);
-        const st   = this.state[msg.key];
-        if (opts && st && !TERMINAL_PHASES.has(st.phase)) {
-          this.poll(opts);
-        }
+        // Take over polling so a closing tab doesn't strand the order.
+        // `tryResume` first uses local opts (active participant tab) and
+        // otherwise falls back to the persisted resume entry + cached
+        // creds, which is what lets a passive observer tab take over.
+        this.tryResume(msg.key);
         break;
       }
+    }
+  }
+
+  // Attempt to take over polling for `key` in this tab. Returns true if
+  // we started (or already have) an active poller. Bails out if:
+  //   • we're already polling the key,
+  //   • the order has reached a terminal phase or we have no state for it,
+  //   • a fresh remote leader is still polling it,
+  //   • we have neither local opts nor cached credentials for the exchange.
+  private tryResume(key: string): boolean {
+    if (this.pollers.has(key)) return true;
+    const st = this.state[key];
+    if (!st || TERMINAL_PHASES.has(st.phase)) return false;
+    const lead = this.leaders.get(key);
+    if (lead && lead.tabId !== this.tabId &&
+        Date.now() - lead.lastSeen < LEADER_STALE_MS) {
+      return false;
+    }
+    // Active participant tab — has the original opts (incl. onTerminal).
+    const local = this.localPollOpts.get(key);
+    if (local) { this.poll(local); return true; }
+    // Passive observer fallback — rebuild opts from persisted metadata
+    // and credentials cached locally for the same exchange.
+    const entry = loadResume()[key];
+    if (!entry) return false;
+    const creds = credentialStore.get(entry.exchange);
+    if (!creds) return false;
+    this.poll({
+      key,
+      orderId:  entry.orderId,
+      exchange: entry.exchange,
+      symbol:   entry.symbol,
+      creds,
+    });
+    return true;
+  }
+
+  // Walk every persisted resume entry and try to take over the ones we
+  // can. `filterExchange` narrows the sweep to entries for one exchange,
+  // used when credentials for that exchange were just added/restored.
+  private sweepResume(filterExchange?: string): void {
+    const entries = loadResume();
+    for (const [key, entry] of Object.entries(entries)) {
+      if (filterExchange && entry.exchange !== filterExchange) continue;
+      const st = this.state[key];
+      // Drop stale entries for orders we already know are terminal.
+      if (st && TERMINAL_PHASES.has(st.phase)) {
+        deleteResumeEntry(key);
+        continue;
+      }
+      this.tryResume(key);
     }
   }
 

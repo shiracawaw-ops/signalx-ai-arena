@@ -111,7 +111,7 @@ describe('orderProgress.poll', () => {
       ok: true,
       data: { order: { orderId: 'Z', status: 'filled', filledQty: 1, quantity: 1, avgPrice: 100 } },
     } as never);
-    orderProgress.resume(() => CREDS);
+    orderProgress.resumeAll(() => CREDS);
 
     await vi.advanceTimersByTimeAsync(1500);
     await vi.advanceTimersByTimeAsync(0);
@@ -137,14 +137,14 @@ describe('orderProgress.poll', () => {
       ok: true,
       data: { order: { orderId: 'Q', status: 'filled', filledQty: 1, quantity: 1, avgPrice: 200 } },
     } as never);
-    orderProgress.resume(() => null);
+    orderProgress.resumeAll(() => null);
     await vi.advanceTimersByTimeAsync(1500);
     await vi.advanceTimersByTimeAsync(0);
     expect(mockGetStatus).not.toHaveBeenCalled();
     expect(orderProgress.get('autopilot:Q')?.phase).toBe('pending');
 
     // Second resume after creds become available — polling starts.
-    orderProgress.resume(() => CREDS);
+    orderProgress.resumeAll(() => CREDS);
     await vi.advanceTimersByTimeAsync(1500);
     await vi.advanceTimersByTimeAsync(0);
     expect(mockGetStatus).toHaveBeenCalledWith('binance', CREDS, 'Q', 'BTC');
