@@ -36,7 +36,7 @@ import { apiClient, type ExchangeErrorCode } from '@/lib/api-client';
 import { setCredentials, executeSignal } from '@/lib/execution-engine';
 import { submitManualOrder }      from '@/lib/live-execution-bridge';
 import { credentialStore }          from '@/lib/credential-store';
-import { exchangeEvents, type ExchangeEvent } from '@/lib/exchange-events';
+import { exchangeEvents, type ExchangeEvent, type ExchangeStage } from '@/lib/exchange-events';
 import { orderProgress, TERMINAL_PHASES, type OrderProgress, type ProgressPhase } from '@/lib/order-progress';
 
 // Map a backend error code (or fetch failure) to a connection-machine state.
@@ -355,6 +355,7 @@ export default function ExchangePage() {
   const [showSecret,  setShowSecret]  = useState(false);
   const [isConnected, setIsConnected] = useState(() => credentialStore.has(initialEx.id));
   const [diagEvents,  setDiagEvents]  = useState<ExchangeEvent[]>(() => exchangeEvents.all());
+  const [diagStageFilter, setDiagStageFilter] = useState<Set<ExchangeStage>>(new Set());
   const [connecting,  setConnecting]  = useState(false);
   const [balances,    setBalances]    = useState<ExchangeBalance[]>([]);
   const [orders,      setOrders]      = useState<ExchangeOrder[]>([]);
@@ -2717,11 +2718,67 @@ export default function ExchangePage() {
             </div>
           </div>
 
+          {diagEvents.length > 0 && (() => {
+            const counts = new Map<ExchangeStage, number>();
+            for (const ev of diagEvents) counts.set(ev.stage, (counts.get(ev.stage) ?? 0) + 1);
+            const stages = Array.from(counts.keys()).sort();
+            const toggle = (s: ExchangeStage) => setDiagStageFilter(prev => {
+              const next = new Set(prev);
+              if (next.has(s)) next.delete(s); else next.add(s);
+              return next;
+            });
+            const allActive = diagStageFilter.size === 0;
+            return (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setDiagStageFilter(new Set())}
+                  className={`text-[10px] px-2 py-0.5 rounded-full border transition ${
+                    allActive
+                      ? 'border-zinc-500 text-zinc-200 bg-zinc-800/60'
+                      : 'border-zinc-700 text-zinc-500 hover:text-zinc-300'}`}
+                >All</button>
+                {stages.map(s => {
+                  const active = diagStageFilter.has(s);
+                  const isOrderPoll = s === 'order-poll';
+                  const baseInactive = isOrderPoll
+                    ? 'border-cyan-500/30 text-cyan-500/70 hover:text-cyan-300'
+                    : 'border-zinc-700 text-zinc-500 hover:text-zinc-300';
+                  const baseActive = isOrderPoll
+                    ? 'border-cyan-500/60 text-cyan-300 bg-cyan-500/10'
+                    : 'border-zinc-500 text-zinc-200 bg-zinc-800/60';
+                  return (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => toggle(s)}
+                      className={`text-[10px] px-2 py-0.5 rounded-full border font-mono transition ${
+                        active ? baseActive : baseInactive}`}
+                    >
+                      {s} <span className="opacity-60">{counts.get(s)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })()}
+
           <Card className="border-zinc-800/60">
             <CardContent className="p-0">
-              {diagEvents.length === 0 ? (
-                <div className="text-center py-12 text-zinc-500 text-sm">No exchange events recorded yet.</div>
-              ) : (
+              {(() => {
+                const visible = diagStageFilter.size === 0
+                  ? diagEvents
+                  : diagEvents.filter(ev => diagStageFilter.has(ev.stage));
+                if (visible.length === 0) {
+                  return (
+                    <div className="text-center py-12 text-zinc-500 text-sm">
+                      {diagEvents.length === 0
+                        ? 'No exchange events recorded yet.'
+                        : 'No events match the selected filters.'}
+                    </div>
+                  );
+                }
+                return (
                 <div className="overflow-x-auto max-h-[60vh]">
                   <table className="w-full text-xs">
                     <thead className="sticky top-0 bg-zinc-950">
@@ -2732,7 +2789,7 @@ export default function ExchangePage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {[...diagEvents].reverse().map(ev => (
+                      {[...visible].reverse().map(ev => (
                         <tr key={ev.id} className="border-b border-zinc-800/40 hover:bg-zinc-900/40 align-top">
                           <td className="px-3 py-2 text-zinc-500 whitespace-nowrap font-mono text-[10px]">
                             {new Date(ev.ts).toLocaleTimeString()}
@@ -2760,7 +2817,8 @@ export default function ExchangePage() {
                     </tbody>
                   </table>
                 </div>
-              )}
+                );
+              })()}
             </CardContent>
           </Card>
         </div>

@@ -12,6 +12,7 @@ export type ExchangeStage =
   | 'validate'
   | 'connect'
   | 'fetch-balance'
+  | 'order-poll'
   | 'parse-response'
   | 'switch-mode'
   | 'disconnect'

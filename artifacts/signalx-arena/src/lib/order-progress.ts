@@ -459,7 +459,7 @@ export class OrderProgressStore {
         const r = await apiClient.getOrderStatus(opts.exchange, opts.creds, opts.orderId, opts.symbol);
         if (r.ok && r.data.order) {
           if (consecutiveErrors > 0) {
-            exchangeEvents.log('fetch-balance', opts.exchange,
+            exchangeEvents.log('order-poll', opts.exchange,
               `Order poll recovered for ${opts.symbol} after ${consecutiveErrors} retry attempt(s)`,
               { data: { key: opts.key, orderId: opts.orderId } });
           }
@@ -521,7 +521,7 @@ export class OrderProgressStore {
         // Log only on backoff escalations (delay just increased) to keep
         // the diagnostics tab readable when the exchange is flapping.
         if (nextDelay !== lastLoggedDelay) {
-          exchangeEvents.log('fetch-balance', opts.exchange,
+          exchangeEvents.log('order-poll', opts.exchange,
             `Order poll error #${consecutiveErrors} for ${opts.symbol} — retrying in ${Math.round(nextDelay / 1000)}s`,
             {
               level: consecutiveErrors >= ERROR_BACKOFF_MS.length ? 'error' : 'warn',
