@@ -231,6 +231,10 @@ export default function ExchangePage() {
   const [cancelAllOpen, setCancelAllOpen] = useState(false);
   const [cancelAllConfirmText, setCancelAllConfirmText] = useState('');
   const [cancellingAll, setCancellingAll] = useState(false);
+  // Live progress while a bulk cancel is running. `total` is set when the
+  // batch starts; `done` and `failed` increment per-result as each cancel
+  // settles so the button can show "12 / 50 cancelled, 1 failed".
+  const [cancelAllProgress, setCancelAllProgress] = useState<{ done: number; failed: number; total: number }>({ done: 0, failed: 0, total: 0 });
 
   // ── Per-asset close-position progress ─────────────────────────────────────
   // Inline status panel under each asset card: submitting → pending → partial
@@ -529,6 +533,7 @@ export default function ExchangePage() {
     }
 
     setCancellingAll(true);
+    setCancelAllProgress({ done: 0, failed: 0, total: targets.length });
     setCancellingOrders(prev => {
       const n = new Set(prev);
       for (const t of targets) n.add(t.orderId);
@@ -538,6 +543,10 @@ export default function ExchangePage() {
     const creds = { apiKey, secretKey, ...(passphrase ? { passphrase } : {}) };
     exchangeEvents.log('connect', selectedEx.id, `Bulk cancel: ${targets.length} order(s)`);
 
+    // Per-result state updates: each cancel resolves independently and
+    // immediately bumps the progress counter + clears its row spinner so the
+    // user sees "12 / 50 cancelled, 1 failed" tick up live instead of waiting
+    // for every parallel cancel to settle.
     const results = await Promise.all(targets.map(async ({ orderId, symbol, side }) => {
       const pending = executionLog.add({
         mode,
@@ -552,21 +561,36 @@ export default function ExchangePage() {
         orderId,
         signalId:  `cancel_all_${orderId}`,
       });
+      const finish = (ok: boolean) => {
+        setCancelAllProgress(p => ({
+          ...p,
+          done:   p.done + (ok ? 1 : 0),
+          failed: p.failed + (ok ? 0 : 1),
+        }));
+        setCancellingOrders(prev => {
+          const n = new Set(prev);
+          n.delete(orderId);
+          return n;
+        });
+      };
       try {
         const res = await apiClient.cancelOrder(selectedEx.id, creds, orderId, symbol || undefined);
         if (res.ok) {
           executionLog.update(pending.id, { status: 'executed', exchangeResponse: res.data });
           exchangeEvents.log('connect', selectedEx.id, `Order ${orderId} cancelled (bulk)`);
+          finish(true);
           return { orderId, ok: true as const };
         }
         const errMsg = res.error ?? 'Cancel failed';
         executionLog.update(pending.id, { status: 'failed', errorMsg: errMsg, exchangeResponse: res });
         exchangeEvents.log('connect', selectedEx.id, `Bulk cancel failed for ${orderId}: ${errMsg}`, { level: 'error', data: { code: res.code } });
+        finish(false);
         return { orderId, ok: false as const, error: errMsg };
       } catch (e) {
         const msg = (e as Error).message ?? 'Unexpected error';
         executionLog.update(pending.id, { status: 'failed', errorMsg: msg });
         exchangeEvents.log('connect', selectedEx.id, `Bulk cancel error for ${orderId}: ${msg}`, { level: 'error' });
+        finish(false);
         return { orderId, ok: false as const, error: msg };
       }
     }));
@@ -574,12 +598,8 @@ export default function ExchangePage() {
     const succeeded = results.filter(r => r.ok).length;
     const failed    = results.length - succeeded;
 
-    setCancellingOrders(prev => {
-      const n = new Set(prev);
-      for (const t of targets) n.delete(t.orderId);
-      return n;
-    });
     setCancellingAll(false);
+    setCancelAllProgress({ done: 0, failed: 0, total: 0 });
 
     if (failed === 0) {
       toast({
@@ -1699,7 +1719,14 @@ export default function ExchangePage() {
                   {cancellingAll
                     ? <RefreshCw size={11} className="animate-spin" />
                     : <X size={11} />}
-                  {cancellingAll ? 'Cancelling…' : `Cancel All (${cancellableCount})`}
+                  {cancellingAll
+                    ? (
+                      <span data-testid="text-cancel-all-progress">
+                        {cancelAllProgress.done} / {cancelAllProgress.total} cancelled
+                        {cancelAllProgress.failed > 0 ? `, ${cancelAllProgress.failed} failed` : ''}
+                      </span>
+                    )
+                    : `Cancel All (${cancellableCount})`}
                 </Button>
               )}
               <Button variant="outline" size="sm" onClick={() => isLive ? refreshLiveData() : loadData()} disabled={refreshing} className="flex items-center gap-1.5 text-xs h-7">
@@ -1854,7 +1881,9 @@ export default function ExchangePage() {
                 }}
                 data-testid="button-cancel-all-confirm"
               >
-                {cancellingAll ? 'Cancelling…' : `Cancel ${cancellableCount} order(s)`}
+                {cancellingAll
+                  ? `Cancelling… ${cancelAllProgress.done} / ${cancelAllProgress.total}${cancelAllProgress.failed > 0 ? ` (${cancelAllProgress.failed} failed)` : ''}`
+                  : `Cancel ${cancellableCount} order(s)`}
               </Button>
             </DialogFooter>
           </DialogContent>
