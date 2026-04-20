@@ -233,11 +233,18 @@ export class BybitAdapter implements ExchangeAdapter {
   async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
     const base = order.testnet ? TESTNET_BASE : BASE;
     const sym  = this.normalizeSymbol(order.symbol);
+    // Bybit Spot quirk: for Market orders, `qty` defaults to QUOTE currency
+    // (USDT) for BUY and BASE currency (BTC) for SELL. We always pass BASE
+    // currency in `order.quantity`, so force `marketUnit: 'baseCoin'` to make
+    // Bybit interpret qty as BTC for both sides. Without this, a BUY of
+    // 0.000133 BTC gets read as 0.000133 USDT and Bybit rejects it
+    // (retCode=170140 "Order value exceeded lower limit").
     const body = JSON.stringify({
       category: 'spot', symbol: sym,
       side:      order.side.charAt(0).toUpperCase() + order.side.slice(1),
       orderType: order.type === 'limit' ? 'Limit' : 'Market',
       qty:       String(order.quantity),
+      ...(order.type === 'market' ? { marketUnit: 'baseCoin' } : {}),
       ...(order.type === 'limit' && order.price ? { price: String(order.price) } : {}),
       ...(order.clientId ? { orderLinkId: order.clientId } : {}),
     });
