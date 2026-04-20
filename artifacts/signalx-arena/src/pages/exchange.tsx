@@ -390,6 +390,20 @@ export default function ExchangePage() {
   const [progressMap, setProgressMap] = useState<Record<string, OrderProgress>>(() => orderProgress.all());
   useEffect(() => orderProgress.subscribe(setProgressMap), []);
 
+  // After a page refresh the in-memory pollers are gone but the store
+  // rehydrates non-terminal rows from localStorage on construction. Re-attach
+  // pollers using whatever credentials are currently in the credential store
+  // so the manual / autopilot / close panels keep advancing instead of being
+  // frozen at their last persisted phase. We also re-run resume() whenever
+  // the credential store changes so a row whose creds weren't yet loaded on
+  // mount (common after a full reload — secrets live in-memory only) starts
+  // polling as soon as the user re-enters their keys.
+  useEffect(() => {
+    const tryResume = () => orderProgress.resume(ex => credentialStore.get(ex));
+    tryResume();
+    return credentialStore.subscribe(tryResume);
+  }, []);
+
   const { toast } = useToast();
   const adapter = getExchangeAdapter(selectedEx.id);
 

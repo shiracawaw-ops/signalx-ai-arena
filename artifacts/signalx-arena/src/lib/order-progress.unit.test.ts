@@ -23,6 +23,7 @@ beforeEach(() => {
   mockGetStatus.mockReset();
   // Wipe any state left over from a previous test.
   for (const k of Object.keys(orderProgress.all())) orderProgress.dismiss(k);
+  try { localStorage.removeItem('sx_order_progress_v1'); } catch { /* noop */ }
 });
 
 afterEach(() => {
@@ -89,6 +90,65 @@ describe('orderProgress.poll', () => {
     expect(p.filledQty).toBe(0.5);
     expect(p.avgPrice).toBe(84_000);
     expect(TERMINAL_PHASES.has(p.phase)).toBe(true);
+  });
+
+  it('persists non-terminal rows to localStorage and re-attaches polling via resume()', async () => {
+    // Simulate a prior page load that left a pending row in storage:
+    // start the order, advance it to pending, and verify the persisted
+    // payload contains it.
+    orderProgress.start({
+      key: 'manual:Z', source: 'manual', exchange: 'binance',
+      symbol: 'BTC', side: 'buy',
+    });
+    orderProgress.update('manual:Z', { phase: 'pending', orderId: 'Z' });
+
+    const persisted = JSON.parse(localStorage.getItem('sx_order_progress_v1') ?? '{}');
+    expect(persisted['manual:Z']?.phase).toBe('pending');
+    expect(persisted['manual:Z']?.orderId).toBe('Z');
+
+    // resume() with available creds should call getOrderStatus on the next tick.
+    mockGetStatus.mockResolvedValue({
+      ok: true,
+      data: { order: { orderId: 'Z', status: 'filled', filledQty: 1, quantity: 1, avgPrice: 100 } },
+    } as never);
+    orderProgress.resume(() => CREDS);
+
+    await vi.advanceTimersByTimeAsync(1500);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(mockGetStatus).toHaveBeenCalledWith('binance', CREDS, 'Z', 'BTC');
+    expect(orderProgress.get('manual:Z')?.phase).toBe('filled');
+
+    // After reaching a terminal phase the row must be dropped from
+    // persisted storage so a refresh does not bring it back.
+    const after = JSON.parse(localStorage.getItem('sx_order_progress_v1') ?? '{}');
+    expect(after['manual:Z']).toBeUndefined();
+  });
+
+  it('resume() with no creds does nothing, then begins polling once creds become available', async () => {
+    orderProgress.start({
+      key: 'autopilot:Q', source: 'autopilot', exchange: 'binance',
+      symbol: 'BTC', side: 'buy',
+    });
+    orderProgress.update('autopilot:Q', { phase: 'pending', orderId: 'Q' });
+
+    // First resume: no creds yet — must NOT call getOrderStatus.
+    mockGetStatus.mockResolvedValue({
+      ok: true,
+      data: { order: { orderId: 'Q', status: 'filled', filledQty: 1, quantity: 1, avgPrice: 200 } },
+    } as never);
+    orderProgress.resume(() => null);
+    await vi.advanceTimersByTimeAsync(1500);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockGetStatus).not.toHaveBeenCalled();
+    expect(orderProgress.get('autopilot:Q')?.phase).toBe('pending');
+
+    // Second resume after creds become available — polling starts.
+    orderProgress.resume(() => CREDS);
+    await vi.advanceTimersByTimeAsync(1500);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockGetStatus).toHaveBeenCalledWith('binance', CREDS, 'Q', 'BTC');
+    expect(orderProgress.get('autopilot:Q')?.phase).toBe('filled');
   });
 
   it('flips to partial when the exchange reports an open order with a partial fill', async () => {

@@ -61,6 +61,12 @@ const CHANNEL_NAME = 'signalx-order-progress-v1';
 // window with no `poll-active` from the leader, another tab may take over.
 const LEADER_STALE_MS = 5_000;
 
+// localStorage key for persisting non-terminal progress rows so the panel
+// survives a page refresh while an order is still working on the exchange.
+// Only non-terminal rows (no filled/canceled/rejected/timeout/error) are
+// stored — terminal/dismissed rows must NOT reappear after reload.
+const STORAGE_KEY = 'sx_order_progress_v1';
+
 type PollOpts = {
   key:         string;
   orderId:     string;
@@ -82,8 +88,32 @@ type Msg =
   | { type: 'poll-active';      from: string; key: string }
   | { type: 'poll-release';     from: string; key: string };
 
+function safeLocalStorage(): Storage | null {
+  try {
+    return typeof localStorage !== 'undefined' ? localStorage : null;
+  } catch { return null; }
+}
+
+function loadPersisted(): Record<string, OrderProgress> {
+  const ls = safeLocalStorage();
+  if (!ls) return {};
+  try {
+    const raw = ls.getItem(STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, OrderProgress>;
+    if (!parsed || typeof parsed !== 'object') return {};
+    // Defensive filter: drop any terminal rows that may have leaked into
+    // storage from an older build so they cannot reappear.
+    const out: Record<string, OrderProgress> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (v && !TERMINAL_PHASES.has(v.phase)) out[k] = v;
+    }
+    return out;
+  } catch { return {}; }
+}
+
 class OrderProgressStore {
-  private state: Record<string, OrderProgress> = {};
+  private state: Record<string, OrderProgress> = loadPersisted();
   private listeners = new Set<Listener>();
   private pollers   = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -128,6 +158,22 @@ class OrderProgressStore {
   all(): Record<string, OrderProgress> { return this.state; }
   get(key: string): OrderProgress | undefined { return this.state[key]; }
 
+  // Write the current non-terminal rows to localStorage. Terminal rows
+  // are intentionally excluded so a refresh after a fill/cancel/reject
+  // does not bring the closed panel back.
+  private persist(): void {
+    const ls = safeLocalStorage();
+    if (!ls) return;
+    const out: Record<string, OrderProgress> = {};
+    for (const [k, v] of Object.entries(this.state)) {
+      if (!TERMINAL_PHASES.has(v.phase)) out[k] = v;
+    }
+    try {
+      if (Object.keys(out).length === 0) ls.removeItem(STORAGE_KEY);
+      else ls.setItem(STORAGE_KEY, JSON.stringify(out));
+    } catch { /* storage full / denied */ }
+  }
+
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);
     fn(this.state);
@@ -135,6 +181,7 @@ class OrderProgressStore {
   }
 
   private emit(): void {
+    this.persist();
     const snap = { ...this.state };
     for (const l of this.listeners) {
       try { l(snap); } catch { /* ignore listener errors */ }
@@ -170,6 +217,27 @@ class OrderProgressStore {
         this.localPollOpts.delete(key);
         try { opts.onTerminal?.(value); } catch { /* ignore */ }
       }
+    }
+  }
+
+  // Re-attach pollers for non-terminal rows that were rehydrated from
+  // localStorage on construction. Called once on page mount with a
+  // credential lookup so the live status keeps advancing after a refresh.
+  // Rows missing an orderId (still in `submitting`) or whose credentials
+  // are no longer in the in-memory store are left as-is — they'll show
+  // their last known phase but won't poll. Cross-tab leadership is honoured
+  // via `poll()` so a tab that already polls a given key keeps doing so.
+  resume(getCreds: (exchange: string) => ExchangeCredentials | null): void {
+    for (const p of Object.values(this.state)) {
+      if (TERMINAL_PHASES.has(p.phase)) continue;
+      if (!p.orderId) continue;
+      if (this.pollers.has(p.key)) continue;
+      const creds = getCreds(p.exchange);
+      if (!creds) continue;
+      this.poll({
+        key: p.key, orderId: p.orderId, exchange: p.exchange,
+        symbol: p.symbol, creds,
+      });
     }
   }
 
