@@ -30,7 +30,7 @@ import {
 // ── New engine imports ────────────────────────────────────────────────────────
 import { exchangeMode as exMode }   from '@/lib/exchange-mode';
 import type { ExchangeModeState, ConnectionState } from '@/lib/exchange-mode';
-import { tradeConfig, type TradeConfig } from '@/lib/trade-config';
+import { tradeConfig, type TradeConfig, POLL_TIMEOUT_MIN_SEC, POLL_TIMEOUT_MAX_SEC } from '@/lib/trade-config';
 import { executionLog, type ExecutionEntry } from '@/lib/execution-log';
 import { apiClient, type ExchangeErrorCode } from '@/lib/api-client';
 import { setCredentials, executeSignal } from '@/lib/execution-engine';
@@ -2377,6 +2377,30 @@ export default function ExchangePage() {
                 <Input value={config.allowedSymbols.join(',')} placeholder="BTC,ETH,SOL"
                   onChange={e => tradeConfig.set(selectedEx.id, { allowedSymbols: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
                   className="h-7 w-36 text-xs font-mono" />
+              </CfgRow>
+              <CfgRow label="Order tracking timeout — Close position (sec)">
+                <Input type="number" value={config.pollTimeoutSeconds.close}
+                  min={POLL_TIMEOUT_MIN_SEC} max={POLL_TIMEOUT_MAX_SEC} step={5}
+                  onChange={e => tradeConfig.set(selectedEx.id, { pollTimeoutSeconds: { ...config.pollTimeoutSeconds, close: Number(e.target.value) } })}
+                  title={`How long the app keeps polling a Close-position order before showing "Resume polling". Higher = patient with slow exchanges; lower = faster timeout. Range ${POLL_TIMEOUT_MIN_SEC}–${POLL_TIMEOUT_MAX_SEC}s.`}
+                  className="h-7 w-28 text-xs font-mono text-right"
+                  data-testid="input-poll-timeout-close" />
+              </CfgRow>
+              <CfgRow label="Order tracking timeout — Manual order (sec)">
+                <Input type="number" value={config.pollTimeoutSeconds.manual}
+                  min={POLL_TIMEOUT_MIN_SEC} max={POLL_TIMEOUT_MAX_SEC} step={5}
+                  onChange={e => tradeConfig.set(selectedEx.id, { pollTimeoutSeconds: { ...config.pollTimeoutSeconds, manual: Number(e.target.value) } })}
+                  title={`How long the app keeps polling a Manual order before showing "Resume polling". Raise this for illiquid limit orders that legitimately sit on the book. Range ${POLL_TIMEOUT_MIN_SEC}–${POLL_TIMEOUT_MAX_SEC}s.`}
+                  className="h-7 w-28 text-xs font-mono text-right"
+                  data-testid="input-poll-timeout-manual" />
+              </CfgRow>
+              <CfgRow label="Order tracking timeout — AutoPilot (sec)">
+                <Input type="number" value={config.pollTimeoutSeconds.autopilot}
+                  min={POLL_TIMEOUT_MIN_SEC} max={POLL_TIMEOUT_MAX_SEC} step={5}
+                  onChange={e => tradeConfig.set(selectedEx.id, { pollTimeoutSeconds: { ...config.pollTimeoutSeconds, autopilot: Number(e.target.value) } })}
+                  title={`How long AutoPilot tracks a fill before showing "Resume polling". Limit orders sitting on the book often need a longer window than market closes. Range ${POLL_TIMEOUT_MIN_SEC}–${POLL_TIMEOUT_MAX_SEC}s.`}
+                  className="h-7 w-28 text-xs font-mono text-right"
+                  data-testid="input-poll-timeout-autopilot" />
               </CfgRow>
               <CfgRow label="Emergency stop (halts ALL execution)">
                 <Switch checked={config.emergencyStop}
