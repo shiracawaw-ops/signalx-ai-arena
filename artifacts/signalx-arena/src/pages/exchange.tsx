@@ -720,15 +720,29 @@ export default function ExchangePage() {
           const poll = async () => {
             const elapsed = Date.now() - startedAt;
             if (elapsed > POLL_TIMEOUT_MS) {
+              // Reaching this branch is only possible while the phase is
+              // still non-terminal (pending/partial): every terminal write
+              // below clears the poller and returns, and dismiss/re-click
+              // also clears the poller before re-arming. So we can flip
+              // straight to 'timeout' and notify without re-checking state.
               setCloseProgress(prev => {
                 const cur = prev[asset]; if (!cur) return prev;
-                if (cur.phase === 'filled' || cur.phase === 'canceled' ||
-                    cur.phase === 'rejected' || cur.phase === 'error') return prev;
                 return { ...prev, [asset]: { ...cur, phase: 'timeout',
                   message: 'Stopped polling after 60s — check the order history for the final status.',
                   updatedAt: Date.now() } };
               });
               closePollers.delete(asset);
+              const msg = `Close ${asset} — no final fill confirmation after 60s. The order may still be live; check Order History on ${selectedEx.name}.`;
+              toast({
+                title:       'Close still pending',
+                description: msg,
+                variant:     'destructive',
+              });
+              executionLog.add({
+                mode, exchange: selectedEx.id, symbol: asset, side: 'sell',
+                orderType: 'market', quantity: 0, price, amountUSD: 0,
+                status: 'failed', orderId, errorMsg: msg,
+              });
               return;
             }
             try {
@@ -754,6 +768,24 @@ export default function ExchangePage() {
                   }));
                   if (isTerminal) {
                     closePollers.delete(asset);
+                    if (phase === 'canceled' || phase === 'rejected') {
+                      const word = phase === 'canceled' ? 'canceled' : 'rejected';
+                      const msg  = `Close ${asset} was ${word} by ${selectedEx.name}` +
+                        (filled > 0 ? ` after a partial fill of ${filled} ${asset}` : '') +
+                        '. Check Order History for details.';
+                      toast({
+                        title:       `Close ${word}`,
+                        description: msg,
+                        variant:     'destructive',
+                      });
+                      executionLog.add({
+                        mode, exchange: selectedEx.id, symbol: asset, side: 'sell',
+                        orderType: 'market', quantity: qty, price: avg || price,
+                        amountUSD: (avg || price) * filled,
+                        status: 'rejected', orderId, rejectReason: `exchange_${word}`,
+                        errorMsg: msg,
+                      });
+                    }
                     refreshLiveData();
                     return;
                   }
