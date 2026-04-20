@@ -12,6 +12,8 @@ import { apiClient } from './api-client.js';
 import { executeSignal, type Signal, type EngineResult } from './execution-engine.js';
 import { executionLog, REJECT } from './execution-log.js';
 import { tradeConfig } from './trade-config.js';
+import { credentialStore } from './credential-store.js';
+import { orderProgress } from './order-progress.js';
 import type { AutoPilotDecision } from './autopilot.js';
 
 // ── Mode helpers ─────────────────────────────────────────────────────────────
@@ -189,6 +191,29 @@ export async function dispatchAutoPilotLiveSignal(args: {
     source: 'autopilot',
   };
   const result = await executeSignal(signal);
+
+  // Begin tracking the live fill so the Live Status tab shows real
+  // Submitting → Pending → Filled progress (qty / avg price / partials)
+  // instead of users only seeing a single toast + log row.
+  if (result.ok && result.orderId) {
+    const exId = modeState.exchange;
+    const key  = `autopilot:${result.orderId}`;
+    orderProgress.start({
+      key, source: 'autopilot', exchange: exId, symbol: sym,
+      side: signal.side, label: `AutoPilot ${signal.side.toUpperCase()} ${sym}`,
+    });
+    orderProgress.update(key, { orderId: result.orderId, phase: 'pending' });
+    const looksReal = !result.orderId.startsWith('demo_') && !result.orderId.startsWith('paper_');
+    const creds     = credentialStore.get(exId);
+    if (looksReal && creds) {
+      orderProgress.poll({
+        key, orderId: result.orderId, exchange: exId, symbol: sym, creds,
+      });
+    } else {
+      orderProgress.update(key, { phase: 'filled' });
+    }
+  }
+
   return {
     dispatched: true,
     signal,

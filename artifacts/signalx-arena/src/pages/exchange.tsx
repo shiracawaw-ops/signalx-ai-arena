@@ -37,6 +37,7 @@ import { setCredentials, executeSignal } from '@/lib/execution-engine';
 import { submitManualOrder }      from '@/lib/live-execution-bridge';
 import { credentialStore }          from '@/lib/credential-store';
 import { exchangeEvents, type ExchangeEvent } from '@/lib/exchange-events';
+import { orderProgress, TERMINAL_PHASES, type OrderProgress, type ProgressPhase } from '@/lib/order-progress';
 
 // Map a backend error code (or fetch failure) to a connection-machine state.
 function codeToState(code: ExchangeErrorCode | undefined): ConnectionState {
@@ -155,17 +156,150 @@ const TABS = [
   { key: 'diagnostics', label: 'Diagnostics',   icon: AlertTriangle  },
 ] as const;
 
-// Module-scoped poller registry for close-position status polls.
-// Kept outside the component so the React purity linter does not treat
-// the access pattern as a render-time ref read; the page is a singleton
-// route so a Map at module scope is safe.
-const closePollers = new Map<string, ReturnType<typeof setTimeout>>();
+// Per-source key helpers for the shared `orderProgress` store.
+const closeKey    = (asset: string)   => `close:${asset}`;
+const manualKey   = (orderId: string) => `manual:${orderId}`;
 
 // ── Status dot ────────────────────────────────────────────────────────────────
 function StatusDot({ ok }: { ok: boolean }) {
   return ok
     ? <CheckCircle2 size={13} className="text-emerald-400 flex-shrink-0" />
     : <XCircle      size={13} className="text-zinc-600 flex-shrink-0" />;
+}
+
+// ── Shared inline progress panel (close-position, manual order, autopilot) ──
+// Renders Submitting → Pending → Filled with fill-bar / qty / avg-price.
+// Driven entirely by the singleton `orderProgress` store — see
+// lib/order-progress.ts. Used in three places:
+//   • Balances tab (close-position)
+//   • Manual Order tab (manual submissions)
+//   • Live Status tab (autopilot fills)
+function OrderProgressPanel({
+  p, dense, testIdSuffix, onDismiss, showHeader,
+}: {
+  p:            OrderProgress;
+  dense?:       boolean;
+  testIdSuffix: string;
+  onDismiss:    () => void;
+  showHeader?:  boolean;
+}) {
+  const STEPS: Array<{ key: ProgressPhase; label: string }> = [
+    { key: 'submitting', label: 'Submitting' },
+    { key: 'pending',    label: 'Pending'    },
+    { key: 'filled',     label: 'Filled'     },
+  ];
+  const order: Record<ProgressPhase, number> = {
+    submitting: 0, pending: 1, partial: 1,
+    filled: 2, canceled: 2, rejected: 2, timeout: 2, error: 2,
+  };
+  const cur   = order[p.phase];
+  const isErr = p.phase === 'rejected' || p.phase === 'error' || p.phase === 'canceled' || p.phase === 'timeout';
+  const isDone = TERMINAL_PHASES.has(p.phase);
+  const fillPct = p.quantity > 0
+    ? Math.min(100, Math.max(0, (p.filledQty / p.quantity) * 100))
+    : (p.phase === 'filled' ? 100 : 0);
+  const phaseLabel =
+    p.phase === 'submitting' ? 'Submitting…'
+  : p.phase === 'pending'    ? 'Pending on exchange'
+  : p.phase === 'partial'    ? 'Partial fill'
+  : p.phase === 'filled'     ? (p.source === 'close' ? 'Fully filled — position flattened' : 'Fully filled')
+  : p.phase === 'canceled'   ? 'Canceled by exchange'
+  : p.phase === 'rejected'   ? 'Rejected'
+  : p.phase === 'timeout'    ? 'Polling timed out'
+                             : 'Error';
+  return (
+    <div
+      className={`${dense ? 'mt-3' : 'mt-2'} rounded-md border ${dense ? 'p-2 text-[10px]' : 'p-3 text-xs'} ${
+        isErr ? 'border-red-500/40 bg-red-500/5'
+              : p.phase === 'filled' ? 'border-emerald-500/40 bg-emerald-500/5'
+                                     : 'border-zinc-700/60 bg-zinc-800/30'}`}
+      data-testid={`order-progress-${testIdSuffix}`}
+    >
+      {showHeader && (
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">
+            {p.label ?? `${p.source} ${p.side.toUpperCase()} ${p.symbol}`}
+          </div>
+          {isDone && (
+            <button
+              type="button"
+              onClick={onDismiss}
+              className="text-zinc-500 hover:text-zinc-300"
+              aria-label="Dismiss progress panel"
+              data-testid={`button-dismiss-progress-${testIdSuffix}`}
+            >
+              <X size={11} />
+            </button>
+          )}
+        </div>
+      )}
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {STEPS.map((s, i) => {
+            const done = i < cur || (i === cur && (p.phase === 'filled' || p.phase === 'partial'));
+            const active = i === cur && !isErr;
+            return (
+              <div key={s.key} className="flex items-center gap-1.5">
+                <span className={`h-1.5 w-1.5 rounded-full ${
+                  isErr && i === cur ? 'bg-red-400'
+                    : done   ? 'bg-emerald-400'
+                    : active ? 'bg-amber-400 animate-pulse'
+                             : 'bg-zinc-600'}`} />
+                <span className={`${
+                  isErr && i === cur ? 'text-red-300'
+                    : done ? 'text-emerald-300'
+                    : active ? 'text-amber-300'
+                             : 'text-zinc-500'}`}>{s.label}</span>
+                {i < STEPS.length - 1 && <span className="text-zinc-700">›</span>}
+              </div>
+            );
+          })}
+        </div>
+        {!showHeader && (
+          <button
+            type="button"
+            onClick={onDismiss}
+            className="text-zinc-500 hover:text-zinc-300"
+            aria-label="Dismiss progress panel"
+            data-testid={`button-dismiss-progress-${testIdSuffix}`}
+          >
+            <X size={11} />
+          </button>
+        )}
+      </div>
+      <div className="font-mono">
+        <span className={isErr ? 'text-red-400' : p.phase === 'filled' ? 'text-emerald-400' : 'text-zinc-200'}>
+          {phaseLabel}
+        </span>
+      </div>
+      {(p.quantity > 0 || p.filledQty > 0) && (
+        <>
+          <div className="mt-1.5 h-1 w-full overflow-hidden rounded bg-zinc-800">
+            <div
+              className={`h-full ${p.phase === 'filled' ? 'bg-emerald-400' : isErr ? 'bg-red-400' : 'bg-amber-400'}`}
+              style={{ width: `${fillPct}%` }}
+            />
+          </div>
+          <div className="mt-1 flex items-center justify-between text-zinc-400">
+            <span>
+              Filled <span className="font-mono text-zinc-200">{fmt(p.filledQty, 6)}</span>
+              {p.quantity > 0 && <> / <span className="font-mono">{fmt(p.quantity, 6)}</span></>}
+              {' '}{p.symbol}
+            </span>
+            <span>
+              Avg <span className="font-mono text-zinc-200">${p.avgPrice > 0 ? fmt(p.avgPrice, 2) : '—'}</span>
+            </span>
+          </div>
+        </>
+      )}
+      {p.message && (
+        <div className={`mt-1 ${isErr ? 'text-red-300' : 'text-zinc-400'}`}>{p.message}</div>
+      )}
+      {p.orderId && (
+        <div className="mt-1 text-zinc-500">Order: <span className="font-mono">{p.orderId.slice(0, 16)}{p.orderId.length > 16 ? '…' : ''}</span></div>
+      )}
+    </div>
+  );
 }
 
 // ── Trade Config row ─────────────────────────────────────────────────────────
@@ -249,24 +383,12 @@ export default function ExchangePage() {
   // symbol; null means "every cancellable order across all symbols".
   const [cancelAllSymbol, setCancelAllSymbol] = useState<string | null>(null);
 
-  // ── Per-asset close-position progress ─────────────────────────────────────
-  // Inline status panel under each asset card: submitting → pending → partial
-  // → filled (or canceled/rejected/timeout/error). Polls the backend until a
-  // terminal state or until POLL_TIMEOUT_MS elapses.
-  type ClosePhase =
-    | 'submitting' | 'pending' | 'partial' | 'filled'
-    | 'canceled'   | 'rejected' | 'timeout' | 'error';
-  interface CloseProgress {
-    phase:      ClosePhase;
-    orderId?:   string;
-    quantity:   number;   // submitted size (best-effort, 0 until first poll)
-    filledQty:  number;
-    avgPrice:   number;
-    message?:   string;
-    startedAt:  number;
-    updatedAt:  number;
-  }
-  const [closeProgress, setCloseProgress] = useState<Record<string, CloseProgress>>({});
+  // ── Live order-progress (shared store) ────────────────────────────────────
+  // Subscribes to the singleton `orderProgress` store so the same panel
+  // renders for close-position, manual orders, and autopilot fills without
+  // any per-source state being duplicated here.
+  const [progressMap, setProgressMap] = useState<Record<string, OrderProgress>>(() => orderProgress.all());
+  useEffect(() => orderProgress.subscribe(setProgressMap), []);
 
   const { toast } = useToast();
   const adapter = getExchangeAdapter(selectedEx.id);
@@ -677,17 +799,11 @@ export default function ExchangePage() {
     }
 
     setClosingPositions(prev => { const n = new Set(prev); n.add(asset); return n; });
-    // Cancel any in-flight poller for this asset so a re-click doesn't
-    // produce two competing pollers.
-    if (closePollers.get(asset)) {
-      clearTimeout(closePollers.get(asset));
-      closePollers.delete(asset);
-    }
-    const startedAt = Date.now();
-    setCloseProgress(prev => ({
-      ...prev,
-      [asset]: { phase: 'submitting', quantity: 0, filledQty: 0, avgPrice: 0, startedAt, updatedAt: startedAt },
-    }));
+    const key = closeKey(asset);
+    orderProgress.start({
+      key, source: 'close', exchange: selectedEx.id, symbol: asset, side: 'sell',
+      label: `Close ${asset}`,
+    });
 
     try {
       // Resolve a live reference price — same approach as the manual order form.
@@ -700,11 +816,7 @@ export default function ExchangePage() {
       if (price <= 0) {
         const m = `Cannot resolve a live price for ${asset} on ${selectedEx.name}. Retry once the exchange responds — refusing to size a live close from a placeholder.`;
         toast({ title: 'Close blocked', description: m, variant: 'destructive' });
-        setCloseProgress(prev => ({
-          ...prev,
-          [asset]: { ...(prev[asset] ?? { quantity: 0, filledQty: 0, avgPrice: 0, startedAt }),
-            phase: 'error', message: m, updatedAt: Date.now() },
-        }));
+        orderProgress.update(key, { phase: 'error', message: m });
         return;
       }
 
@@ -723,152 +835,87 @@ export default function ExchangePage() {
           title:       'Close submitted',
           description: `Live SELL ${asset} placed — orderId ${orderId ?? '—'}`,
         });
-        setCloseProgress(prev => ({
-          ...prev,
-          [asset]: { ...(prev[asset] ?? { quantity: 0, filledQty: 0, avgPrice: 0, startedAt }),
-            phase: 'pending', orderId, updatedAt: Date.now() },
-        }));
+        orderProgress.update(key, { phase: 'pending', orderId });
 
-        // Begin polling getOrderStatus until terminal or timeout.
-        // Demo/paper orderIds (prefixed `demo_`/`paper_`) are not real
-        // exchange orders — skip the poll for those.
+        // Demo/paper orderIds aren't real exchange orders — skip polling.
         const looksReal = !!orderId && !orderId.startsWith('demo_') && !orderId.startsWith('paper_');
         if (orderId && looksReal && (mode === 'real' || mode === 'testnet') && apiKey && secretKey) {
           const creds = { apiKey, secretKey, ...(passphrase ? { passphrase } : {}) };
-          const POLL_TIMEOUT_MS = 60_000;
-          const POLL_INTERVAL_MS = 1500;
-          const poll = async () => {
-            const elapsed = Date.now() - startedAt;
-            if (elapsed > POLL_TIMEOUT_MS) {
-              // Reaching this branch is only possible while the phase is
-              // still non-terminal (pending/partial): every terminal write
-              // below clears the poller and returns, and dismiss/re-click
-              // also clears the poller before re-arming. So we can flip
-              // straight to 'timeout' and notify without re-checking state.
-              setCloseProgress(prev => {
-                const cur = prev[asset]; if (!cur) return prev;
-                return { ...prev, [asset]: { ...cur, phase: 'timeout',
-                  message: 'Stopped polling after 60s — check the order history for the final status.',
-                  updatedAt: Date.now() } };
-              });
-              closePollers.delete(asset);
-              const msg = `Close ${asset} — no final fill confirmation after 60s. The order may still be live; check Order History on ${selectedEx.name}.`;
-              toast({
-                title:       'Close still pending',
-                description: msg,
-                variant:     'destructive',
-              });
-              executionLog.add({
-                mode, exchange: selectedEx.id, symbol: asset, side: 'sell',
-                orderType: 'market', quantity: 0, price, amountUSD: 0,
-                status: 'failed', orderId, errorMsg: msg,
-              });
-              return;
-            }
-            try {
-              const r = await apiClient.getOrderStatus(selectedEx.id, creds, orderId, asset);
-              if (r.ok) {
-                const o = r.data.order;
-                if (o) {
-                  const filled = num(o.filledQty);
-                  const qty    = num(o.quantity);
-                  const avg    = num(o.avgPrice);
-                  const isPartial  = o.status === 'partial' || (o.status === 'open' && filled > 0);
-                  const isTerminal = o.status === 'filled' || o.status === 'canceled' || o.status === 'rejected';
-                  const phase: ClosePhase =
-                    o.status === 'filled'   ? 'filled'   :
-                    o.status === 'canceled' ? 'canceled' :
-                    o.status === 'rejected' ? 'rejected' :
-                    isPartial               ? 'partial'  : 'pending';
-                  setCloseProgress(prev => ({
-                    ...prev,
-                    [asset]: { ...(prev[asset] ?? { startedAt }),
-                      phase, orderId, quantity: qty, filledQty: filled, avgPrice: avg,
-                      updatedAt: Date.now() },
-                  }));
-                  if (isTerminal) {
-                    closePollers.delete(asset);
-                    if (phase === 'filled') {
-                      // Only surface the success toast when the user is not
-                      // already on the Balances tab — the inline progress
-                      // panel there already conveys the same information.
-                      if (tabRef.current !== 'balances') {
-                        toast({
-                          title:       'Close filled',
-                          description: `Closed ${fmt(filled, 6)} ${asset} at avg ${fmt(avg, 2)} on ${selectedEx.name}.`,
-                        });
-                      }
-                    } else if (phase === 'canceled' || phase === 'rejected') {
-                      const word = phase === 'canceled' ? 'canceled' : 'rejected';
-                      const msg  = `Close ${asset} was ${word} by ${selectedEx.name}` +
-                        (filled > 0 ? ` after a partial fill of ${filled} ${asset}` : '') +
-                        '. Check Order History for details.';
-                      toast({
-                        title:       `Close ${word}`,
-                        description: msg,
-                        variant:     'destructive',
-                      });
-                      executionLog.add({
-                        mode, exchange: selectedEx.id, symbol: asset, side: 'sell',
-                        orderType: 'market', quantity: qty, price: avg || price,
-                        amountUSD: (avg || price) * filled,
-                        status: 'rejected', orderId, rejectReason: `exchange_${word}`,
-                        errorMsg: msg,
-                      });
-                    }
-                    refreshLiveData();
-                    return;
-                  }
+          // The shared store handles the 1.5s/60s polling loop and partial /
+          // terminal-state detection (was an inline poller before #63).
+          // We layer the close-specific notifications on top via onTerminal
+          // so users still get the "Close filled / canceled / rejected"
+          // toasts and the execution-log row that the old inline poller
+          // produced.
+          orderProgress.poll({
+            key, orderId, exchange: selectedEx.id, symbol: asset, creds,
+            onTerminal: (final) => {
+              const filled = final.filledQty;
+              const qty    = final.quantity;
+              const avg    = final.avgPrice;
+              if (final.phase === 'filled') {
+                if (tabRef.current !== 'balances') {
+                  toast({
+                    title:       'Close filled',
+                    description: `Closed ${fmt(filled, 6)} ${asset} at avg ${fmt(avg, 2)} on ${selectedEx.name}.`,
+                  });
                 }
+              } else if (final.phase === 'canceled' || final.phase === 'rejected') {
+                const word = final.phase === 'canceled' ? 'canceled' : 'rejected';
+                const msg  = `Close ${asset} was ${word} by ${selectedEx.name}` +
+                  (filled > 0 ? ` after a partial fill of ${filled} ${asset}` : '') +
+                  '. Check Order History for details.';
+                toast({
+                  title:       `Close ${word}`,
+                  description: msg,
+                  variant:     'destructive',
+                });
+                executionLog.add({
+                  mode, exchange: selectedEx.id, symbol: asset, side: 'sell',
+                  orderType: 'market', quantity: qty, price: avg || price,
+                  amountUSD: (avg || price) * filled,
+                  status: 'rejected', orderId, rejectReason: `exchange_${word}`,
+                  errorMsg: msg,
+                });
+              } else if (final.phase === 'timeout') {
+                const msg = `Close ${asset} — no final fill confirmation after 60s. The order may still be live; check Order History on ${selectedEx.name}.`;
+                toast({
+                  title:       'Close still pending',
+                  description: msg,
+                  variant:     'destructive',
+                });
+                executionLog.add({
+                  mode, exchange: selectedEx.id, symbol: asset, side: 'sell',
+                  orderType: 'market', quantity: 0, price, amountUSD: 0,
+                  status: 'failed', orderId, errorMsg: msg,
+                });
               }
-            } catch { /* swallow — try again next tick */ }
-            closePollers.set(asset, setTimeout(poll, POLL_INTERVAL_MS));
-          };
-          closePollers.set(asset, setTimeout(poll, POLL_INTERVAL_MS));
+              refreshLiveData();
+            },
+          });
         } else {
-          // No reliable orderId to poll (demo/paper or missing creds) —
-          // mark as filled optimistically since executeSignal already
+          // No real orderId to poll — mark as filled since the engine already
           // recorded the simulated fill in the execution log.
-          setCloseProgress(prev => ({
-            ...prev,
-            [asset]: { ...(prev[asset] ?? { quantity: 0, filledQty: 0, avgPrice: 0, startedAt }),
-              phase: 'filled', updatedAt: Date.now() },
-          }));
+          orderProgress.update(key, { phase: 'filled' });
         }
       } else {
         const reason = `${res.rejectReason ?? 'Rejected'}${res.detail ? ' — ' + res.detail : ''}`;
         toast({ title: 'Close blocked', description: reason, variant: 'destructive' });
-        setCloseProgress(prev => ({
-          ...prev,
-          [asset]: { ...(prev[asset] ?? { quantity: 0, filledQty: 0, avgPrice: 0, startedAt }),
-            phase: 'rejected', message: reason, updatedAt: Date.now() },
-        }));
+        orderProgress.update(key, { phase: 'rejected', message: reason });
       }
     } catch (e) {
       const m = (e as Error).message ?? 'Unexpected error';
       toast({ title: 'Close failed', description: m, variant: 'destructive' });
-      setCloseProgress(prev => ({
-        ...prev,
-        [asset]: { ...(prev[asset] ?? { quantity: 0, filledQty: 0, avgPrice: 0, startedAt }),
-          phase: 'error', message: m, updatedAt: Date.now() },
-      }));
+      orderProgress.update(key, { phase: 'error', message: m });
     } finally {
       setClosingPositions(prev => { const n = new Set(prev); n.delete(asset); return n; });
       refreshLiveData();
     }
   }, [mode, selectedEx.id, selectedEx.name, apiKey, secretKey, passphrase, toast, refreshLiveData]);
 
-  // Dismiss an inline close-progress panel and stop any active poller.
-  const dismissCloseProgress = useCallback((asset: string) => {
-    if (closePollers.get(asset)) {
-      clearTimeout(closePollers.get(asset));
-      closePollers.delete(asset);
-    }
-    setCloseProgress(prev => {
-      if (!prev[asset]) return prev;
-      const { [asset]: _omit, ...rest } = prev;
-      return rest;
-    });
+  // Dismiss an inline progress panel and stop any active poller.
+  const dismissProgress = useCallback((key: string) => {
+    orderProgress.dismiss(key);
   }, []);
 
   // ── Connect ───────────────────────────────────────────────────────────────
@@ -1617,105 +1664,14 @@ export default function ExchangePage() {
                         {closing ? 'Closing…' : `Close ${b.asset} Position`}
                       </Button>
                     )}
-                    {closeProgress[b.asset] && (() => {
-                      const p = closeProgress[b.asset]!;
-                      const STEPS: Array<{ key: ClosePhase; label: string }> = [
-                        { key: 'submitting', label: 'Submitting' },
-                        { key: 'pending',    label: 'Pending'    },
-                        { key: 'filled',     label: 'Filled'     },
-                      ];
-                      const order: Record<ClosePhase, number> = {
-                        submitting: 0, pending: 1, partial: 1,
-                        filled: 2, canceled: 2, rejected: 2, timeout: 2, error: 2,
-                      };
-                      const cur = order[p.phase];
-                      const isErr = p.phase === 'rejected' || p.phase === 'error' || p.phase === 'canceled' || p.phase === 'timeout';
-                      const fillPct = p.quantity > 0
-                        ? Math.min(100, Math.max(0, (p.filledQty / p.quantity) * 100))
-                        : (p.phase === 'filled' ? 100 : 0);
-                      const phaseLabel =
-                        p.phase === 'submitting' ? 'Submitting…'
-                      : p.phase === 'pending'    ? 'Pending on exchange'
-                      : p.phase === 'partial'    ? 'Partial fill'
-                      : p.phase === 'filled'     ? 'Fully filled — position flattened'
-                      : p.phase === 'canceled'   ? 'Canceled by exchange'
-                      : p.phase === 'rejected'   ? 'Rejected'
-                      : p.phase === 'timeout'    ? 'Polling timed out'
-                                                 : 'Error';
-                      return (
-                        <div
-                          className={`mt-3 rounded-md border p-2 text-[10px] ${
-                            isErr ? 'border-red-500/40 bg-red-500/5'
-                                  : p.phase === 'filled' ? 'border-emerald-500/40 bg-emerald-500/5'
-                                                         : 'border-zinc-700/60 bg-zinc-800/30'}`}
-                          data-testid={`close-progress-${b.asset}`}
-                        >
-                          <div className="flex items-center justify-between mb-1.5">
-                            <div className="flex items-center gap-1.5">
-                              {STEPS.map((s, i) => {
-                                const done = i < cur || (i === cur && (p.phase === 'filled' || p.phase === 'partial'));
-                                const active = i === cur && !isErr;
-                                return (
-                                  <div key={s.key} className="flex items-center gap-1.5">
-                                    <span className={`h-1.5 w-1.5 rounded-full ${
-                                      isErr && i === cur ? 'bg-red-400'
-                                        : done   ? 'bg-emerald-400'
-                                        : active ? 'bg-amber-400 animate-pulse'
-                                                 : 'bg-zinc-600'}`} />
-                                    <span className={`${
-                                      isErr && i === cur ? 'text-red-300'
-                                        : done ? 'text-emerald-300'
-                                        : active ? 'text-amber-300'
-                                                 : 'text-zinc-500'}`}>{s.label}</span>
-                                    {i < STEPS.length - 1 && <span className="text-zinc-700">›</span>}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => dismissCloseProgress(b.asset)}
-                              className="text-zinc-500 hover:text-zinc-300"
-                              aria-label="Dismiss close-progress panel"
-                              data-testid={`button-dismiss-close-progress-${b.asset}`}
-                            >
-                              <X size={11} />
-                            </button>
-                          </div>
-                          <div className="font-mono text-zinc-300">
-                            <span className={isErr ? 'text-red-400' : p.phase === 'filled' ? 'text-emerald-400' : 'text-zinc-200'}>
-                              {phaseLabel}
-                            </span>
-                          </div>
-                          {(p.quantity > 0 || p.filledQty > 0) && (
-                            <>
-                              <div className="mt-1.5 h-1 w-full overflow-hidden rounded bg-zinc-800">
-                                <div
-                                  className={`h-full ${p.phase === 'filled' ? 'bg-emerald-400' : isErr ? 'bg-red-400' : 'bg-amber-400'}`}
-                                  style={{ width: `${fillPct}%` }}
-                                />
-                              </div>
-                              <div className="mt-1 flex items-center justify-between text-zinc-400">
-                                <span>
-                                  Filled <span className="font-mono text-zinc-200">{fmt(p.filledQty, 6)}</span>
-                                  {p.quantity > 0 && <> / <span className="font-mono">{fmt(p.quantity, 6)}</span></>}
-                                  {' '}{b.asset}
-                                </span>
-                                <span>
-                                  Avg <span className="font-mono text-zinc-200">${p.avgPrice > 0 ? fmt(p.avgPrice, 2) : '—'}</span>
-                                </span>
-                              </div>
-                            </>
-                          )}
-                          {p.message && (
-                            <div className={`mt-1 ${isErr ? 'text-red-300' : 'text-zinc-400'}`}>{p.message}</div>
-                          )}
-                          {p.orderId && (
-                            <div className="mt-1 text-zinc-500">Order: <span className="font-mono">{p.orderId.slice(0, 16)}{p.orderId.length > 16 ? '…' : ''}</span></div>
-                          )}
-                        </div>
-                      );
-                    })()}
+                    {progressMap[closeKey(b.asset)] && (
+                      <OrderProgressPanel
+                        p={progressMap[closeKey(b.asset)]!}
+                        dense
+                        testIdSuffix={`close-${b.asset}`}
+                        onDismiss={() => dismissProgress(closeKey(b.asset))}
+                      />
+                    )}
                   </CardContent>
                 </Card>
                 );
@@ -2255,6 +2211,37 @@ export default function ExchangePage() {
             </CardContent>
           </Card>
 
+          {/* Autopilot fill progress — live readout of executions dispatched
+              by the AutoPilot/bot engine so users no longer rely on a single
+              toast + log entry to see whether a real order actually filled. */}
+          {(() => {
+            const rows = Object.values(progressMap)
+              .filter(p => p.source === 'autopilot')
+              .sort((a, b) => b.startedAt - a.startedAt)
+              .slice(0, 5);
+            if (rows.length === 0) return null;
+            return (
+              <Card className="border-zinc-800/60">
+                <CardHeader className="py-3 px-4">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <Activity size={13} /> AutoPilot Fill Progress
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-4 space-y-2">
+                  {rows.map(p => (
+                    <OrderProgressPanel
+                      key={p.key}
+                      p={p}
+                      showHeader
+                      testIdSuffix={`autopilot-${p.orderId ?? p.startedAt}`}
+                      onDismiss={() => dismissProgress(p.key)}
+                    />
+                  ))}
+                </CardContent>
+              </Card>
+            );
+          })()}
+
           {/* Live connection details */}
           <Card className="border-zinc-800/60">
             <CardHeader className="py-3 px-4"><CardTitle className="text-sm">Connection Details</CardTitle></CardHeader>
@@ -2450,6 +2437,29 @@ export default function ExchangePage() {
                     setManualResult({ ok: out.ok, message: out.message });
                     if (out.ok) {
                       toast({ title: 'Order accepted', description: out.message });
+                      // Begin tracking the manual order's fill progress.
+                      // Demo/paper orderIds aren't real exchange orders so we
+                      // mark them filled immediately; live orders are polled.
+                      const orderId = out.result?.orderId;
+                      if (orderId) {
+                        const key = manualKey(orderId);
+                        orderProgress.start({
+                          key, source: 'manual', exchange: selectedEx.id,
+                          symbol: manualSymbol, side: manualSide,
+                          label: `Manual ${manualSide.toUpperCase()} ${manualSymbol}`,
+                        });
+                        orderProgress.update(key, { orderId, phase: 'pending' });
+                        const looksReal = !orderId.startsWith('demo_') && !orderId.startsWith('paper_');
+                        if (looksReal && (mode === 'real' || mode === 'testnet') && apiKey && secretKey) {
+                          const creds = { apiKey, secretKey, ...(passphrase ? { passphrase } : {}) };
+                          orderProgress.poll({
+                            key, orderId, exchange: selectedEx.id,
+                            symbol: manualSymbol, creds,
+                          });
+                        } else {
+                          orderProgress.update(key, { phase: 'filled' });
+                        }
+                      }
                     } else {
                       toast({ title: 'Order blocked', description: out.message, variant: 'destructive' });
                     }
@@ -2475,6 +2485,27 @@ export default function ExchangePage() {
                     : 'border-red-500/30 bg-red-500/5 text-red-300'
                 }`}>
                   {manualResult.message}
+                </div>
+              )}
+
+              {/* Live fill-progress for in-flight + recently-completed manual orders. */}
+              {Object.values(progressMap).filter(p => p.source === 'manual').length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">
+                    Manual Order Progress
+                  </div>
+                  {Object.values(progressMap)
+                    .filter(p => p.source === 'manual')
+                    .sort((a, b) => b.startedAt - a.startedAt)
+                    .map(p => (
+                      <OrderProgressPanel
+                        key={p.key}
+                        p={p}
+                        showHeader
+                        testIdSuffix={`manual-${p.orderId ?? p.startedAt}`}
+                        onDismiss={() => dismissProgress(p.key)}
+                      />
+                    ))}
                 </div>
               )}
 
