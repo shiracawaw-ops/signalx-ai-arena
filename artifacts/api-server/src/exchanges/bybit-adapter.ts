@@ -245,8 +245,20 @@ export class BybitAdapter implements ExchangeAdapter {
     const sig = sign(creds.apiKey, creds.secretKey, ts, body);
     const r   = await safeFetch(`${base}/v5/order/create`, { method: 'POST', headers: headers(creds, ts, sig), body }, 'bybit');
     if (!r.ok) throw new Error(`Bybit order failed: ${r.error?.message}`);
-    const d = (r.data as Record<string, Record<string, unknown>>)?.['result'] ?? {};
-    return { orderId: String(d['orderId'] ?? ''), clientId: String(d['orderLinkId'] ?? ''), symbol: sym, side: order.side, type: order.type, status: 'open', quantity: order.quantity, filledQty: 0, price: order.price ?? 0, avgPrice: 0, fee: 0, feeCurrency: 'USDT', timestamp: Date.now(), exchange: 'bybit', raw: d };
+    // Bybit returns HTTP 200 even when the business call fails (e.g.
+    // insufficient balance, invalid qty). The real status lives in retCode.
+    const payload = (r.data as Record<string, unknown>) ?? {};
+    const retCode = Number(payload['retCode'] ?? -1);
+    const retMsg  = String(payload['retMsg'] ?? 'unknown error');
+    if (retCode !== 0) {
+      throw new Error(`Bybit order rejected (retCode=${retCode}): ${retMsg}`);
+    }
+    const d = (payload['result'] as Record<string, unknown>) ?? {};
+    const orderId = String(d['orderId'] ?? '');
+    if (!orderId) {
+      throw new Error(`Bybit order returned empty orderId: ${retMsg}`);
+    }
+    return { orderId, clientId: String(d['orderLinkId'] ?? ''), symbol: sym, side: order.side, type: order.type, status: 'open', quantity: order.quantity, filledQty: 0, price: order.price ?? 0, avgPrice: 0, fee: 0, feeCurrency: 'USDT', timestamp: Date.now(), exchange: 'bybit', raw: d };
   }
 
   async getPrice(symbol: string): Promise<number> {
@@ -265,7 +277,9 @@ export class BybitAdapter implements ExchangeAdapter {
     const ts   = Date.now();
     const sig  = sign(creds.apiKey, creds.secretKey, ts, body);
     const r    = await safeFetch(`${base}/v5/order/cancel`, { method: 'POST', headers: headers(creds, ts, sig), body }, 'bybit');
-    return r.ok;
+    if (!r.ok) return false;
+    const retCode = Number((r.data as Record<string, unknown>)?.['retCode'] ?? -1);
+    return retCode === 0;
   }
 
   async getOrderHistory(creds: ExchangeCredentials, symbol?: string, limit = 50): Promise<OrderResult[]> {
