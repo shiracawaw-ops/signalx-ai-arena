@@ -1,0 +1,64 @@
+Fix Binance real order execution failures in SignalX AutoPilot without changing the UI.
+
+Current status:
+- Binance API is connected successfully
+- Real trading permission is confirmed
+- App banner says: API validated, Trade permission confirmed
+- But most live orders are failing with:
+  - insufficient_balance
+  - symbol_blocked
+  - Binance error code -1013
+
+I need a full production-safe fix for Binance order construction and preflight validation.
+
+Do all of the following:
+
+1) Audit the full order creation pipeline for Binance Spot real trading.
+2) Before placing any order, fetch and enforce symbol filters from Binance exchangeInfo:
+   - LOT_SIZE
+   - STEP_SIZE
+   - MIN_QTY
+   - MIN_NOTIONAL
+   - PRICE_FILTER
+   - baseAssetPrecision
+   - quoteAssetPrecision
+3) Add a strict preflight validator that rejects orders before sending if:
+   - quantity is missing
+   - quantity <= 0
+   - rounded quantity becomes zero
+   - notional is below Binance minimum
+   - price or quantity precision is invalid
+   - free balance is insufficient
+   - asset for SELL is not available in free balance
+   - quote balance for BUY is insufficient
+4) Normalize all order quantities and prices to Binance-valid precision and step size.
+5) Add explicit mapping and validation for all allowed symbols:
+   - ETH, SOL, XRP, DOT, ADA, AVAX, LINK and others
+6) Replace generic Binance -1013 failures with exact human-readable diagnostics:
+   - min notional failed
+   - lot size failed
+   - step size failed
+   - precision failed
+   - price filter failed
+7) Prevent the bot from sending repeated invalid orders in a loop.
+8) Add a cooldown and failure counter per symbol after repeated exchange rejections.
+9) In execution log, show:
+   - free balance used
+   - computed quantity before rounding
+   - final quantity after rounding
+   - min notional
+   - step size
+   - rejection reason
+10) Fix insufficient_balance handling:
+   - BUY must use available quote balance only
+   - SELL must use available base asset only
+   - never assume holdings that are not present
+11) Fix symbol_blocked logic:
+   - show exact reason why the symbol is blocked
+   - whether blocked by app policy, missing market, or Binance restriction
+12) Add a “Binance Order Self-Test” tool that validates orders safely without placing invalid live orders.
+
+Deliver the full fix directly.
+Do not simplify.
+Do not change the layout.
+Do not remove any current feature.
