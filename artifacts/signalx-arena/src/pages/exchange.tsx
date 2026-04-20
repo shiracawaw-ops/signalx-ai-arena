@@ -271,6 +271,13 @@ export default function ExchangePage() {
   const { toast } = useToast();
   const adapter = getExchangeAdapter(selectedEx.id);
 
+  // Track the latest active tab via a ref so async pollers (which capture
+  // `tab` at submit time) can read the *current* tab when a terminal
+  // event fires — otherwise users who switch tabs after starting a close
+  // would never see the success toast.
+  const tabRef = useRef(tab);
+  useEffect(() => { tabRef.current = tab; }, [tab]);
+
   // ── Subscribe to engine singletons ────────────────────────────────────────
   useEffect(() => {
     const unsub1 = exMode.subscribe(setModeState);
@@ -781,7 +788,17 @@ export default function ExchangePage() {
                   }));
                   if (isTerminal) {
                     closePollers.delete(asset);
-                    if (phase === 'canceled' || phase === 'rejected') {
+                    if (phase === 'filled') {
+                      // Only surface the success toast when the user is not
+                      // already on the Balances tab — the inline progress
+                      // panel there already conveys the same information.
+                      if (tabRef.current !== 'balances') {
+                        toast({
+                          title:       'Close filled',
+                          description: `Closed ${fmt(filled, 6)} ${asset} at avg ${fmt(avg, 2)} on ${selectedEx.name}.`,
+                        });
+                      }
+                    } else if (phase === 'canceled' || phase === 'rejected') {
                       const word = phase === 'canceled' ? 'canceled' : 'rejected';
                       const msg  = `Close ${asset} was ${word} by ${selectedEx.name}` +
                         (filled > 0 ? ` after a partial fill of ${filled} ${asset}` : '') +
