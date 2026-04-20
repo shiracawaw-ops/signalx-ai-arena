@@ -166,8 +166,22 @@ export class BybitAdapter implements ExchangeAdapter {
         if (!asset) continue;
         const total     = parseFloat(String(c['walletBalance'] ?? '0'));
         if (!Number.isFinite(total) || total <= 0) continue;
-        const available = parseFloat(String(c['availableToWithdraw'] ?? c['free'] ?? '0'));
-        const hold      = parseFloat(String(c['locked'] ?? '0'));
+        // Bybit Unified accounts often return empty `availableToWithdraw`
+        // for collateral assets like USDT (they're locked as margin even
+        // when no positions exist). Fall back to walletBalance minus any
+        // explicit locked/IM amounts so trading checks see the real
+        // spendable balance.
+        const pickNum = (...vals: unknown[]): number => {
+          for (const v of vals) {
+            const s = String(v ?? '').trim();
+            if (!s) continue;
+            const n = parseFloat(s);
+            if (Number.isFinite(n) && n > 0) return n;
+          }
+          return 0;
+        };
+        const hold      = pickNum(c['locked'], c['totalOrderIM'], c['totalPositionIM']);
+        const available = pickNum(c['availableToWithdraw'], c['free'], total - hold, total);
         // Merge across account types — sum same-asset balances.
         const prev = merged.get(asset);
         if (prev) {
