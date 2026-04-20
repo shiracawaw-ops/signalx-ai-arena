@@ -235,6 +235,11 @@ export default function ExchangePage() {
   // batch starts; `done` and `failed` increment per-result as each cancel
   // settles so the button can show "12 / 50 cancelled, 1 failed".
   const [cancelAllProgress, setCancelAllProgress] = useState<{ done: number; failed: number; total: number }>({ done: 0, failed: 0, total: 0 });
+  // Targets that failed in the most recent bulk cancel. Powers the
+  // "Retry failed (N)" affordance so users can re-run the cancel flow only
+  // against the orderIds that didn't cancel — without re-issuing requests
+  // for the ones that already succeeded.
+  const [lastFailedTargets, setLastFailedTargets] = useState<Array<{ orderId: string; symbol: string; side: 'buy' | 'sell' }>>([]);
 
   // ── Per-asset close-position progress ─────────────────────────────────────
   // Inline status panel under each asset card: submitting → pending → partial
@@ -534,6 +539,10 @@ export default function ExchangePage() {
 
     setCancellingAll(true);
     setCancelAllProgress({ done: 0, failed: 0, total: targets.length });
+    // Clear any previous "Retry failed" set — this run will repopulate it
+    // based on its own results so the affordance always reflects the most
+    // recent batch (whether that's the original Cancel All or a retry).
+    setLastFailedTargets([]);
     setCancellingOrders(prev => {
       const n = new Set(prev);
       for (const t of targets) n.add(t.orderId);
@@ -597,6 +606,13 @@ export default function ExchangePage() {
 
     const succeeded = results.filter(r => r.ok).length;
     const failed    = results.length - succeeded;
+
+    // Capture the orderIds that failed so the user can retry just those
+    // without re-issuing requests for the ones that already succeeded.
+    // Map back through `targets` to preserve symbol+side metadata.
+    const failedIds = new Set(results.filter(r => !r.ok).map(r => r.orderId));
+    const failedTargets = targets.filter(t => failedIds.has(t.orderId));
+    setLastFailedTargets(failedTargets);
 
     setCancellingAll(false);
     setCancelAllProgress({ done: 0, failed: 0, total: 0 });
@@ -1698,6 +1714,14 @@ export default function ExchangePage() {
             }
           };
 
+          // "Retry failed" only re-targets orderIds that (a) failed in the
+          // last bulk cancel AND (b) are still cancellable now. An order that
+          // got filled or cancelled out-of-band between the original batch
+          // and the retry click would otherwise produce a guaranteed failure.
+          const cancellableIds = new Set(cancellableTargets.map(t => t.orderId));
+          const retryTargets = lastFailedTargets.filter(t => cancellableIds.has(t.orderId));
+          const showRetryFailed = isLive && !cancellingAll && retryTargets.length > 0;
+
           return (
         <>
         <Card className="border-zinc-800/60">
@@ -1727,6 +1751,20 @@ export default function ExchangePage() {
                       </span>
                     )
                     : `Cancel All (${cancellableCount})`}
+                </Button>
+              )}
+              {showRetryFailed && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => cancelAllOpenOrders(retryTargets)}
+                  disabled={cancellingAll || refreshing}
+                  className="flex items-center gap-1.5 text-xs h-7 border-amber-500/40 text-amber-400 hover:bg-amber-500/10 hover:text-amber-300"
+                  data-testid="button-retry-failed-cancels"
+                  title={`Retry cancel for ${retryTargets.length} order(s) that failed in the last bulk cancel`}
+                >
+                  <RefreshCw size={11} />
+                  {`Retry failed (${retryTargets.length})`}
                 </Button>
               )}
               <Button variant="outline" size="sm" onClick={() => isLive ? refreshLiveData() : loadData()} disabled={refreshing} className="flex items-center gap-1.5 text-xs h-7">
