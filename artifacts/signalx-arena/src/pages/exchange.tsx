@@ -175,12 +175,13 @@ function StatusDot({ ok }: { ok: boolean }) {
 //   • Manual Order tab (manual submissions)
 //   • Live Status tab (autopilot fills)
 function OrderProgressPanel({
-  p, dense, testIdSuffix, onDismiss, showHeader,
+  p, dense, testIdSuffix, onDismiss, onResume, showHeader,
 }: {
   p:            OrderProgress;
   dense?:       boolean;
   testIdSuffix: string;
   onDismiss:    () => void;
+  onResume?:    () => void;
   showHeader?:  boolean;
 }) {
   const STEPS: Array<{ key: ProgressPhase; label: string }> = [
@@ -294,6 +295,18 @@ function OrderProgressPanel({
       )}
       {p.message && (
         <div className={`mt-1 ${isErr ? 'text-red-300' : 'text-zinc-400'}`}>{p.message}</div>
+      )}
+      {p.phase === 'timeout' && p.resumable && onResume && (
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={onResume}
+            className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[10px] font-semibold text-amber-300 hover:bg-amber-500/20 hover:text-amber-200"
+            data-testid={`button-resume-progress-${testIdSuffix}`}
+          >
+            <RefreshCw size={10} /> Resume polling
+          </button>
+        </div>
       )}
       {p.orderId && (
         <div className="mt-1 text-zinc-500">Order: <span className="font-mono">{p.orderId.slice(0, 16)}{p.orderId.length > 16 ? '…' : ''}</span></div>
@@ -892,7 +905,7 @@ export default function ExchangePage() {
                   errorMsg: msg,
                 });
               } else if (final.phase === 'timeout') {
-                const msg = `Close ${asset} — no final fill confirmation after 60s. The order may still be live; check Order History on ${selectedEx.name}.`;
+                const msg = `Close ${asset} — no final fill confirmation yet. The order may still be live; click Resume to keep polling, or check Order History on ${selectedEx.name}.`;
                 toast({
                   title:       'Close still pending',
                   description: msg,
@@ -931,6 +944,19 @@ export default function ExchangePage() {
   const dismissProgress = useCallback((key: string) => {
     orderProgress.dismiss(key);
   }, []);
+
+  // Resume polling on a row that previously timed out. The store remembers
+  // the original creds/orderId/exchange so the UI just needs the key.
+  const resumeProgress = useCallback((key: string) => {
+    const ok = orderProgress.resume(key);
+    if (!ok) {
+      toast({
+        title:       'Cannot resume',
+        description: 'No saved polling context for this row — try the action again.',
+        variant:     'destructive',
+      });
+    }
+  }, [toast]);
 
   // ── Connect ───────────────────────────────────────────────────────────────
   const handleConnect = async () => {
@@ -1684,6 +1710,7 @@ export default function ExchangePage() {
                         dense
                         testIdSuffix={`close-${b.asset}`}
                         onDismiss={() => dismissProgress(closeKey(b.asset))}
+                        onResume={() => resumeProgress(closeKey(b.asset))}
                       />
                     )}
                   </CardContent>
@@ -2249,6 +2276,7 @@ export default function ExchangePage() {
                       showHeader
                       testIdSuffix={`autopilot-${p.orderId ?? p.startedAt}`}
                       onDismiss={() => dismissProgress(p.key)}
+                      onResume={() => resumeProgress(p.key)}
                     />
                   ))}
                 </CardContent>
@@ -2518,6 +2546,7 @@ export default function ExchangePage() {
                         showHeader
                         testIdSuffix={`manual-${p.orderId ?? p.startedAt}`}
                         onDismiss={() => dismissProgress(p.key)}
+                        onResume={() => resumeProgress(p.key)}
                       />
                     ))}
                 </div>

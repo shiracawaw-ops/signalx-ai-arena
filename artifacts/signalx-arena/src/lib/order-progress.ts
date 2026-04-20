@@ -45,14 +45,39 @@ export interface OrderProgress {
   label?:     string;
   startedAt:  number;
   updatedAt:  number;
+  // True while a poller is actively working this key. Used by the UI to
+  // show a "Resume polling" affordance only on rows that genuinely timed
+  // out and aren't already being retried.
+  resumable?: boolean;
 }
 
 export const TERMINAL_PHASES: ReadonlySet<ProgressPhase> = new Set<ProgressPhase>([
   'filled', 'canceled', 'rejected', 'timeout', 'error',
 ]);
 
+// Base interval between successful polls.
 const POLL_INTERVAL_MS = 1500;
-const POLL_TIMEOUT_MS  = 60_000;
+
+// Backoff schedule applied after consecutive transient `getOrderStatus`
+// errors (network blip, exchange 5xx, rate-limit). Reset on the next
+// successful response so a single hiccup doesn't permanently slow us down.
+// Sequence: 1.5s → 3s → 6s, capped at 6s thereafter so we keep retrying
+// without spamming the exchange.
+const ERROR_BACKOFF_MS = [1500, 3000, 6000] as const;
+
+// Per-source hard cap on how long the poller will keep asking before
+// surfacing a "Resume polling" affordance. Limit orders that sit on the
+// book legitimately take longer than market closes, so AutoPilot gets
+// more headroom by default. Mutate via `setPollTimeout` if needed.
+export const POLL_TIMEOUTS_MS: Record<ProgressSource, number> = {
+  close:     60_000,
+  manual:    60_000,
+  autopilot: 120_000,
+};
+
+export function setPollTimeout(source: ProgressSource, ms: number): void {
+  if (Number.isFinite(ms) && ms > 0) POLL_TIMEOUTS_MS[source] = ms;
+}
 
 // Cross-tab channel name. Bumping the suffix invalidates any in-flight
 // messages in older tabs after a deploy that changes the wire format.
@@ -116,6 +141,9 @@ export class OrderProgressStore {
   private state: Record<string, OrderProgress> = loadPersisted();
   private listeners = new Set<Listener>();
   private pollers   = new Map<string, ReturnType<typeof setTimeout>>();
+  // Remembers the last `poll()` opts per key so `resume()` can restart
+  // tracking after a timeout without the UI having to plumb creds back in.
+  private pollOpts  = new Map<string, PollOpts>();
 
   // Stable per-tab id used both to ignore our own broadcasts and as the
   // tiebreaker when two tabs race to claim leadership for the same key.
@@ -252,6 +280,7 @@ export class OrderProgressStore {
     label?:   string;
   }): void {
     this.cancelPoller(opts.key);
+    this.pollOpts.delete(opts.key);
     const now = Date.now();
     this.applyMutation(opts.key, {
       key:       opts.key,
@@ -266,6 +295,7 @@ export class OrderProgressStore {
       avgPrice:  0,
       startedAt: now,
       updatedAt: now,
+      resumable: false,
     }, true);
   }
 
@@ -275,13 +305,16 @@ export class OrderProgressStore {
     this.applyMutation(key, { ...prev, ...patch, updatedAt: Date.now() }, true);
   }
 
-  // Begin polling getOrderStatus until terminal or POLL_TIMEOUT_MS elapsed.
-  // Safe to re-call on the same key — any existing poller is cancelled first.
+  // Begin polling getOrderStatus until terminal or the per-source timeout
+  // elapses. Safe to re-call on the same key — any existing poller is
+  // cancelled first. Transient API errors apply an exponential backoff
+  // (1.5s → 3s → 6s) instead of hammering the exchange every 1.5s.
   // If another tab is already polling this key (its leadership heartbeat is
   // still fresh), this tab defers — it will receive state updates over the
   // BroadcastChannel without issuing duplicate `getOrderStatus` requests.
   poll(opts: PollOpts): void {
     this.localPollOpts.set(opts.key, opts);
+    this.pollOpts.set(opts.key, opts);
     this.cancelPoller(opts.key);
 
     const remote = this.leaders.get(opts.key);
@@ -303,7 +336,15 @@ export class OrderProgressStore {
   // `opts.key`. Heartbeats every tick so other tabs can detect active
   // polling and skip duplicating it.
   private startPolling(opts: PollOpts): void {
-    const startedAt = this.state[opts.key]?.startedAt ?? Date.now();
+    // Anchor the timeout budget to "now" so a resume() after a timeout
+    // gets a fresh window rather than inheriting the original startedAt.
+    const pollStartedAt = Date.now();
+    const cur = this.state[opts.key];
+    const source: ProgressSource = cur?.source ?? 'manual';
+    const timeoutMs = POLL_TIMEOUTS_MS[source];
+    let consecutiveErrors = 0;
+
+    if (cur?.resumable) this.update(opts.key, { resumable: false });
 
     // Heartbeat — broadcast that we're actively polling so any tab opened
     // mid-flight knows to defer instead of starting its own poller.
@@ -320,13 +361,15 @@ export class OrderProgressStore {
         return;
       }
 
-      const elapsed = Date.now() - startedAt;
-      if (elapsed > POLL_TIMEOUT_MS) {
-        const cur = this.state[opts.key];
-        if (cur && !TERMINAL_PHASES.has(cur.phase)) {
+      const elapsed = Date.now() - pollStartedAt;
+      if (elapsed > timeoutMs) {
+        const c = this.state[opts.key];
+        if (c && !TERMINAL_PHASES.has(c.phase)) {
+          const secs = Math.round(timeoutMs / 1000);
           this.update(opts.key, {
-            phase:   'timeout',
-            message: 'Stopped polling after 60s — check the order history for the final status.',
+            phase:     'timeout',
+            message:   `Stopped polling after ${secs}s — the order may still be live. Click Resume to keep checking, or open the order history.`,
+            resumable: true,
           });
         }
         this.stopHeartbeat(opts.key);
@@ -334,9 +377,11 @@ export class OrderProgressStore {
         this.send({ type: 'poll-release', from: this.tabId, key: opts.key });
         return;
       }
+      let nextDelay = POLL_INTERVAL_MS;
       try {
         const r = await apiClient.getOrderStatus(opts.exchange, opts.creds, opts.orderId, opts.symbol);
         if (r.ok && r.data.order) {
+          consecutiveErrors = 0;
           const o = r.data.order;
           const filled = Number(o.filledQty) || 0;
           const qty    = Number(o.quantity)  || 0;
@@ -358,15 +403,48 @@ export class OrderProgressStore {
           if (TERMINAL_PHASES.has(phase)) {
             this.stopHeartbeat(opts.key);
             this.pollers.delete(opts.key);
+            // Drop saved poll opts: filled / canceled / rejected rows are
+            // genuinely terminal and shouldn't be resumable. Only timeout
+            // (handled above) keeps its opts so resume() can re-poll.
+            this.pollOpts.delete(opts.key);
             this.send({ type: 'poll-release', from: this.tabId, key: opts.key });
             return;
           }
+        } else {
+          // API responded but not OK — treat as transient.
+          consecutiveErrors += 1;
+          nextDelay = ERROR_BACKOFF_MS[
+            Math.min(consecutiveErrors - 1, ERROR_BACKOFF_MS.length - 1)
+          ];
         }
-      } catch { /* swallow — try again next tick */ }
-      this.pollers.set(opts.key, setTimeout(tick, POLL_INTERVAL_MS));
+      } catch {
+        consecutiveErrors += 1;
+        nextDelay = ERROR_BACKOFF_MS[
+          Math.min(consecutiveErrors - 1, ERROR_BACKOFF_MS.length - 1)
+        ];
+      }
+      this.pollers.set(opts.key, setTimeout(tick, nextDelay));
     };
 
     this.pollers.set(opts.key, setTimeout(tick, POLL_INTERVAL_MS));
+  }
+
+  // Restart polling for a row that previously timed out, using the same
+  // opts as the original poll() call. Returns true if a poll was resumed.
+  // Guarded to only act on timed-out + resumable rows so callers can't
+  // accidentally restart a poller on top of a row that's already filled
+  // / canceled / rejected (and therefore had its pollOpts intentionally
+  // discarded by the lifecycle).
+  resume(key: string): boolean {
+    const opts = this.pollOpts.get(key);
+    if (!opts) return false;
+    const cur = this.state[key];
+    if (!cur) return false;
+    if (cur.phase !== 'timeout' || !cur.resumable) return false;
+    // Flip phase back to pending so the panel stops looking terminal.
+    this.update(key, { phase: 'pending', message: undefined, resumable: false });
+    this.poll(opts);
+    return true;
   }
 
   private stopHeartbeat(key: string): void {
@@ -382,6 +460,7 @@ export class OrderProgressStore {
 
   dismiss(key: string): void {
     this.cancelPoller(key);
+    this.pollOpts.delete(key);
     this.localPollOpts.delete(key);
     const wasLeader = this.leaders.get(key)?.tabId === this.tabId;
     this.leaders.delete(key);
@@ -413,6 +492,7 @@ export class OrderProgressStore {
         if (msg.value === null) {
           this.cancelPoller(msg.key);
           this.localPollOpts.delete(msg.key);
+          this.pollOpts.delete(msg.key);
           this.leaders.delete(msg.key);
         }
         break;
