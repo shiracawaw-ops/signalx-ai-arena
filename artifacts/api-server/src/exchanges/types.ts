@@ -35,6 +35,30 @@ export interface SymbolRules {
   minNotional:   number;  // minimum trade value in quote currency
   tickSize:      number;  // price precision
   maxLeverage:   number;
+  // Precision fields used to format quantity/price strings sent to the
+  // exchange so float-rounding noise (e.g. 5.6000000000001) never trips
+  // a LOT_SIZE / PRICE_FILTER rejection. Optional for backwards compat;
+  // when omitted, callers derive precision from stepSize/tickSize.
+  baseAssetPrecision?:  number;   // # decimal places allowed for quantity
+  quoteAssetPrecision?: number;   // # decimal places allowed for quote
+  pricePrecision?:      number;   // # decimal places allowed for price
+  status?:              string;   // exchange-side trading status (TRADING / BREAK / …)
+  isSpotTradingAllowed?: boolean; // whether spot is enabled for this pair on the exchange
+  filterSource?:        'live' | 'cached' | 'stub'; // provenance of these rules
+}
+
+// Result of a "test order" probe — validates filters & permissions WITHOUT
+// placing the order. Maps directly to Binance /api/v3/order/test and other
+// equivalent endpoints (or a synthetic local-only validation).
+export interface OrderTestResult {
+  ok:            boolean;
+  reason?:       string;          // e.g. "LOT_SIZE" / "MIN_NOTIONAL" / "PRICE_FILTER" / "PERCENT_PRICE"
+  detail?:       string;          // human-readable explanation
+  exchangeCode?: string | number; // exchange's own error code (e.g. -1013)
+  httpStatus?:   number;
+  rules?:        SymbolRules;     // the rules used for the check
+  echo?:         { symbol: string; side: string; quantity: string; price?: string };
+  raw?:          unknown;
 }
 
 export interface OrderRequest {
@@ -142,6 +166,12 @@ export interface ExchangeAdapter {
   getBalances(creds: ExchangeCredentials): Promise<Balance[]>;
   getSymbolRules(creds: ExchangeCredentials, symbol: string): Promise<SymbolRules>;
   placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult>;
+  /**
+   * Validate an order against the exchange's filters & permissions WITHOUT
+   * placing it.  Optional — adapters that don't implement it default to a
+   * synthetic local-only check in the API route.
+   */
+  testOrder?(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderTestResult>;
   cancelOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<boolean>;
   getOrderHistory(creds: ExchangeCredentials, symbol?: string, limit?: number): Promise<OrderResult[]>;
   getOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<OrderResult | null>;

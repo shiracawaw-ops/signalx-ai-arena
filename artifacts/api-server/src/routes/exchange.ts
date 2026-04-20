@@ -166,6 +166,42 @@ router.post('/exchange/:exchange/order/place', async (req, res) => {
   } catch (e) { serverError(res, ex, e); }
 });
 
+// POST /api/exchange/:exchange/order/test — validate an order WITHOUT placing it
+// Returns the same shape as OrderTestResult: ok, reason, detail, exchangeCode,
+// rules, echo (the formatted symbol/side/qty/price actually sent).  Adapters
+// that implement testOrder() use the exchange's native test endpoint
+// (e.g. Binance /api/v3/order/test); others fall back to a synthetic local
+// check that still applies the symbol filters.
+router.post('/exchange/:exchange/order/test', async (req, res) => {
+  const ex      = requireExchange(req, res); if (!ex) return;
+  const creds   = extractCreds(req);
+  if (!creds) return badRequest(res, 'Missing API credentials');
+  const order = req.body as OrderRequest;
+  if (!order?.symbol || !order?.side || !order?.type || order?.quantity === undefined) {
+    return badRequest(res, 'Missing required order fields (symbol, side, type, quantity)');
+  }
+  const testnet = isTestnetRequest(req);
+  const finalOrder: OrderRequest = { ...order, testnet };
+  logAction(ex, `testOrder(${order.side} ${order.quantity} ${order.symbol}${testnet ? ' [testnet]' : ''})`, creds.apiKey);
+  const adapter = getAdapter(ex)!;
+  try {
+    if (typeof adapter.testOrder === 'function') {
+      const result = await adapter.testOrder(creds, finalOrder);
+      return res.json({ ok: true, exchange: ex, test: result });
+    }
+    // Fallback synthetic check: fetch rules and validate locally.
+    const rules = await adapter.getSymbolRules(creds, order.symbol);
+    const qty   = Number(order.quantity);
+    const price = Number(order.price ?? 0);
+    if (qty <= 0)  return res.json({ ok: true, exchange: ex, test: { ok: false, reason: 'LOT_SIZE',  detail: `Quantity ${qty} is invalid.`, rules } });
+    if (qty < rules.minQty)
+      return res.json({ ok: true, exchange: ex, test: { ok: false, reason: 'LOT_SIZE',  detail: `Quantity ${qty} below minQty ${rules.minQty}.`, rules } });
+    if (price > 0 && rules.minNotional > 0 && qty * price < rules.minNotional)
+      return res.json({ ok: true, exchange: ex, test: { ok: false, reason: 'MIN_NOTIONAL', detail: `Notional $${(qty*price).toFixed(2)} below minNotional $${rules.minNotional}.`, rules } });
+    return res.json({ ok: true, exchange: ex, test: { ok: true, rules, detail: 'Local preflight passed (exchange-side native test not implemented for this adapter).' } });
+  } catch (e) { serverError(res, ex, e); }
+});
+
 // POST /api/exchange/:exchange/order/cancel — cancel an order
 router.post('/exchange/:exchange/order/cancel', async (req, res) => {
   const ex      = requireExchange(req, res); if (!ex) return;

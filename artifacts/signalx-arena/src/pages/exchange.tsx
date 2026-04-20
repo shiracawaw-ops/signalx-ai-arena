@@ -1,5 +1,5 @@
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { motion } from 'framer-motion';
 import {
@@ -377,6 +377,17 @@ export default function ExchangePage() {
   const [diagnostic, setDiagnostic] = useState<import('../lib/api-client.js').ExchangeDiagnostic | null>(null);
   const [selfTest,   setSelfTest]   = useState<import('../lib/api-client.js').SelfTestResult | null>(null);
   const [diagBusy,   setDiagBusy]   = useState(false);
+  // ── Order Self-Test state — probes a real order against exchange filters
+  // (and Binance /api/v3/order/test where supported) WITHOUT placing it.
+  const [orderTestSymbol, setOrderTestSymbol] = useState('BTC');
+  const [orderTestSide,   setOrderTestSide]   = useState<'buy' | 'sell'>('buy');
+  const [orderTestUSD,    setOrderTestUSD]    = useState<string>('15');
+  const [orderTestBusy,   setOrderTestBusy]   = useState(false);
+  const [orderTestResult, setOrderTestResult] = useState<{
+    ok: boolean; reason?: string; detail?: string; exchangeCode?: string | number;
+    rules?: Record<string, unknown>; echo?: { symbol: string; side: string; quantity: string; price?: string };
+    requestedUSD?: number; livePrice?: number;
+  } | null>(null);
   const [refreshing,   setRefreshing]  = useState(false);
   const [validating,   setValidating]  = useState(false);
   const [balError,     setBalError]    = useState<string | null>(null);
@@ -2256,6 +2267,171 @@ export default function ExchangePage() {
                   )}
                 </div>
               )}
+
+              {/* ── Order Self-Test ─────────────────────────────────────────
+                  Sends a NO-FILL order probe to the exchange (Binance
+                  /api/v3/order/test where supported) so the user can
+                  verify a specific symbol/side/amount BEFORE arming the
+                  bot.  Surfaces the exact filter that would have been
+                  tripped (LOT_SIZE, MIN_NOTIONAL, PRICE_FILTER, …),
+                  the formatted qty/price the server would actually send,
+                  and the symbol-rules source (live / cached / stub). */}
+              {isLive && (
+                <div className="p-3 rounded-xl bg-zinc-900/60 border border-zinc-700/80 text-xs space-y-2">
+                  <div>
+                    <p className="text-zinc-200 font-medium flex items-center gap-1.5">
+                      <Activity size={12} className="text-emerald-400" /> Order Self-Test (No-Fill)
+                    </p>
+                    <p className="text-[10px] text-zinc-500 mt-0.5">
+                      Probes a specific symbol/side/amount against {selectedEx.name}&apos;s filters and balance WITHOUT placing an order. Use this to debug -1013 / insufficient_balance before arming.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-12 gap-2 mt-2">
+                    <div className="col-span-4">
+                      <label className="text-[9px] text-zinc-500 uppercase tracking-wide">Symbol</label>
+                      <input
+                        type="text"
+                        className="w-full mt-0.5 px-2 py-1.5 rounded bg-zinc-800/60 border border-zinc-700/60 text-[11px] font-mono text-zinc-100 uppercase focus:outline-none focus:border-emerald-500/60"
+                        value={orderTestSymbol}
+                        onChange={e => setOrderTestSymbol(e.target.value.toUpperCase())}
+                        placeholder="BTC"
+                        disabled={orderTestBusy}
+                      />
+                    </div>
+                    <div className="col-span-3">
+                      <label className="text-[9px] text-zinc-500 uppercase tracking-wide">Side</label>
+                      <select
+                        className="w-full mt-0.5 px-2 py-1.5 rounded bg-zinc-800/60 border border-zinc-700/60 text-[11px] text-zinc-100 focus:outline-none focus:border-emerald-500/60"
+                        value={orderTestSide}
+                        onChange={e => setOrderTestSide(e.target.value as 'buy' | 'sell')}
+                        disabled={orderTestBusy}
+                      >
+                        <option value="buy">BUY</option>
+                        <option value="sell">SELL</option>
+                      </select>
+                    </div>
+                    <div className="col-span-3">
+                      <label className="text-[9px] text-zinc-500 uppercase tracking-wide">Amount (USD)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        className="w-full mt-0.5 px-2 py-1.5 rounded bg-zinc-800/60 border border-zinc-700/60 text-[11px] font-mono text-zinc-100 focus:outline-none focus:border-emerald-500/60"
+                        value={orderTestUSD}
+                        onChange={e => setOrderTestUSD(e.target.value)}
+                        disabled={orderTestBusy}
+                      />
+                    </div>
+                    <div className="col-span-2 flex items-end">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-[30px] w-full text-[10px] gap-1"
+                        disabled={orderTestBusy || !orderTestSymbol || Number(orderTestUSD) <= 0}
+                        onClick={async () => {
+                          const creds = credentialStore.get(selectedEx.id);
+                          if (!creds) {
+                            toast({ title: 'No API credentials', description: 'Reconnect on the Connection tab first.', variant: 'destructive' });
+                            return;
+                          }
+                          setOrderTestBusy(true);
+                          setOrderTestResult(null);
+                          try {
+                            const sym = orderTestSymbol.endsWith('USDT') ? orderTestSymbol : `${orderTestSymbol}USDT`;
+                            // Fetch live price first so we can compute quantity
+                            const priceRes = await apiClient.getPrice(selectedEx.id, sym);
+                            const livePrice = priceRes.ok ? Number((priceRes.data as { price: number }).price) : 0;
+                            if (livePrice <= 0) {
+                              setOrderTestResult({ ok: false, reason: 'PRICE_UNAVAILABLE', detail: `Could not fetch live price for ${sym}.` });
+                              return;
+                            }
+                            const qty = Number(orderTestUSD) / livePrice;
+                            const r = await apiClient.testOrder(selectedEx.id, creds, {
+                              symbol: sym, side: orderTestSide, type: 'market', quantity: qty,
+                              testnet: modeState.mode === 'testnet',
+                            });
+                            if (r.ok) {
+                              const t = r.data.test;
+                              setOrderTestResult({ ...t, requestedUSD: Number(orderTestUSD), livePrice });
+                              exchangeEvents.log('selftest', selectedEx.id, `Order self-test ${t.ok ? 'PASS' : 'FAIL'} — ${t.reason ?? 'ok'}: ${t.detail ?? ''}`, { apiKey: creds.apiKey });
+                              toast({
+                                title: t.ok ? 'Order would be accepted' : `Order would be rejected: ${t.reason}`,
+                                description: t.detail ?? '',
+                                variant: t.ok ? 'default' : 'destructive',
+                              });
+                            } else {
+                              const msg = (r as { error?: string }).error ?? 'Order self-test failed';
+                              setOrderTestResult({ ok: false, reason: 'NETWORK', detail: msg });
+                              toast({ title: 'Order self-test error', description: msg, variant: 'destructive' });
+                            }
+                          } finally {
+                            setOrderTestBusy(false);
+                          }
+                        }}
+                      >
+                        {orderTestBusy ? <RefreshCw size={10} className="animate-spin" /> : <Crosshair size={10} />}
+                        Test
+                      </Button>
+                    </div>
+                  </div>
+
+                  {orderTestResult && (
+                    <div className="mt-2 space-y-2">
+                      <div className={`px-2 py-2 rounded-lg text-[11px] font-medium ${orderTestResult.ok ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300' : 'bg-red-500/10 border border-red-500/30 text-red-300'}`}>
+                        {orderTestResult.ok ? '✓ Order would pass all filters & balance checks.' : `✗ ${orderTestResult.reason ?? 'REJECTED'} — ${orderTestResult.detail ?? ''}`}
+                        {orderTestResult.exchangeCode !== undefined && (
+                          <div className="text-[9px] font-mono opacity-70 mt-0.5">exchange code: {String(orderTestResult.exchangeCode)}</div>
+                        )}
+                      </div>
+                      {(orderTestResult.echo || orderTestResult.livePrice) && (
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 px-2 py-2 rounded-lg bg-zinc-800/40 border border-zinc-700/50">
+                          {orderTestResult.livePrice !== undefined && (<>
+                            <div className="text-[10px] text-zinc-500">Live price</div>
+                            <div className="text-[10px] font-mono text-zinc-200 text-right">${orderTestResult.livePrice.toLocaleString(undefined, { maximumFractionDigits: 8 })}</div>
+                          </>)}
+                          {orderTestResult.requestedUSD !== undefined && (<>
+                            <div className="text-[10px] text-zinc-500">Requested USD</div>
+                            <div className="text-[10px] font-mono text-zinc-200 text-right">${orderTestResult.requestedUSD}</div>
+                          </>)}
+                          {orderTestResult.echo?.symbol && (<>
+                            <div className="text-[10px] text-zinc-500">Symbol sent</div>
+                            <div className="text-[10px] font-mono text-zinc-200 text-right">{orderTestResult.echo.symbol}</div>
+                          </>)}
+                          {orderTestResult.echo?.side && (<>
+                            <div className="text-[10px] text-zinc-500">Side sent</div>
+                            <div className="text-[10px] font-mono text-zinc-200 text-right">{orderTestResult.echo.side}</div>
+                          </>)}
+                          {orderTestResult.echo?.quantity && (<>
+                            <div className="text-[10px] text-zinc-500">Quantity (precision-formatted)</div>
+                            <div className="text-[10px] font-mono text-zinc-200 text-right">{orderTestResult.echo.quantity}</div>
+                          </>)}
+                          {orderTestResult.echo?.price && (<>
+                            <div className="text-[10px] text-zinc-500">Price (tick-aligned)</div>
+                            <div className="text-[10px] font-mono text-zinc-200 text-right">{orderTestResult.echo.price}</div>
+                          </>)}
+                        </div>
+                      )}
+                      {orderTestResult.rules && (
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 px-2 py-2 rounded-lg bg-zinc-800/40 border border-zinc-700/50">
+                          <div className="text-[10px] text-zinc-500 col-span-2 font-medium">Symbol rules <span className="text-[9px] text-zinc-600">({String(orderTestResult.rules['filterSource'] ?? 'unknown')})</span></div>
+                          {(['minQty','maxQty','stepSize','minNotional','tickSize','status'] as const).map(k => (
+                            orderTestResult.rules![k] !== undefined && (
+                              <React.Fragment key={k}>
+                                <div className="text-[10px] text-zinc-500">{k}</div>
+                                <div className="text-[10px] font-mono text-zinc-200 text-right">{String(orderTestResult.rules![k])}</div>
+                              </React.Fragment>
+                            )
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {!orderTestResult && !orderTestBusy && (
+                    <p className="text-[10px] text-zinc-600 italic">Pick a symbol, side and USD amount, then click Test. No order will be placed.</p>
+                  )}
+                </div>
+              )}
+
               {[
                 { perm: 'Read Balance',   granted: true,           risk: 'Low'  },
                 { perm: 'Read Orders',    granted: true,           risk: 'Low'  },

@@ -5,12 +5,99 @@ import { getOutboundIp } from '../lib/outbound-ip.js';
 import { logger } from '../lib/logger.js';
 import type {
   ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission,
-  Balance, SymbolRules, OrderRequest, OrderResult,
+  Balance, SymbolRules, OrderRequest, OrderResult, OrderTestResult,
   ExchangeDiagnostic, SelfTestResult, DiagnosticStep,
 } from './types.js';
 
 const BASE         = 'https://api.binance.com';
 const TESTNET_BASE = 'https://testnet.binance.vision';
+
+// ── Precision-safe formatters ────────────────────────────────────────────────
+// Binance is unforgiving about LOT_SIZE / PRICE_FILTER: a quantity of
+// 5.6000000000001 (typical JS float noise after `Math.floor(x/step)*step`)
+// will trigger -1013 even though it visually equals 5.6.  We therefore
+// format every quantity & price as a STRING with the precision derived
+// from stepSize/tickSize before sending it.
+
+function decimalsFromStep(step: number): number {
+  if (!step || step <= 0) return 8;
+  // step = 0.001 → 3 decimals.  Use string parsing so we don't lose
+  // precision via Math.log10 rounding (e.g. 0.1 → 0.999999... log).
+  const s = step.toString();
+  if (s.includes('e-')) return parseInt(s.split('e-')[1] ?? '8', 10);
+  const dot = s.indexOf('.');
+  return dot === -1 ? 0 : (s.length - dot - 1);
+}
+
+function floorToStepStr(value: number, step: number): string {
+  if (!step || step <= 0) return value.toString();
+  const decimals = decimalsFromStep(step);
+  // Use integer arithmetic to dodge float drift.  Multiply then floor.
+  const k = Math.pow(10, decimals);
+  const stepK = Math.round(step * k);
+  const valueK = Math.floor(value * k);
+  const flooredK = Math.floor(valueK / stepK) * stepK;
+  return (flooredK / k).toFixed(decimals);
+}
+
+// Symbol rules cache — exchangeInfo is stable for hours.  TTL 5 min.
+const SYMBOL_RULES_TTL_MS = 5 * 60_000;
+const symbolRulesCache = new Map<string, { rules: SymbolRules; expires: number }>();
+
+// Per-symbol failure circuit breaker — after N consecutive REAL placeOrder
+// failures from the exchange we stop forwarding orders for that pair for a
+// cooldown window so we don't burn rate-limit headroom on broken inputs.
+interface SymbolFailureGate { fails: number; lastFailTs: number; cooldownUntil: number }
+const FAILURE_THRESHOLD   = 3;
+const FAILURE_COOLDOWN_MS = 60_000;
+const failureGate = new Map<string, SymbolFailureGate>();
+function noteFailure(symKey: string) {
+  const g = failureGate.get(symKey) ?? { fails: 0, lastFailTs: 0, cooldownUntil: 0 };
+  g.fails++; g.lastFailTs = Date.now();
+  if (g.fails >= FAILURE_THRESHOLD) g.cooldownUntil = Date.now() + FAILURE_COOLDOWN_MS;
+  failureGate.set(symKey, g);
+}
+function noteSuccess(symKey: string) { failureGate.delete(symKey); }
+function gateBlocked(symKey: string): { blocked: boolean; remainingMs: number } {
+  const g = failureGate.get(symKey);
+  if (!g || g.cooldownUntil === 0) return { blocked: false, remainingMs: 0 };
+  const remaining = g.cooldownUntil - Date.now();
+  if (remaining <= 0) { failureGate.delete(symKey); return { blocked: false, remainingMs: 0 }; }
+  return { blocked: true, remainingMs: remaining };
+}
+
+// Map Binance -1013 / generic filter errors to a human-readable filter name.
+function classifyOrderRejection(msg: string | undefined): { reason: string; detail: string } {
+  const m = String(msg ?? '').toUpperCase();
+  if (m.includes('LOT_SIZE') || m.includes('LOT SIZE')) {
+    return { reason: 'LOT_SIZE', detail: 'Quantity is below the symbol minimum, above the maximum, or not a multiple of the step size.' };
+  }
+  if (m.includes('MIN_NOTIONAL') || m.includes('NOTIONAL')) {
+    return { reason: 'MIN_NOTIONAL', detail: 'Order value (price × quantity) is below the symbol minimum notional.' };
+  }
+  if (m.includes('PRICE_FILTER')) {
+    return { reason: 'PRICE_FILTER', detail: 'Price is below tick / above max / not aligned to tick size.' };
+  }
+  if (m.includes('PERCENT_PRICE')) {
+    return { reason: 'PERCENT_PRICE', detail: 'Limit price is too far from the current market price.' };
+  }
+  if (m.includes('MARKET_LOT_SIZE')) {
+    return { reason: 'MARKET_LOT_SIZE', detail: 'Market-order quantity is below min / above max / not aligned to market step.' };
+  }
+  if (m.includes('INSUFFICIENT BALANCE') || m.includes('-2010') || m.includes('-2019')) {
+    return { reason: 'INSUFFICIENT_BALANCE', detail: 'Free balance on the exchange is not enough for this order (after fees).' };
+  }
+  if (m.includes('SYMBOL') && m.includes('NOT')) {
+    return { reason: 'SYMBOL_INVALID', detail: 'Symbol is not tradable on this account / market.' };
+  }
+  if (m.includes('-2015') || m.includes('INVALID API') || m.includes('IP, KEY OR PERMISSIONS')) {
+    return { reason: 'IP_OR_PERMISSION', detail: 'API key rejected — IP whitelist mismatch, expired key, or missing trading permission.' };
+  }
+  if (m.includes('-1021') || m.includes('TIMESTAMP')) {
+    return { reason: 'TIMESTAMP_DRIFT', detail: 'Server clock is out of sync with Binance.' };
+  }
+  return { reason: 'EXCHANGE_REJECTED', detail: msg ?? 'Order rejected by exchange.' };
+}
 
 function sign(secret: string, query: string): string {
   return hmacSHA256(secret, query);
@@ -375,52 +462,177 @@ export class BinanceAdapter implements ExchangeAdapter {
   async getSymbolRules(creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {
     const base = creds.testnet ? TESTNET_BASE : BASE;
     const sym = this.normalizeSymbol(symbol);
+    const cacheKey = `${creds.testnet ? 'TN' : 'PRD'}:${sym}`;
+
+    // Cache hit?
+    const cached = symbolRulesCache.get(cacheKey);
+    if (cached && cached.expires > Date.now()) {
+      return { ...cached.rules, filterSource: 'cached' };
+    }
+
     const r = await safeFetch(`${base}/api/v3/exchangeInfo?symbol=${sym}`, {}, 'binance');
-    if (!r.ok) return stubSymbolRules(sym);
+    if (!r.ok) {
+      logger.warn({ exchange: 'binance', sym, err: r.error?.message }, '[binance.rules] exchangeInfo fetch failed; using stub');
+      return { ...stubSymbolRules(sym), filterSource: 'stub' };
+    }
     const d = r.data as Record<string, unknown>;
     const symbols = (d['symbols'] as Array<Record<string, unknown>>) ?? [];
     const info = symbols.find(s => s['symbol'] === sym);
-    if (!info) return stubSymbolRules(sym);
+    if (!info) {
+      logger.warn({ exchange: 'binance', sym }, '[binance.rules] symbol not found in exchangeInfo; using stub');
+      return { ...stubSymbolRules(sym), filterSource: 'stub' };
+    }
     const filters = (info['filters'] as Array<Record<string, string>>) ?? [];
     const lotFilter  = filters.find(f => f['filterType'] === 'LOT_SIZE') ?? {};
-    const notional   = filters.find(f => f['filterType'] === 'MIN_NOTIONAL' || f['filterType'] === 'NOTIONAL') ?? {};
+    const notional   = filters.find(f => f['filterType'] === 'NOTIONAL' || f['filterType'] === 'MIN_NOTIONAL') ?? {};
     const priceFilter = filters.find(f => f['filterType'] === 'PRICE_FILTER') ?? {};
-    return {
+
+    const stepSize  = parseFloat(String(lotFilter['stepSize'] ?? '0.00001'));
+    const tickSize  = parseFloat(String(priceFilter['tickSize'] ?? '0.01'));
+    const rules: SymbolRules = {
       symbol:        sym,
       baseCurrency:  String(info['baseAsset'] ?? ''),
       quoteCurrency: String(info['quoteAsset'] ?? ''),
       minQty:        parseFloat(String(lotFilter['minQty'] ?? '0.00001')),
       maxQty:        parseFloat(String(lotFilter['maxQty'] ?? '9000000')),
-      stepSize:      parseFloat(String(lotFilter['stepSize'] ?? '0.00001')),
-      minNotional:   parseFloat(String(notional['minNotional'] ?? notional['notional'] ?? '1')),
-      tickSize:      parseFloat(String(priceFilter['tickSize'] ?? '0.01')),
+      stepSize,
+      minNotional:   parseFloat(String(notional['minNotional'] ?? notional['notional'] ?? '5')),
+      tickSize,
       maxLeverage:   1,
+      baseAssetPrecision:   typeof info['baseAssetPrecision']  === 'number' ? info['baseAssetPrecision']  as number : decimalsFromStep(stepSize),
+      quoteAssetPrecision:  typeof info['quoteAssetPrecision'] === 'number' ? info['quoteAssetPrecision'] as number : decimalsFromStep(tickSize),
+      pricePrecision:       decimalsFromStep(tickSize),
+      status:               String(info['status'] ?? 'TRADING'),
+      isSpotTradingAllowed: info['isSpotTradingAllowed'] !== false,
+      filterSource:         'live',
     };
+    symbolRulesCache.set(cacheKey, { rules, expires: Date.now() + SYMBOL_RULES_TTL_MS });
+    return rules;
   }
 
-  async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
-    const base = order.testnet ? TESTNET_BASE : BASE;
-    const sym = this.normalizeSymbol(order.symbol);
+  /**
+   * Build the params for a Binance /api/v3/order POST with quantity and
+   * (optional) price formatted as STRINGS at the exact precision required
+   * by the symbol's filters.  Pure / no I/O so the same logic powers both
+   * placeOrder and the testOrder probe.
+   */
+  private async buildOrderParams(
+    creds: ExchangeCredentials,
+    order: OrderRequest,
+  ): Promise<{ params: Record<string, string | number>; rules: SymbolRules; qtyStr: string; priceStr?: string }> {
+    const sym   = this.normalizeSymbol(order.symbol);
+    const rules = await this.getSymbolRules(creds, sym);
+    const qtyStr = floorToStepStr(order.quantity, rules.stepSize);
     const params: Record<string, string | number> = {
       symbol:    sym,
       side:      order.side.toUpperCase(),
       type:      order.type.toUpperCase(),
-      quantity:  order.quantity,
+      quantity:  qtyStr,
       timestamp: Date.now(),
     };
+    let priceStr: string | undefined;
     if (order.type === 'limit' && order.price) {
+      priceStr = floorToStepStr(order.price, rules.tickSize);
       params['timeInForce'] = 'GTC';
-      params['price']       = order.price;
+      params['price']       = priceStr;
     }
     if (order.clientId) params['newClientOrderId'] = order.clientId;
+    return { params, rules, qtyStr, priceStr };
+  }
+
+  async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
+    const base   = order.testnet ? TESTNET_BASE : BASE;
+    const symKey = `${order.testnet ? 'TN' : 'PRD'}:${this.normalizeSymbol(order.symbol)}`;
+
+    // Circuit breaker — block while a per-symbol cooldown is active.
+    const gate = gateBlocked(symKey);
+    if (gate.blocked) {
+      throw new Error(
+        `EXCHANGE_REJECTED: ${symKey} is in cooldown after ${FAILURE_THRESHOLD} consecutive failures (${Math.ceil(gate.remainingMs/1000)}s remaining)`,
+      );
+    }
+
+    const { params, rules, qtyStr, priceStr } = await this.buildOrderParams(creds, order);
+
+    // Strict server-side preflight — refuse to even sign a request that we
+    // can statically prove will be rejected by Binance filters.  This stops
+    // -1013 storms before they happen.
+    const qtyN     = parseFloat(qtyStr);
+    const priceN   = priceStr ? parseFloat(priceStr) : order.price ?? 0;
+    if (qtyN <= 0)                              throw new Error(`PREFLIGHT_LOT_SIZE: quantity rounds to 0 at stepSize ${rules.stepSize}`);
+    if (qtyN < rules.minQty)                    throw new Error(`PREFLIGHT_LOT_SIZE: quantity ${qtyN} < minQty ${rules.minQty} for ${rules.symbol}`);
+    if (rules.maxQty > 0 && qtyN > rules.maxQty) throw new Error(`PREFLIGHT_LOT_SIZE: quantity ${qtyN} > maxQty ${rules.maxQty} for ${rules.symbol}`);
+    if (priceN > 0 && rules.minNotional > 0 && qtyN * priceN < rules.minNotional) {
+      throw new Error(`PREFLIGHT_MIN_NOTIONAL: notional $${(qtyN*priceN).toFixed(4)} < minNotional $${rules.minNotional} for ${rules.symbol}`);
+    }
+    if (rules.status && rules.status !== 'TRADING') {
+      throw new Error(`PREFLIGHT_SYMBOL_STATUS: ${rules.symbol} status=${rules.status} (not TRADING)`);
+    }
 
     const q = signedQs(params, creds.secretKey);
     const r = await safeFetch(`${base}/api/v3/order?${q}`, {
       method: 'POST',
       headers: authHeaders(creds.apiKey),
     }, 'binance');
-    if (!r.ok) throw new Error(`Binance order failed: ${r.error?.message}`);
+    if (!r.ok) {
+      const cls = classifyOrderRejection(r.error?.message);
+      noteFailure(symKey);
+      logger.warn({
+        exchange: 'binance', sym: rules.symbol, qtyStr, priceStr,
+        rules: { stepSize: rules.stepSize, minQty: rules.minQty, minNotional: rules.minNotional, tickSize: rules.tickSize, source: rules.filterSource },
+        err: r.error?.message, reason: cls.reason,
+      }, '[binance.order] failed');
+      throw new Error(`${cls.reason}: ${cls.detail} (raw: ${r.error?.message ?? 'unknown'})`);
+    }
+    noteSuccess(symKey);
     return parseOrder(r.data as Record<string, unknown>);
+  }
+
+  /**
+   * Hits Binance /api/v3/order/test — same auth + filter validation as a
+   * real order, but the exchange returns `{}` on success WITHOUT executing.
+   * Returned OrderTestResult details exactly which filter (if any) tripped
+   * so the UI can show "LOT_SIZE: qty 5.6 is below minQty 6" instead of a
+   * generic -1013.
+   */
+  async testOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderTestResult> {
+    const base = order.testnet ? TESTNET_BASE : BASE;
+    let rules: SymbolRules; let qtyStr = ''; let priceStr: string | undefined;
+    try {
+      const built = await this.buildOrderParams(creds, order);
+      rules = built.rules; qtyStr = built.qtyStr; priceStr = built.priceStr;
+
+      const echo = { symbol: rules.symbol, side: order.side.toUpperCase(), quantity: qtyStr, price: priceStr };
+
+      // Local preflight first — no auth burned on obvious failures.
+      const qtyN = parseFloat(qtyStr);
+      const priceN = priceStr ? parseFloat(priceStr) : order.price ?? 0;
+      if (qtyN <= 0)
+        return { ok: false, reason: 'LOT_SIZE', detail: `Quantity rounds to 0 at stepSize ${rules.stepSize}.`, rules, echo };
+      if (qtyN < rules.minQty)
+        return { ok: false, reason: 'LOT_SIZE', detail: `Quantity ${qtyN} is below minQty ${rules.minQty}.`, rules, echo };
+      if (rules.maxQty > 0 && qtyN > rules.maxQty)
+        return { ok: false, reason: 'LOT_SIZE', detail: `Quantity ${qtyN} is above maxQty ${rules.maxQty}.`, rules, echo };
+      if (priceN > 0 && rules.minNotional > 0 && qtyN * priceN < rules.minNotional)
+        return { ok: false, reason: 'MIN_NOTIONAL', detail: `Notional $${(qtyN*priceN).toFixed(4)} is below minNotional $${rules.minNotional}.`, rules, echo };
+      if (rules.status && rules.status !== 'TRADING')
+        return { ok: false, reason: 'SYMBOL_STATUS', detail: `Symbol status=${rules.status} (not TRADING).`, rules, echo };
+
+      const q = signedQs(built.params, creds.secretKey);
+      const r = await safeFetch(`${base}/api/v3/order/test?${q}`, {
+        method: 'POST',
+        headers: authHeaders(creds.apiKey),
+      }, 'binance');
+      if (!r.ok) {
+        const cls = classifyOrderRejection(r.error?.message);
+        return { ok: false, reason: cls.reason, detail: cls.detail, exchangeCode: r.error?.code, httpStatus: r.status, rules, echo, raw: r.error };
+      }
+      return { ok: true, rules, echo, raw: r.data };
+    } catch (e) {
+      const msg = (e as Error)?.message ?? 'Unknown error';
+      const cls = classifyOrderRejection(msg);
+      return { ok: false, reason: cls.reason, detail: cls.detail, rules: rules!, echo: { symbol: this.normalizeSymbol(order.symbol), side: order.side.toUpperCase(), quantity: qtyStr, price: priceStr } };
+    }
   }
 
   async getPrice(symbol: string): Promise<number> {

@@ -43,6 +43,32 @@ let dailyResetDate           = new Date().toDateString();
 let lastTradeTs              = 0;
 let openPositionCount        = 0;
 
+// ── Per-symbol failure circuit breaker (frontend) ─────────────────────────────
+// After N consecutive REAL failures for the same exchange:symbol pair we put
+// it into a cooldown so retry storms don't burn rate-limit and don't keep
+// hitting Binance with the same broken qty/notional.  Mirrors the backend
+// adapter-level breaker but lives one layer up so a UI-driven retry also
+// honours it.
+const FE_FAILURE_THRESHOLD   = 3;
+const FE_FAILURE_COOLDOWN_MS = 60_000;
+interface FeGate { fails: number; cooldownUntil: number }
+const feGates = new Map<string, FeGate>();
+function feGateKey(exchange: string, symbol: string, mode: string) { return `${mode}:${exchange}:${symbol}`; }
+function feGateBlocked(key: string): { blocked: boolean; remainingMs: number } {
+  const g = feGates.get(key);
+  if (!g || g.cooldownUntil === 0) return { blocked: false, remainingMs: 0 };
+  const remaining = g.cooldownUntil - Date.now();
+  if (remaining <= 0) { feGates.delete(key); return { blocked: false, remainingMs: 0 }; }
+  return { blocked: true, remainingMs: remaining };
+}
+function feNoteFailure(key: string) {
+  const g = feGates.get(key) ?? { fails: 0, cooldownUntil: 0 };
+  g.fails++;
+  if (g.fails >= FE_FAILURE_THRESHOLD) g.cooldownUntil = Date.now() + FE_FAILURE_COOLDOWN_MS;
+  feGates.set(key, g);
+}
+function feNoteSuccess(key: string) { feGates.delete(key); }
+
 // Per-session credential injection (called from exchange.tsx after connect)
 export function setCredentials(creds: ExchangeCredentials | null) {
   credentials = creds;
@@ -214,6 +240,14 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     return reject(signal, exchange, mode, REJECT.EMERGENCY_STOP, 'Emergency stop is active.');
   }
 
+  // 6b. Per-symbol cooldown (frontend circuit breaker)
+  const gateKey = feGateKey(exchange, signal.symbol, mode);
+  const gate    = feGateBlocked(gateKey);
+  if (gate.blocked) {
+    return reject(signal, exchange, mode, REJECT.EXCHANGE_REJECTED,
+      `Cooldown active for ${exchange}:${signal.symbol} after ${FE_FAILURE_THRESHOLD} consecutive failures (${Math.ceil(gate.remainingMs/1000)}s remaining).`);
+  }
+
   // 7. Fetch symbol rules from backend
   let symbolRules: RiskSymbolRules;
   try {
@@ -221,20 +255,28 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     if (rulesRes.ok) {
       symbolRules = (rulesRes.data as { rules: RiskSymbolRules }).rules;
     } else {
-      symbolRules = { symbol: signal.symbol, minQty: 0.00001, maxQty: 9_000_000, stepSize: 0.00001, minNotional: 1, tickSize: 0.01 };
+      symbolRules = { symbol: signal.symbol, minQty: 0.00001, maxQty: 9_000_000, stepSize: 0.00001, minNotional: 1, tickSize: 0.01, filterSource: 'stub' };
     }
   } catch {
-    symbolRules = { symbol: signal.symbol, minQty: 0.00001, maxQty: 9_000_000, stepSize: 0.00001, minNotional: 1, tickSize: 0.01 };
+    symbolRules = { symbol: signal.symbol, minQty: 0.00001, maxQty: 9_000_000, stepSize: 0.00001, minNotional: 1, tickSize: 0.01, filterSource: 'stub' };
   }
 
-  // 8. Fetch available balance
-  let availableUSD = 0;
+  // 8. Fetch available balance — side-aware (BUY needs quote, SELL needs base)
+  let availableQuote = 0;
+  let availableBase  = 0;
   try {
     const balRes = await apiClient.getBalances(exchange, credentials);
     if (balRes.ok) {
       const balances = (balRes.data as { balances: Array<{ asset: string; available: number }> }).balances;
-      const usd = balances.find(b => b.asset === 'USDT' || b.asset === 'USD' || b.asset === 'USDC');
-      availableUSD = usd?.available ?? 0;
+      const quoteAsset = symbolRules.quoteCurrency ?? 'USDT';
+      const baseAsset  = symbolRules.baseCurrency  ?? signal.symbol.replace(/USDT$|USDC$|USD$/i, '');
+      const q = balances.find(b => b.asset === quoteAsset)
+             ?? balances.find(b => b.asset === 'USDT')
+             ?? balances.find(b => b.asset === 'USDC')
+             ?? balances.find(b => b.asset === 'USD');
+      const bs = balances.find(b => b.asset.toUpperCase() === baseAsset.toUpperCase());
+      availableQuote = q?.available  ?? 0;
+      availableBase  = bs?.available ?? 0;
     }
   } catch { /* proceed with 0 — risk manager will catch */ }
 
@@ -245,7 +287,8 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     side:             signal.side,
     price:            signal.price,
     amountUSD:        config.tradeAmountUSD,
-    availableUSD,
+    availableQuote,
+    availableBase,
     openPositions:    openPositionCount,
     dailyTradeCount,
     lastTradeTs,
@@ -256,7 +299,30 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
   });
 
   if (!risk.ok) {
-    return reject(signal, exchange, mode, risk.reason!, risk.detail ?? risk.reason!);
+    // Persist diagnostic snapshot so the operator can see exactly which
+    // numbers tripped risk — without re-running the math from scratch.
+    const entry = executionLog.add({
+      mode, exchange,
+      symbol:    signal.symbol,
+      side:      signal.side,
+      orderType: config.orderType,
+      quantity:  risk.finalQty ?? 0,
+      price:     signal.price,
+      amountUSD: config.tradeAmountUSD,
+      status:    'rejected',
+      rejectReason:    risk.reason,
+      rejectionDetail: risk.detail,
+      signalId:        signal.id,
+      freeBalance:     risk.freeBalance,
+      freeAsset:       risk.freeAsset,
+      computedQty:     risk.computedQty,
+      finalQty:        risk.finalQty,
+      minNotional:     risk.minNotional,
+      stepSize:        risk.stepSize,
+      rulesSource:     risk.filterSource,
+    });
+    console.warn(`[engine][${mode}] REJECTED — ${risk.reason}: ${risk.detail}`);
+    return { ok: false, logId: entry.id, rejectReason: risk.reason, detail: risk.detail };
   }
 
   // ── All checks passed — place the order ───────────────────────────────────
@@ -274,6 +340,13 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     amountUSD: config.tradeAmountUSD,
     status:    'executing',
     signalId:  signal.id,
+    freeBalance: risk.freeBalance,
+    freeAsset:   risk.freeAsset,
+    computedQty: risk.computedQty,
+    finalQty:    risk.finalQty,
+    minNotional: risk.minNotional,
+    stepSize:    risk.stepSize,
+    rulesSource: risk.filterSource,
   });
 
   const t0 = Date.now();
@@ -306,14 +379,17 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     const latency = Date.now() - t0;
 
     if (!orderRes.ok) {
+      const errMsg = (orderRes as { error: string }).error ?? 'Unknown error';
       executionLog.update(pending.id, {
         status:           'failed',
-        errorMsg:         (orderRes as { error: string }).error,
+        errorMsg:         errMsg,
+        rejectionDetail:  errMsg,
         latencyMs:        latency,
         exchangeResponse: orderRes,
       });
-      console.error(`[engine][${mode}] Order failed: ${(orderRes as { error: string }).error}`);
-      return { ok: false, logId: pending.id, rejectReason: REJECT.EXCHANGE_REJECTED, detail: (orderRes as { error: string }).error };
+      feNoteFailure(gateKey);
+      console.error(`[engine][${mode}] Order failed: ${errMsg}`);
+      return { ok: false, logId: pending.id, rejectReason: REJECT.EXCHANGE_REJECTED, detail: errMsg };
     }
 
     const data    = (orderRes as { data: { order: { orderId: string } } }).data;
@@ -329,6 +405,7 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     dailyTradeCount++;
     lastTradeTs = Date.now();
     recentSignals = [signal.id, ...recentSignals].slice(0, 100);
+    feNoteSuccess(gateKey);
 
     console.log(`[engine][${mode}] Order placed: ${exchange} ${signal.side} ${risk.quantity} ${signal.symbol} @ ${risk.price} → orderId=${orderId} (${latency}ms)`);
     return { ok: true, orderId, logId: pending.id };
@@ -336,7 +413,8 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
   } catch (e) {
     const latency = Date.now() - t0;
     const msg     = (e as Error)?.message ?? 'Unknown error';
-    executionLog.update(pending.id, { status: 'failed', errorMsg: msg, latencyMs: latency });
+    executionLog.update(pending.id, { status: 'failed', errorMsg: msg, rejectionDetail: msg, latencyMs: latency });
+    feNoteFailure(gateKey);
     return { ok: false, logId: pending.id, rejectReason: REJECT.EXCHANGE_UNAVAILABLE, detail: msg };
   }
 }

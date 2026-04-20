@@ -12,6 +12,13 @@ export interface SymbolRules {
   stepSize:      number;
   minNotional:   number;
   tickSize:      number;
+  baseCurrency?:  string;          // e.g. "ADA" for ADAUSDT
+  quoteCurrency?: string;          // e.g. "USDT" for ADAUSDT
+  baseAssetPrecision?:  number;
+  pricePrecision?:      number;
+  status?:              string;     // "TRADING" / "BREAK" / …
+  isSpotTradingAllowed?: boolean;
+  filterSource?:        'live' | 'cached' | 'stub';
 }
 
 export interface RiskInput {
@@ -20,7 +27,13 @@ export interface RiskInput {
   side:         'buy' | 'sell';
   price:        number;        // current market price
   amountUSD:    number;        // requested trade value in USD
-  availableUSD: number;        // available balance in quote currency
+  // Side-aware free balances. Engine MUST populate both whenever known so
+  // the manager can enforce SELL against the base asset (e.g. ADA holdings)
+  // and BUY against the quote asset (USDT). availableUSD remains for
+  // backwards compatibility — defaults to availableQuote when unset.
+  availableQuote?: number;     // free quote (USDT/USDC/USD) available
+  availableBase?:  number;     // free base asset available (used for SELL)
+  availableUSD?:   number;     // legacy alias for availableQuote
   openPositions: number;       // current number of open positions
   dailyTradeCount: number;     // trades placed today
   lastTradeTs:  number;        // timestamp of last trade (ms)
@@ -36,6 +49,17 @@ export interface RiskResult {
   detail?:   string;
   quantity?: number;  // computed quantity if ok
   price?:    number;  // rounded price if ok
+  // Diagnostic fields written to the execution log so the operator can
+  // see EXACTLY why an order passed or failed risk without having to
+  // re-derive the math from the toast text.
+  computedQty?:   number;     // raw qty before stepSize rounding
+  finalQty?:      number;     // final qty after stepSize rounding
+  notional?:      number;     // qty × price
+  freeBalance?:   number;     // balance considered (base for SELL, quote for BUY)
+  freeAsset?:     string;     // asset of `freeBalance`
+  stepSize?:      number;
+  minNotional?:   number;
+  filterSource?:  string;
 }
 
 /**
@@ -64,7 +88,12 @@ export function roundToTick(price: number, tick: number): number {
 }
 
 export function validateRisk(input: RiskInput): RiskResult {
-  const { config, symbolRules, price, amountUSD, availableUSD, openPositions, dailyTradeCount, lastTradeTs, signalId, recentSignals, symbol, side } = input;
+  const { config, symbolRules, price, amountUSD, openPositions, dailyTradeCount, lastTradeTs, signalId, recentSignals, symbol, side } = input;
+  // Side-aware balance resolution. Engine populates availableQuote (USDT)
+  // and availableBase (the base asset for the pair).  Falls back to legacy
+  // availableUSD when only one number is known.
+  const availableQuote = input.availableQuote ?? input.availableUSD ?? 0;
+  const availableBase  = input.availableBase  ?? 0;
 
   // Emergency stop
   if (config.emergencyStop) {
@@ -125,33 +154,74 @@ export function validateRisk(input: RiskInput): RiskResult {
   }
 
   // Compute raw quantity from USD amount
-  const rawQty = amountUSD / price;
+  const computedQty = amountUSD / price;
 
-  // Check step size
-  const quantity = roundToStep(rawQty, symbolRules.stepSize);
+  // Check step size — round DOWN to nearest valid step
+  const quantity = roundToStep(computedQty, symbolRules.stepSize);
+  const notional = quantity * price;
+  const baseAsset  = symbolRules.baseCurrency  ?? baseTicker(symbol);
+  const quoteAsset = symbolRules.quoteCurrency ?? 'USDT';
+
+  // Diagnostic snapshot included on every result so the UI can show the
+  // exact math behind a pass/reject — independent of which guard tripped.
+  const diag = {
+    computedQty, finalQty: quantity, notional,
+    stepSize: symbolRules.stepSize, minNotional: symbolRules.minNotional,
+    filterSource: symbolRules.filterSource,
+  };
 
   if (quantity <= 0) {
-    return { ok: false, reason: REJECT.INVALID_ORDER_SIZE, detail: `Computed quantity ${quantity} is invalid.` };
+    return { ok: false, reason: REJECT.INVALID_ORDER_SIZE,
+      detail: `Computed quantity ${computedQty.toPrecision(6)} rounded to ZERO at stepSize ${symbolRules.stepSize}. Increase trade amount.`,
+      ...diag, freeBalance: availableQuote, freeAsset: quoteAsset };
   }
 
   // Min / max quantity
   if (quantity < symbolRules.minQty) {
-    return { ok: false, reason: REJECT.INVALID_ORDER_SIZE, detail: `Quantity ${quantity} < min ${symbolRules.minQty} for ${symbol}.` };
+    return { ok: false, reason: REJECT.INVALID_ORDER_SIZE,
+      detail: `Quantity ${quantity} < minQty ${symbolRules.minQty} for ${symbol}. (Increase tradeAmountUSD or pick a higher-priced asset.)`,
+      ...diag };
   }
   if (symbolRules.maxQty > 0 && quantity > symbolRules.maxQty) {
-    return { ok: false, reason: REJECT.INVALID_ORDER_SIZE, detail: `Quantity ${quantity} > max ${symbolRules.maxQty} for ${symbol}.` };
+    return { ok: false, reason: REJECT.INVALID_ORDER_SIZE,
+      detail: `Quantity ${quantity} > maxQty ${symbolRules.maxQty} for ${symbol}.`,
+      ...diag };
   }
 
   // Min notional
-  const notional = quantity * price;
   if (symbolRules.minNotional > 0 && notional < symbolRules.minNotional) {
-    return { ok: false, reason: REJECT.BELOW_MIN_NOTIONAL, detail: `Order value $${notional.toFixed(2)} < min notional $${symbolRules.minNotional} for ${symbol}.` };
+    return { ok: false, reason: REJECT.BELOW_MIN_NOTIONAL,
+      detail: `Order value $${notional.toFixed(2)} < minNotional $${symbolRules.minNotional} for ${symbol}. Increase tradeAmountUSD to at least $${(symbolRules.minNotional * 1.05).toFixed(2)}.`,
+      ...diag };
   }
 
-  // Balance check — require 1.01× to account for fees
-  if (side === 'buy' && availableUSD < notional * 1.01) {
-    return { ok: false, reason: REJECT.INSUFFICIENT_BALANCE, detail: `Insufficient balance: need $${(notional * 1.01).toFixed(2)}, have $${availableUSD.toFixed(2)}.` };
+  // ── Balance check — side aware ────────────────────────────────────────────
+  // BUY:  need free QUOTE (USDT) for notional × 1.01 (fee buffer).
+  // SELL: need free BASE asset >= quantity (fees deducted from quote on sell).
+  if (side === 'buy') {
+    if (availableQuote < notional * 1.01) {
+      return { ok: false, reason: REJECT.INSUFFICIENT_BALANCE,
+        detail: `Insufficient ${quoteAsset}: need $${(notional * 1.01).toFixed(2)} (incl. fees), have $${availableQuote.toFixed(2)}.`,
+        ...diag, freeBalance: availableQuote, freeAsset: quoteAsset };
+    }
+  } else {
+    // SELL — must own the base asset on the exchange.
+    if (availableBase <= 0) {
+      return { ok: false, reason: REJECT.INSUFFICIENT_BALANCE,
+        detail: `No ${baseAsset} balance to SELL on this exchange (free=${availableBase}). Buy ${baseAsset} first or transfer it to spot.`,
+        ...diag, freeBalance: availableBase, freeAsset: baseAsset };
+    }
+    if (availableBase < quantity) {
+      return { ok: false, reason: REJECT.INSUFFICIENT_BALANCE,
+        detail: `Insufficient ${baseAsset}: need ${quantity}, have ${availableBase}. Reduce tradeAmountUSD or top up.`,
+        ...diag, freeBalance: availableBase, freeAsset: baseAsset };
+    }
   }
 
-  return { ok: true, quantity, price: roundToTick(price, symbolRules.tickSize) };
+  return {
+    ok: true, quantity, price: roundToTick(price, symbolRules.tickSize),
+    ...diag,
+    freeBalance: side === 'buy' ? availableQuote : availableBase,
+    freeAsset:   side === 'buy' ? quoteAsset    : baseAsset,
+  };
 }

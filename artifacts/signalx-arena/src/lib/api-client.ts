@@ -291,6 +291,39 @@ export const apiClient = {
     });
   },
 
+  async testOrder(
+    exchange: string,
+    creds: ExchangeCredentials,
+    order: {
+      symbol:    string;
+      side:      'buy' | 'sell';
+      type:      'market' | 'limit';
+      quantity:  number;
+      price?:    number;
+      testnet?:  boolean;
+    },
+  ): Promise<ApiResult<{ test: {
+    ok:           boolean;
+    reason?:      string;
+    detail?:      string;
+    exchangeCode?: string | number;
+    httpStatus?:  number;
+    rules?:       Record<string, unknown>;
+    echo?:        { symbol: string; side: string; quantity: string; price?: string };
+    raw?:         unknown;
+  } }>> {
+    const { testnet, ...orderBody } = order;
+    console.log(
+      `[api-client] testOrder ${exchange} ${order.side} ${order.quantity} ${order.symbol}` +
+      ` key=${maskKey(creds.apiKey)}${testnet ? ' [TESTNET]' : ''}`,
+    );
+    return request(`${BACKEND}/exchange/${exchange}/order/test`, {
+      method:  'POST',
+      headers: credHeaders(creds, testnet ? { 'x-testnet': '1' } : {}),
+      body:    JSON.stringify(orderBody),
+    });
+  },
+
   async cancelOrder(
     exchange: string,
     creds: ExchangeCredentials,

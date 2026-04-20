@@ -23,6 +23,18 @@ export interface ExecutionEntry {
   exchangeResponse?: unknown;
   signalId?:    string;
   latencyMs?:   number;
+  // ── Diagnostic snapshot from risk manager / preflight ─────────────────────
+  // Populated whenever the engine touches a real / testnet order so the
+  // operator can see EXACTLY which number tripped a filter without having
+  // to dig through console logs.  Optional everywhere for backwards compat.
+  freeBalance?:    number;
+  freeAsset?:      string;
+  computedQty?:    number;
+  finalQty?:       number;
+  minNotional?:    number;
+  stepSize?:       number;
+  rejectionDetail?: string;
+  rulesSource?:    string;        // "live" | "cached" | "stub"
 }
 
 const STORAGE_KEY = 'sx_execution_log_v1';
