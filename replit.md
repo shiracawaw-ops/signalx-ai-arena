@@ -29,6 +29,23 @@ See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and pa
 ## Artifacts
 
 ### SignalX AI Arena (`artifacts/signalx-arena`)
+
+#### 2026-04-20 — UI unification (Task #54)
+- Removed parallel Binance-only key flow from profile.tsx; Settings + API Keys
+  tabs now mirror exchangeMode singleton + credentialStore (single source of
+  truth). User must manage keys on /exchange.
+- admin.tsx Platform Status + System Info no longer hardcode "Binance Mock";
+  display live `adapterNote` derived from exchangeMode + KNOWN_EXCHANGES.
+- /exchange "Trading Armed" toggle replaced with explicit "Start Real Trading"
+  / "Stop Real Trading" buttons; Start uses window.confirm before arming.
+- /wallet Overview tab now shows REAL FUNDS / TESTNET FUNDS card from
+  credentialStore.getCache(exchange).liveBalances when mode is real/testnet.
+- signup.tsx feature list: "API connection ready (12 exchanges)" instead of
+  Binance-only.
+- user-store.ts binance* settings fields left for backward compat (unused).
+- NOT done: real-balance allocation engine, capital-protection layer beyond
+  risk-manager, backend credential storage, bot coordination, EXE rebuild.
+
 - **Type**: React + Vite web app (multi-page with AppShell sidebar)
 - **Preview path**: `/`
 - **Purpose**: Premium local-first virtual trading simulator with AI bots

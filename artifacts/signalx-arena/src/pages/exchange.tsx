@@ -1323,7 +1323,7 @@ export default function ExchangePage() {
                 { label: 'API Validated',      ok: !!ready['apiValidated'],    note: ready['apiValidated'] ? '' : 'Connect with real API keys' },
                 { label: 'Balance Fetched',    ok: !!ready['balanceFetched'],  note: ready['balanceFetched'] ? '' : 'Fetch balances after connecting' },
                 { label: 'Trade Permission',   ok: !!ready['tradePermission'], note: ready['tradePermission'] ? '' : 'API key must have trade permission' },
-                { label: 'Trading Armed',      ok: !!ready['tradingArmed'],    note: ready['tradingArmed'] ? '' : 'Toggle arm below' },
+                { label: 'Trading Armed',      ok: !!ready['tradingArmed'],    note: ready['tradingArmed'] ? '' : 'Press Start Real Trading below' },
               ].map(r => (
                 <div key={r.label} className="flex items-center gap-3 py-1.5 border-b border-zinc-800/30 last:border-0">
                   <StatusDot ok={r.ok} />
@@ -1338,48 +1338,73 @@ export default function ExchangePage() {
             </CardContent>
           </Card>
 
-          {/* Arm / Disarm */}
-          <Card className="border-zinc-800/60">
-            <CardHeader className="py-3 px-4"><CardTitle className="text-sm">Trading Armed</CardTitle></CardHeader>
+          {/* Start / Stop Real Trading */}
+          <Card className={`border ${modeState.armed ? 'border-red-500/40 bg-red-500/5' : 'border-zinc-800/60'}`}>
+            <CardHeader className="py-3 px-4">
+              <CardTitle className="text-sm flex items-center gap-2">
+                {modeState.armed
+                  ? <><span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" /> Real Trading Active</>
+                  : <>Start / Stop Real Trading</>}
+              </CardTitle>
+            </CardHeader>
             <CardContent className="p-4 space-y-3">
-              <div className={`flex items-center justify-between p-3 rounded-xl border ${modeState.armed ? 'border-red-500/30 bg-red-500/5' : 'border-zinc-700 bg-zinc-800/20'}`}>
-                <div>
-                  <p className={`text-sm font-semibold ${modeState.armed ? 'text-red-400' : 'text-zinc-400'}`}>
-                    {modeState.armed ? '🔴 ARMED — Live orders will be placed' : '⚪ DISARMED — No real orders will be placed'}
-                  </p>
-                  <p className="text-[10px] text-zinc-600 mt-0.5">Requires: Real mode + network up + validated API + balance fetched + trade permission</p>
-                </div>
-                <Switch
-                  checked={modeState.armed}
-                  disabled={!exMode.canArm() && !modeState.armed}
-                  onCheckedChange={checked => {
-                    if (!checked) { exMode.disarm(); return; }
+              <div className={`p-3 rounded-xl border ${modeState.armed ? 'border-red-500/30 bg-red-500/10' : 'border-zinc-700 bg-zinc-800/20'}`}>
+                <p className={`text-sm font-semibold ${modeState.armed ? 'text-red-400' : 'text-zinc-300'}`}>
+                  {modeState.armed
+                    ? `🔴 LIVE — bot signals are placing real orders on ${selectedEx.name}`
+                    : '⚪ Disarmed — bot signals will NOT place real orders'}
+                </p>
+                <p className="text-[10px] text-zinc-500 mt-1">
+                  Requires: Real mode + network up + validated API + balance fetched + trade permission.
+                </p>
+              </div>
+
+              {!modeState.armed ? (
+                <Button
+                  className="w-full bg-red-600 hover:bg-red-700 text-white font-bold"
+                  disabled={!exMode.canArm()}
+                  onClick={() => {
                     if (modeState.mode !== 'real') {
-                      toast({ title: 'Cannot arm', description: 'Switch to Real mode first.', variant: 'destructive' }); return;
+                      toast({ title: 'Cannot start', description: 'Switch to Real mode first.', variant: 'destructive' }); return;
                     }
-                    if (!modeState.networkUp) {
-                      toast({ title: 'Cannot arm', description: 'Connection is not healthy. Reconnect first.', variant: 'destructive' }); return;
-                    }
-                    if (!modeState.apiValidated) {
-                      toast({ title: 'Cannot arm', description: 'Validate your API key first.', variant: 'destructive' }); return;
-                    }
-                    if (!modeState.balanceFetched) {
-                      toast({ title: 'Cannot arm', description: 'Fetch your live balance first.', variant: 'destructive' }); return;
-                    }
-                    if (!modeState.permissions.trade) {
-                      toast({ title: 'Cannot arm', description: 'API key does not have trade permission.', variant: 'destructive' }); return;
-                    }
+                    if (!modeState.networkUp)        { toast({ title: 'Cannot start', description: 'Connection is not healthy.', variant: 'destructive' }); return; }
+                    if (!modeState.apiValidated)     { toast({ title: 'Cannot start', description: 'Validate your API key first.', variant: 'destructive' }); return; }
+                    if (!modeState.balanceFetched)   { toast({ title: 'Cannot start', description: 'Fetch your live balance first.', variant: 'destructive' }); return; }
+                    if (!modeState.permissions.trade){ toast({ title: 'Cannot start', description: 'API key has no trade permission.', variant: 'destructive' }); return; }
+
+                    const confirmed = window.confirm(
+                      `⚠ START REAL TRADING on ${selectedEx.name}?\n\n` +
+                      `Bot signals will place LIVE orders using your real funds.\n\n` +
+                      `Type OK to confirm. You can stop trading at any time.`
+                    );
+                    if (!confirmed) return;
+
                     if (!exMode.arm()) {
-                      toast({ title: 'Cannot arm', description: 'Readiness check failed. Open the Live Status tab to see what\u2019s missing.', variant: 'destructive' });
+                      toast({ title: 'Cannot start', description: 'Readiness check failed. See Live Status tab.', variant: 'destructive' });
+                    } else {
+                      toast({ title: '🔴 Real Trading Started', description: `Live on ${selectedEx.name}. Stop anytime from this page.` });
                     }
                   }}
-                  className={modeState.armed ? 'data-[state=checked]:bg-red-500' : ''}
-                />
-              </div>
+                >
+                  ▶ Start Real Trading
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  className="w-full border-red-500/50 text-red-400 hover:bg-red-500/10 font-bold"
+                  onClick={() => {
+                    exMode.disarm();
+                    toast({ title: '⚪ Real Trading Stopped', description: 'No further real orders will be placed.' });
+                  }}
+                >
+                  ■ Stop Real Trading
+                </Button>
+              )}
+
               <div className="space-y-1.5 text-[10px] text-zinc-600">
-                <p>• Arming only possible when all readiness checks pass</p>
-                <p>• Trading is disarmed automatically when you disconnect or reload</p>
-                <p>• Emergency stop in Trade Config overrides arm status</p>
+                <p>• Live trading is disarmed automatically when you disconnect or reload</p>
+                <p>• Emergency stop in Trade Config overrides this</p>
+                <p>• Open positions are NOT closed when stopping — close them manually if needed</p>
               </div>
             </CardContent>
           </Card>

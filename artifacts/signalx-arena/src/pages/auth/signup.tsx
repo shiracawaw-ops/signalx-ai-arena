@@ -14,7 +14,7 @@ const PLAN_FEATURES = [
   'Paper trading with fees & slippage',
   'Bot performance reports',
   'Risk engine & alerts',
-  'API connection ready (Binance)',
+  'API connection ready (12 exchanges)',
 ];
 
 export default function SignupPage() {

@@ -1,0 +1,373 @@
+Patch the existing SignalX AutoPilot / SignalX Arena project IN PLACE.
+
+Important:
+- Do NOT rebuild the project from scratch
+- Do NOT redesign the UI
+- Do NOT replace the app architecture unless absolutely necessary
+- Keep the current interface, layout, navigation, style, and app identity
+- Reuse the already existing exchange connection, existing key flow, and current components where possible
+- Only patch, fix, connect, secure, and unify the current system
+- No fake readiness states
+- No fake live-trading messages
+- If something is still not truly implemented, say so clearly
+
+Main goal:
+Fix the current app so it stops depending on Binance inside the admin system, stops asking for Binance keys when another exchange is already connected, uses the already connected active exchange as the source of truth, and when real trading is activated, the ENTIRE app switches from Demo/Paper/Testnet behavior into true Real Trading mode consistently.
+
+The patch must also:
+- add/fix a working Start Real Trading button
+- make all balances and wallet values come from the real connected account in live mode
+- make order execution use the correct live exchange endpoints
+- distribute real balance intelligently across bots
+- enforce strong capital protection and loss-prevention controls
+- improve security against credential leakage and common attack vectors
+- prepare the project for clean GitHub sync and low-cost GitHub automation
+
+Current problems to fix:
+1. Admin/API Keys still references Binance and/or Binance Testnet
+2. Settings and other screens still show Demo/Paper/Testnet logic in some places
+3. Other screens show Bybit validated / armed / ready, causing contradictory states
+4. The whole app does not switch fully from Demo to Real Trading mode
+5. The balance, execution state, permissions, logs, wallet, and trading mode are inconsistent across screens
+6. The system asks for Binance keys even though the active exchange connection and keys already exist elsewhere
+7. There is no trustworthy proof yet that real orders are truly submitted end-to-end to the selected live exchange
+8. Some credentials appear to be handled in UI/local-only ways that are not suitable for live trading
+9. The current state suggests mixed legacy paths: demo, testnet, Binance-only admin logic, and separate exchange readiness logic
+
+Required patch work:
+
+A) Remove Binance dependency from the admin system
+1. Remove all Binance-only text, labels, prompts, validation checks, conditions, and readiness blockers from:
+   - Admin
+   - API Keys
+   - Settings
+   - mode selection
+   - live-trading readiness
+   - diagnostics where applicable
+2. Stop asking for Binance API keys in admin when another exchange is already connected
+3. If an active exchange is already connected and validated, use that exchange as the source of truth
+4. If Bybit is the connected exchange, admin must reflect Bybit, not Binance
+5. Remove “Connect Binance API first” and all similar messages
+6. Remove Binance Testnet from controlling real-trading activation if Binance is not the selected exchange
+7. Keep Binance support only if Binance is explicitly selected as the active exchange
+
+B) Reuse the existing connected keys and exchange state
+1. Detect and reuse the already connected active exchange credentials/state instead of forcing a second API-key flow
+2. If the app already has a valid exchange connection, do not ask again for another set of keys in Admin
+3. Unify all readiness checks around the real active exchange only
+4. Make Admin/API Keys display the connected exchange correctly, using masked values/state only
+5. Do not create duplicate key systems
+6. Do not leave one flow for exchange pages and another separate flow for admin pages
+
+C) Single source of truth
+Create or repair one shared trading-state source for:
+- active exchange
+- trading mode: demo / paper / testnet / live
+- exchange connectivity
+- backend credentials loaded
+- API validation
+- balance source
+- permissions
+- trading armed state
+- real-order submission enabled state
+- emergency stop state
+- allocation engine readiness
+- risk engine readiness
+
+Then make all these screens/modules use that exact shared source:
+- Admin
+- API Keys
+- Settings
+- AutoPilot
+- Exchange
+- Live Status
+- Wallet
+- Reports
+- Execution Log
+- Diagnostics
+- top status bar
+- any order-execution modules
+- any bot manager/allocation modules
+
+D) Full app switch from Demo/Paper/Testnet to Real Trading
+1. When real trading is activated successfully, the ENTIRE app must switch from demo/paper/testnet behavior to real mode
+2. This includes:
+   - balances
+   - wallet values
+   - PnL source
+   - trade execution
+   - order history
+   - permissions
+   - live status
+   - diagnostics
+   - autopilot behavior
+   - exchange screens
+   - reports where applicable
+   - top bar mode indicator
+3. Remove contradictory situations such as:
+   - top bar says REAL TRADING
+   - admin says demo/paper
+   - API keys page says Binance Testnet
+   - exchange page says Bybit armed
+4. If real trading is active, every page must reflect real mode consistently
+5. If demo mode is active, every page must reflect demo mode consistently
+6. If testnet mode is active, every page must reflect testnet mode consistently
+7. No page may claim live readiness if backend real submission is not actually enabled
+
+E) Working Start Real Trading button
+1. Add or repair a clear button named exactly:
+   Start Real Trading
+2. Do this without rebuilding the app
+3. The button must be disabled unless ALL live readiness conditions pass
+4. It must enable only when:
+   - active exchange selected
+   - backend credentials securely loaded
+   - exchange client initialized
+   - network reachable
+   - API validated
+   - balance fetched from real account source
+   - trade permission confirmed
+   - symbol universe/config loaded
+   - risk engine configured
+   - execution config valid
+   - emergency stop is off
+   - environment is LIVE, not demo/paper/testnet
+   - allocation engine ready
+5. On click:
+   - show a final confirmation dialog:
+     “You are about to enable LIVE trading with real funds.”
+   - require explicit confirmation
+   - then arm live execution
+   - switch the entire app to live mode
+   - refresh all relevant real balance and status sources
+   - update all screens consistently
+6. Add matching Stop Real Trading button that safely disarms order submission immediately and freezes new entries
+
+F) Balance, wallet, and real-funds correction
+1. Make wallet and balance screens use the real connected exchange balance when live trading is active
+2. Remove any fake/demo balance source during live mode
+3. Ensure no stale cached demo balances remain visible after mode switch
+4. Refresh balances from the active exchange immediately after live activation
+5. Ensure PnL, wallet, equity, and related account values come from the correct real account source in live mode
+6. Clearly label the data source in diagnostics and logs
+
+G) Execution and order flow correction
+1. Ensure real-mode order placement uses the active exchange live endpoints only
+2. Ensure no demo/testnet endpoints remain in the path when real mode is enabled
+3. Ensure order execution always follows:
+   - active exchange
+   - correct environment
+   - validated permissions
+   - risk and allocation constraints
+4. Remove fake armed/ready signals if backend real submission is not truly active
+5. Add execution log entries for:
+   - active exchange
+   - active environment
+   - backend credential load result
+   - client initialization result
+   - auth result
+   - balance result
+   - permission result
+   - risk check result
+   - allocation result
+   - order payload prepared
+   - order submit attempted
+   - order accepted/rejected
+   - returned exchange order id
+6. Surface exact block reasons whenever order placement is prevented
+
+H) Bybit live integration
+1. Ensure Bybit live mode uses Mainnet endpoints, not testnet
+2. Ensure Bybit testnet is used only when explicitly in testnet mode
+3. Remove any Bybit/Binance environment confusion
+4. Ensure correct V5 endpoints for live trading
+5. Ensure market category, symbol, side, order type, quantity, price, leverage, and order constraints are validated before submission
+6. Surface exact exchange error messages cleanly in diagnostics/logs
+
+I) Real balance allocation across bots
+1. Add a real balance allocation engine for live mode
+2. When live mode is enabled, fetch the real available account balance from the active exchange
+3. Distribute usable balance across bots intelligently, not equally by default
+4. Support two allocation modes:
+   - equal allocation across active bots
+   - risk-weighted allocation across a studied number of bots
+5. Add a configurable maximum number of simultaneously funded bots based on:
+   - available balance
+   - minimum order size
+   - volatility
+   - symbol correlation
+   - current open exposure
+   - strategy confidence where available
+6. Do not activate more bots than the account can safely support
+7. If capital is too small, automatically reduce active bot count
+8. Reserve a protected cash buffer that is never allocated
+9. Add per-bot max capital limits
+10. Add portfolio-level exposure caps so total open risk stays capped
+11. Prioritize higher-quality bots/signals and limit weak bots when funds are constrained
+12. Prevent blind over-allocation to too many bots
+
+J) Bot coordination and exposure control
+1. Prevent all bots from entering the same directional trade blindly
+2. Add anti-overlap logic so correlated bots do not multiply the same risk
+3. Add symbol conflict detection
+4. Add a global exposure manager across all bots
+5. Pause or deprioritize low-performing bots automatically in live mode
+6. Prevent over-concentration in one symbol, one side, or one correlated cluster
+
+K) Capital protection and loss-prevention
+Important:
+You must NOT promise zero loss because that is impossible in real trading.
+Do NOT simulate or market “no-loss guarantee”.
+Instead implement aggressive capital protection, exposure limits, stop conditions, drawdown protection, and emergency shutdown logic.
+
+Required protections:
+1. max loss per trade
+2. max daily loss
+3. max total drawdown
+4. max concurrent losing bots
+5. max exposure per symbol
+6. max exposure for correlated assets
+7. cooldown after loss streak
+8. automatic position-size reduction after losses
+9. automatic bot pause after repeated failures
+10. global emergency stop
+11. hard stop-loss enforcement where applicable
+12. slippage protection
+13. spread protection
+14. minimum liquidity checks
+15. position-size validation against exchange minimums and safety caps
+16. capital protection mode that becomes more conservative after losses
+17. safe mode that allows only highest-confidence setups when risk rises
+
+Behavior when thresholds are breached:
+- immediately block new orders
+- optionally reduce size
+- pause affected bots
+- if severe, stop all live trading automatically
+- log exact reasons
+- show the block reason in diagnostics clearly
+
+L) Credential security and attack hardening
+1. Remove any local-browser-only storage for live API credentials if currently used for live trading
+2. Move live credential handling to secure backend/server-side environment storage
+3. Use environment variables / secrets management only
+4. Never expose secrets to:
+   - frontend
+   - renderer process
+   - logs
+   - devtools
+   - browser storage
+   - localStorage
+   - sessionStorage
+5. Mask displayed key fragments
+6. Prevent accidental secret printing in logs and errors
+7. Add secure backend-only credential validation
+8. Make secret handling compatible with Replit Secrets and GitHub Actions Secrets
+
+Security hardening:
+1. strict separation between frontend and backend secrets
+2. validate and sanitize all user inputs
+3. protect against command injection, config injection, XSS in dashboard forms/log views, unsafe eval, and insecure IPC usage
+4. rate-limit sensitive backend actions
+5. require admin-only authorization for:
+   - enabling live mode
+   - changing exchange credentials
+   - changing execution settings
+   - changing risk settings
+6. add CSRF/session protection if applicable
+7. if Electron app:
+   - contextIsolation on
+   - nodeIntegration off
+   - expose minimal safe preload APIs only
+8. harden file access:
+   - no arbitrary path read/write
+   - validate config schemas
+9. add tamper-aware audit logging for:
+   - mode changes
+   - credential changes
+   - live trading armed/disarmed
+   - order submit attempts
+10. add startup diagnostics warning for insecure configurations
+
+M) Diagnostics and truthfulness
+1. Add or repair a Diagnostics panel that shows:
+   - active exchange
+   - active environment
+   - backend credentials loaded yes/no
+   - exchange client initialized yes/no
+   - API validated yes/no
+   - balance fetched yes/no
+   - trade permission yes/no
+   - trading armed yes/no
+   - real order submission enabled yes/no
+   - active bot count
+   - allocated balance
+   - reserved buffer
+   - open exposure
+   - exact blocking reason if any value is false
+2. Add one safe dry-run validation action that verifies the full order path without placing a real trade
+3. Add one honest live-mode smoke test flow that proves end-to-end live capability without misleading fake success messages
+4. If real live submission is still not truly wired, do not fake success
+
+N) Minimal safe patching only
+1. Do not rewrite unrelated modules
+2. Do not rebuild the product from zero
+3. Keep existing components and patch only what is necessary
+4. Preserve current UI and navigation
+5. Change only logic, status wiring, exchange/mode consistency, balance source, execution flow, bot allocation, and security where needed
+
+O) GitHub and lowest-cost workflow
+1. Prepare the existing repo for clean GitHub sync
+2. Remove secrets and sensitive local artifacts from tracked files
+3. Add/update .gitignore for:
+   - env files
+   - secret files
+   - build artifacts
+   - logs
+   - caches
+   - local DB files
+   - temp files
+4. Add a safe example env file with placeholders only
+5. Create a low-cost GitHub Actions workflow that:
+   - runs lint/checks/tests
+   - builds only when needed
+   - avoids unnecessary expensive matrix jobs
+   - publishes artifacts only for tags or manual dispatch
+6. Prefer free/low-cost GitHub-native automation
+7. Do not add wasteful services
+8. Prepare the project so it can be pushed cleanly to GitHub without leaking secrets
+9. Add README instructions for the cheapest practical deployment/build path
+
+Final output required:
+After patching, print:
+1. Root cause of why Binance kept appearing in admin
+2. Exact files changed
+3. Exact logic changed for active exchange reuse
+4. Exact logic changed for trading-mode unification
+5. Exact logic changed for full app switching from Demo/Paper/Testnet to Real Trading
+6. Exact logic changed for balance/wallet real-fund sourcing
+7. Exact logic changed for order execution environment and endpoint correctness
+8. Exact logic added for real balance allocation across bots
+9. Exact risk controls added
+10. Exact security changes added
+11. Exact GitHub files/workflows added or changed
+12. Confirmation that admin no longer asks for Binance keys unless Binance is explicitly selected
+13. Confirmation that the app now uses the already connected active exchange as source of truth
+14. Confirmation that the full app now switches consistently to Real Trading mode
+15. Confirmation that wallet/balance now use real funds in live mode
+16. Confirmation that bot funding is controlled and limited by risk
+17. Honest statement that zero loss cannot be guaranteed
+18. Any remaining limitations, stated clearly
+
+Success criteria:
+- Admin no longer forces Binance
+- Existing connected exchange state is reused
+- Start Real Trading works only when safe
+- Stop Real Trading disarms immediately
+- Live mode means the whole app becomes live mode
+- Demo/testnet/live states are fully consistent everywhere
+- Wallet and balance come from the correct real account in live mode
+- Real order flow uses the active exchange and correct environment
+- Binance testnet legacy path no longer blocks Bybit live mode
+- No fake success/readiness messages remain
+- Patch only, no full rebuild

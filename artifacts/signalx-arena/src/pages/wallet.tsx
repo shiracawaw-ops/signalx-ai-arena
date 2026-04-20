@@ -1,8 +1,12 @@
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
+import { Link } from 'wouter';
 import { useArena } from '@/hooks/use-arena';
 import { getBotTotalValue, getBotPnL } from '@/lib/engine';
 import { loadWallet, requestDeposit, requestWithdrawal, type WalletState } from '@/lib/wallet';
+import { exchangeMode, type ExchangeModeState } from '@/lib/exchange-mode';
+import { credentialStore } from '@/lib/credential-store';
+import { KNOWN_EXCHANGES } from '@/lib/exchange';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -11,6 +15,7 @@ import { useToast } from '@/hooks/use-toast';
 import {
   Wallet, ArrowDownCircle, ArrowUpCircle,
   RefreshCw, TrendingUp, DollarSign, AlertTriangle, FileText, Bot,
+  Activity, ExternalLink,
 } from 'lucide-react';
 
 function fmt(n: number, dec = 2) {
@@ -53,6 +58,21 @@ export default function WalletPage() {
   const [depositAmt, setDepositAmt] = useState('1000');
   const [withdrawAmt, setWithdrawAmt] = useState('');
   const { toast } = useToast();
+
+  // ── Live exchange wiring (mode-aware secondary balance source) ──────────
+  const [exState, setExState] = useState<ExchangeModeState>(() => exchangeMode.get());
+  const [credTick, setCredTick] = useState(0);
+  useEffect(() => exchangeMode.subscribe(setExState), []);
+  useEffect(() => credentialStore.subscribe(() => setCredTick(t => t + 1)), []);
+  const isLive = exState.mode === 'real' || exState.mode === 'testnet';
+  const exMeta = useMemo(() => KNOWN_EXCHANGES.find(e => e.id === exState.exchange), [exState.exchange]);
+  const liveCache = useMemo(
+    () => credentialStore.getCache(exState.exchange),
+    [exState.exchange, exState.connectedAt, credTick],
+  );
+  const liveBalances = liveCache?.liveBalances ?? [];
+  const liveTotalUsdt = liveBalances.reduce((s, b) => s + (b.usdtValue ?? 0), 0);
+  const liveFetchedAt = liveCache?.fetchedAt;
 
   // Arena stats derived from shared context
   const totalValue   = useMemo(() => bots.reduce((s, b) => s + getBotTotalValue(b, getCurrentPrice(b.symbol)), 0), [bots, getCurrentPrice]);
@@ -119,9 +139,62 @@ export default function WalletPage() {
       {/* ── Overview ── */}
       {tab === 'overview' && (
         <div className="space-y-4">
+
+          {/* Live exchange balance — only shown in real/testnet mode */}
+          {isLive && (
+            <Card className={`border ${exState.mode === 'real' ? 'border-red-500/40 bg-red-500/5' : 'border-purple-500/30 bg-purple-500/5'}`}>
+              <CardContent className="p-5">
+                <div className="flex items-center gap-2 mb-2">
+                  <Activity size={13} className={exState.mode === 'real' ? 'text-red-400' : 'text-purple-400'} />
+                  <span className={`text-[10px] uppercase tracking-widest font-bold ${exState.mode === 'real' ? 'text-red-400' : 'text-purple-400'}`}>
+                    {exState.mode === 'real' ? '🔴 REAL FUNDS' : '🟣 TESTNET FUNDS'} · {exMeta?.name ?? exState.exchange}
+                  </span>
+                  {exState.armed && exState.mode === 'real' && (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-full border border-red-500/40 bg-red-500/10 text-red-400 font-bold ml-auto">
+                      ARMED
+                    </span>
+                  )}
+                </div>
+                {exState.balanceFetched && liveBalances.length > 0 ? (
+                  <>
+                    <div className={`text-4xl font-black font-mono mb-3 ${exState.mode === 'real' ? 'text-red-300' : 'text-purple-300'}`}>
+                      ${fmt(liveTotalUsdt)}
+                    </div>
+                    <div className="text-[10px] text-zinc-500 mb-2">
+                      {liveBalances.length} asset{liveBalances.length === 1 ? '' : 's'} ·
+                      {liveFetchedAt ? ` synced ${new Date(liveFetchedAt).toLocaleTimeString()}` : ''}
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mt-3 pt-3 border-t border-zinc-800/60">
+                      {liveBalances.slice(0, 6).map(b => (
+                        <div key={b.asset} className="text-xs">
+                          <div className="text-zinc-500 text-[10px]">{b.asset}</div>
+                          <div className="font-mono">{b.total.toFixed(b.total < 1 ? 6 : 2)}</div>
+                          {b.usdtValue !== undefined && (
+                            <div className="text-[10px] text-zinc-600">${fmt(b.usdtValue)}</div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="text-sm text-zinc-400">Live balance not loaded yet.</div>
+                    <Link href="/exchange">
+                      <Button variant="outline" size="sm" className="text-xs">
+                        Connect & Fetch Balance <ExternalLink size={11} className="ml-1" />
+                      </Button>
+                    </Link>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
           <Card className="border-emerald-500/20 bg-gradient-to-br from-emerald-900/10 to-transparent">
             <CardContent className="p-5">
-              <div className="text-xs text-zinc-500 uppercase tracking-widest mb-1">Available Balance</div>
+              <div className="text-xs text-zinc-500 uppercase tracking-widest mb-1">
+                {isLive ? 'Simulator Wallet (Virtual)' : 'Available Balance'}
+              </div>
               <div className="text-4xl font-black font-mono text-emerald-400 mb-3">
                 ${fmt(wallet.virtualBalance - wallet.lockedBalance)}
               </div>

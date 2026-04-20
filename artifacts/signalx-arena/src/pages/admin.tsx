@@ -3,6 +3,8 @@ import { useState, useMemo, useEffect } from 'react';
 import { useArena } from '@/hooks/use-arena';
 import { getBotTotalValue, getBotPnL } from '@/lib/engine';
 import { loadRisk, saveRisk, loadUser, DEFAULT_RISK, addAlert, loadAlerts, type RiskConfig } from '@/lib/platform';
+import { exchangeMode, type ExchangeModeState } from '@/lib/exchange-mode';
+import { KNOWN_EXCHANGES } from '@/lib/exchange';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -91,6 +93,23 @@ export default function AdminPage() {
 
   const totalValue     = bots.reduce((s, b) => s + getBotTotalValue(b, getCurrentPrice(b.symbol)), 0);
   const totalPnl       = bots.reduce((s, b) => s + getBotPnL(b, getCurrentPrice(b.symbol)), 0);
+  const [exState, setExState] = useState<ExchangeModeState>(() => exchangeMode.get());
+  useEffect(() => exchangeMode.subscribe(setExState), []);
+  const exMeta = useMemo(() => KNOWN_EXCHANGES.find(e => e.id === exState.exchange), [exState.exchange]);
+  const exDisplay = exMeta?.name ?? exState.exchange;
+  const modeDisplay = exState.mode === 'demo' ? 'Demo (Local Simulator)'
+                    : exState.mode === 'paper' ? 'Paper (Live Prices)'
+                    : exState.mode === 'testnet' ? `${exDisplay} Testnet`
+                    : `${exDisplay} (Real)`;
+  const adapterNote = exState.mode === 'demo'
+    ? 'Local simulator — no exchange calls'
+    : exState.mode === 'paper'
+      ? `${exDisplay} (paper fills, live prices)`
+      : exState.mode === 'testnet'
+        ? `${exDisplay} testnet adapter`
+        : exState.armed
+          ? `${exDisplay} LIVE — armed`
+          : `${exDisplay} (real, disarmed)`;
   const activeBots     = bots.filter(b => b.isRunning).length;
   const pausedBots     = bots.filter(b => !b.isRunning).length;
   const totalTrades    = trades.length;
@@ -198,7 +217,7 @@ export default function AdminPage() {
                 { label: 'Trading Engine',   ok: isGlobalRunning,  note: isGlobalRunning ? `Running — ${bots.length > 100 ? '1.2s' : '0.8s'} tick` : 'Paused' },
                 { label: 'Market Data Feed', ok: true,             note: '38 symbols · Mock data' },
                 { label: 'Risk Engine',      ok: !risk.safeMode,   note: risk.safeMode ? 'Safe mode ON' : 'Normal mode' },
-                { label: 'Exchange Adapter', ok: true,             note: 'Demo mode (Binance Mock)' },
+                { label: 'Exchange Adapter', ok: true,             note: adapterNote },
                 { label: 'Wallet Service',   ok: true,             note: `Virtual — ${fmtBalance(demoBalance)} per bot` },
                 { label: 'Bot Diagnostics',  ok: true,             note: `Monitoring ${bots.length} bots` },
               ].map(item => (
@@ -444,7 +463,7 @@ export default function AdminPage() {
             <CardContent className="p-4 space-y-3 text-xs">
               {[
                 ['Platform',      'SignalX AI Arena v3.0'],
-                ['Mode',          'Local Demo / Virtual Trading'],
+                ['Mode',          modeDisplay],
                 ['Storage',       'localStorage (browser)'],
                 ['Bots',          `${bots.length} (${activeBots} active, ${pausedBots} paused)`],
                 ['Bot Count',     `${botCount} selected`],
@@ -454,7 +473,7 @@ export default function AdminPage() {
                 ['Tick Rate',     bots.length > 100 ? '1,200ms (large pool)' : '800ms'],
                 ['Tick Count',    tickCount.toLocaleString()],
                 ['Total Trades',  totalTrades.toLocaleString()],
-                ['Exchange',      'Binance Mock Adapter (Demo Mode)'],
+                ['Exchange',      adapterNote],
                 ['Risk Engine',   risk.tradingEnabled ? 'Active' : 'Disabled'],
                 ['Safe Mode',     risk.safeMode ? 'ON' : 'OFF'],
               ].map(([k, v]) => (
