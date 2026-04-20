@@ -112,7 +112,7 @@ function loadPersisted(): Record<string, OrderProgress> {
   } catch { return {}; }
 }
 
-class OrderProgressStore {
+export class OrderProgressStore {
   private state: Record<string, OrderProgress> = loadPersisted();
   private listeners = new Set<Listener>();
   private pollers   = new Map<string, ReturnType<typeof setTimeout>>();
