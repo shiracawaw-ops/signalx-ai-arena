@@ -10,10 +10,43 @@ import { getBotTotalValue } from '@/lib/engine';
 import { calcFeeAdjusted, PLATFORM_FEE_RATE } from '@/lib/platform';
 import { ShieldAlert } from 'lucide-react';
 import { executeSignal } from '@/lib/execution-engine';
-import { exchangeMode } from '@/lib/exchange-mode';
+import { exchangeMode, type ExchangeModeState } from '@/lib/exchange-mode';
 import { executionLog, REJECT } from '@/lib/execution-log';
 import { tradeConfig } from '@/lib/trade-config';
 import { ASSET_MAP } from '@/lib/storage';
+import { EXCHANGE_MAP } from '@/lib/exchange';
+
+// ── Sim-only detection ─────────────────────────────────────────────────────
+// A bot is "simulator-only" when the user is in a live/testnet mode but the
+// currently selected exchange can't actually route the bot's symbol to a
+// real order. Today every KNOWN_EXCHANGES entry is crypto/derivatives only,
+// so any Stocks/Metals/Forex symbol is sim-only in real or testnet. The
+// helper inspects `markets` so that adding a multi-asset broker later
+// automatically clears the badge for the asset classes it supports. In
+// demo/paper mode every asset class is simulated, so the badge never shows.
+function isSimOnlyForLive(symbol: string, exState: ExchangeModeState): boolean {
+  if (exState.mode !== 'real' && exState.mode !== 'testnet') return false;
+  const cat = ASSET_MAP[symbol]?.category;
+  if (!cat || cat === 'Crypto') return false;
+  const ex = EXCHANGE_MAP[exState.exchange];
+  if (!ex) return true;
+  const supports = ex.markets.some(m => m.toLowerCase() === cat.toLowerCase());
+  return !supports;
+}
+
+function SimOnlyBadge({ exchangeName, category, compact }: { exchangeName: string; category: string; compact?: boolean }) {
+  const cls = compact
+    ? 'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-bold tracking-wider uppercase border border-amber-600/40 bg-amber-900/15 text-amber-400'
+    : 'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wider uppercase border border-amber-600/40 bg-amber-900/15 text-amber-400';
+  return (
+    <span
+      className={cls}
+      title={`${category} isn't tradable live on ${exchangeName}. This bot will only run in the simulator until you switch to a broker that supports ${category.toLowerCase()}, or to demo/paper mode.`}
+    >
+      Sim-only
+    </span>
+  );
+}
 
 // ── Formatters ─────────────────────────────────────────────────────────────
 function fmt(n: number, d = 2) { return n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }); }
@@ -84,21 +117,25 @@ function StatCard({ label, value, sub, green }: { label: string; value: string; 
 }
 
 // ── Top bot row ────────────────────────────────────────────────────────────
-function TopBotRow({ eval: ev, rank }: { eval: BotEvaluation; rank: number }) {
+function TopBotRow({ eval: ev, rank, simOnly, exchangeName }: { eval: BotEvaluation; rank: number; simOnly: boolean; exchangeName: string }) {
   const medals = ['', '🥇', '🥈', '🥉'];
   const actionColor = ev.action === 'BUY' ? 'text-emerald-400' : ev.action === 'SELL' ? 'text-red-400' : 'text-zinc-400';
   const scoreColor  = ev.score >= 70 ? 'text-emerald-400' : ev.score >= 45 ? 'text-amber-400' : 'text-red-400';
+  const category    = ASSET_MAP[ev.bot.symbol]?.category ?? 'Asset';
 
   return (
     <div className={`flex items-center gap-3 px-4 py-3 rounded-xl border transition-colors ${
       rank === 1
         ? 'border-emerald-500/20 bg-emerald-500/5'
         : 'border-zinc-800/50 bg-zinc-900/30 hover:bg-zinc-900/60'
-    }`}>
+    } ${simOnly ? 'opacity-60' : ''}`}>
       <span className="text-base w-6 text-center flex-shrink-0">{medals[rank] || rank}</span>
       <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: ev.bot.color }} />
       <div className="flex-1 min-w-0">
-        <div className="font-semibold text-sm text-zinc-100 truncate">{ev.bot.name}</div>
+        <div className="flex items-center gap-2">
+          <div className="font-semibold text-sm text-zinc-100 truncate">{ev.bot.name}</div>
+          {simOnly && <SimOnlyBadge exchangeName={exchangeName} category={category} compact />}
+        </div>
         <div className="text-[10px] text-zinc-500">{ev.bot.symbol} · {ev.bot.strategy}</div>
       </div>
       <div className="text-right flex-shrink-0">
@@ -197,6 +234,16 @@ export default function AutoPilotPage() {
 
   const [decision, setDecision]   = useState<AutoPilotDecision | null>(null);
   const [log, setLog]             = useState<DecisionLogEntry[]>([]);
+  const [exState, setExState]     = useState<ExchangeModeState>(() => exchangeMode.get());
+
+  // Re-render badges immediately on mode/exchange changes (not just every 5s tick).
+  useEffect(() => exchangeMode.subscribe(setExState), []);
+
+  const exchangeName = EXCHANGE_MAP[exState.exchange]?.shortName ?? exState.exchange;
+  const simOnlyForSymbol = useCallback(
+    (symbol: string) => isSimOnlyForLive(symbol, exState),
+    [exState],
+  );
 
   // Refs for always-fresh values inside interval callbacks (avoids stale closures)
   // Intentional: sync refs during render so interval callbacks always read latest values.
@@ -431,11 +478,28 @@ export default function AutoPilotPage() {
                       </span>
                     </div>
                   </div>
-                  <div>
-                    <div className="font-bold text-zinc-100 text-base">{selected.bot.name}</div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="font-bold text-zinc-100 text-base truncate">{selected.bot.name}</div>
+                      {simOnlyForSymbol(selected.bot.symbol) && (
+                        <SimOnlyBadge
+                          exchangeName={exchangeName}
+                          category={ASSET_MAP[selected.bot.symbol]?.category ?? 'Asset'}
+                        />
+                      )}
+                    </div>
                     <div className="text-[11px] text-zinc-500">{selected.bot.symbol} · {selected.bot.strategy}</div>
                   </div>
                 </div>
+
+                {simOnlyForSymbol(selected.bot.symbol) && (
+                  <div className="rounded-xl border border-amber-700/40 bg-amber-900/10 px-3 py-2 text-[11px] text-amber-300 leading-relaxed">
+                    <strong className="text-amber-200">Simulator-only on {exchangeName}.</strong>{' '}
+                    {ASSET_MAP[selected.bot.symbol]?.category ?? 'This asset'} can't be routed live through{' '}
+                    {exchangeName}. Switch to a broker that supports it, or to demo/paper mode, to take this
+                    signal live.
+                  </div>
+                )}
 
                 {/* Stats */}
                 <div className="grid grid-cols-2 gap-2">
@@ -560,7 +624,13 @@ export default function AutoPilotPage() {
                 <SectionTitle>Top Performers</SectionTitle>
                 <div className="space-y-2">
                   {topBots.map((ev, i) => (
-                    <TopBotRow key={ev.bot.id} eval={ev} rank={i + 1} />
+                    <TopBotRow
+                      key={ev.bot.id}
+                      eval={ev}
+                      rank={i + 1}
+                      simOnly={simOnlyForSymbol(ev.bot.symbol)}
+                      exchangeName={exchangeName}
+                    />
                   ))}
                 </div>
               </div>
@@ -583,17 +653,26 @@ export default function AutoPilotPage() {
           <div>
             <SectionTitle>Standby Pool</SectionTitle>
             <div className="flex flex-wrap gap-2">
-              {bots.filter(b => !b.isRunning).slice(0, 8).map(b => (
-                <div
-                  key={b.id}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900/50 border border-zinc-800/50 text-[11px] text-zinc-400"
-                >
-                  <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: b.color }} />
-                  <span className="truncate max-w-[100px]">{b.name}</span>
-                  <span className="text-zinc-600">·</span>
-                  <span className="text-zinc-500 text-[10px]">{b.symbol}</span>
-                </div>
-              ))}
+              {bots.filter(b => !b.isRunning).slice(0, 8).map(b => {
+                const sim = simOnlyForSymbol(b.symbol);
+                return (
+                  <div
+                    key={b.id}
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900/50 border border-zinc-800/50 text-[11px] text-zinc-400 ${sim ? 'opacity-60' : ''}`}
+                    title={sim ? `${ASSET_MAP[b.symbol]?.category ?? 'This asset'} isn't tradable live on ${exchangeName}. Bot will only run in the simulator.` : undefined}
+                  >
+                    <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: b.color }} />
+                    <span className="truncate max-w-[100px]">{b.name}</span>
+                    <span className="text-zinc-600">·</span>
+                    <span className="text-zinc-500 text-[10px]">{b.symbol}</span>
+                    {sim && (
+                      <span className="ml-1 px-1 rounded text-[9px] font-bold uppercase tracking-wider border border-amber-600/40 bg-amber-900/15 text-amber-400">
+                        Sim
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
               {bots.filter(b => !b.isRunning).length > 8 && (
                 <div className="flex items-center px-2.5 py-1.5 text-[11px] text-zinc-600">
                   +{bots.filter(b => !b.isRunning).length - 8} more
