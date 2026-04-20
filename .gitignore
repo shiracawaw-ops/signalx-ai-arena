@@ -52,3 +52,4 @@ replit.nix
 
 # Electron build output
 dist-electron/
+attached_assets/builds/

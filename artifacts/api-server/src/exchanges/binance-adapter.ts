@@ -484,16 +484,25 @@ export class BinanceAdapter implements ExchangeAdapter {
     }
     const filters = (info['filters'] as Array<Record<string, string>>) ?? [];
     const lotFilter  = filters.find(f => f['filterType'] === 'LOT_SIZE') ?? {};
+    const mktLotFilter = filters.find(f => f['filterType'] === 'MARKET_LOT_SIZE') ?? {};
     const notional   = filters.find(f => f['filterType'] === 'NOTIONAL' || f['filterType'] === 'MIN_NOTIONAL') ?? {};
     const priceFilter = filters.find(f => f['filterType'] === 'PRICE_FILTER') ?? {};
 
-    const stepSize  = parseFloat(String(lotFilter['stepSize'] ?? '0.00001'));
+    // For market orders, MARKET_LOT_SIZE (when present) takes precedence over
+    // LOT_SIZE for min/step. We pick the STRICTER of the two so a single set
+    // of rules safely covers both market & limit orders.
+    const lotMinQty   = parseFloat(String(lotFilter['minQty']   ?? '0.00001'));
+    const lotStep     = parseFloat(String(lotFilter['stepSize'] ?? '0.00001'));
+    const mktMinQty   = mktLotFilter['minQty']   ? parseFloat(String(mktLotFilter['minQty']))   : 0;
+    const mktStep     = mktLotFilter['stepSize'] ? parseFloat(String(mktLotFilter['stepSize'])) : 0;
+    const stepSize    = mktStep > lotStep ? mktStep : lotStep;
+    const minQty      = mktMinQty > lotMinQty ? mktMinQty : lotMinQty;
     const tickSize  = parseFloat(String(priceFilter['tickSize'] ?? '0.01'));
     const rules: SymbolRules = {
       symbol:        sym,
       baseCurrency:  String(info['baseAsset'] ?? ''),
       quoteCurrency: String(info['quoteAsset'] ?? ''),
-      minQty:        parseFloat(String(lotFilter['minQty'] ?? '0.00001')),
+      minQty,
       maxQty:        parseFloat(String(lotFilter['maxQty'] ?? '9000000')),
       stepSize,
       minNotional:   parseFloat(String(notional['minNotional'] ?? notional['notional'] ?? '5')),
@@ -554,11 +563,26 @@ export class BinanceAdapter implements ExchangeAdapter {
 
     const { params, rules, qtyStr, priceStr } = await this.buildOrderParams(creds, order);
 
+    // FAIL-CLOSED on stub rules — exchangeInfo failed and we'd be guessing
+    // the symbol filters. Refuse to forward the order so a wrong stepSize
+    // can't leak through and trip -1013 on the live exchange.
+    if (rules.filterSource === 'stub') {
+      throw new Error(`PREFLIGHT_RULES_STUB: live exchangeInfo unavailable for ${rules.symbol} — refusing to send order with synthetic filters. Retry shortly.`);
+    }
+
     // Strict server-side preflight — refuse to even sign a request that we
     // can statically prove will be rejected by Binance filters.  This stops
     // -1013 storms before they happen.
     const qtyN     = parseFloat(qtyStr);
-    const priceN   = priceStr ? parseFloat(priceStr) : order.price ?? 0;
+    let   priceN   = priceStr ? parseFloat(priceStr) : order.price ?? 0;
+    // For MARKET orders the caller does NOT supply a price. Estimate one
+    // from the public ticker so MIN_NOTIONAL still gets validated pre-sign.
+    if (priceN <= 0 && order.type === 'market') {
+      try {
+        const est = await this.getPrice(rules.symbol);
+        if (est > 0) priceN = est;
+      } catch { /* ignore — fall through; we just won't preflight notional */ }
+    }
     if (qtyN <= 0)                              throw new Error(`PREFLIGHT_LOT_SIZE: quantity rounds to 0 at stepSize ${rules.stepSize}`);
     if (qtyN < rules.minQty)                    throw new Error(`PREFLIGHT_LOT_SIZE: quantity ${qtyN} < minQty ${rules.minQty} for ${rules.symbol}`);
     if (rules.maxQty > 0 && qtyN > rules.maxQty) throw new Error(`PREFLIGHT_LOT_SIZE: quantity ${qtyN} > maxQty ${rules.maxQty} for ${rules.symbol}`);
@@ -604,9 +628,21 @@ export class BinanceAdapter implements ExchangeAdapter {
 
       const echo = { symbol: rules.symbol, side: order.side.toUpperCase(), quantity: qtyStr, price: priceStr };
 
+      // Surface stub rules — testOrder is meant to TELL the user what's
+      // wrong, so we don't fail-closed here, but we mark the result so the
+      // UI badge clearly shows "stub" provenance.
+      if (rules.filterSource === 'stub') {
+        return { ok: false, reason: 'RULES_STUB',
+          detail: `Live exchangeInfo unavailable for ${rules.symbol}; cannot validate filters. Real order will be REFUSED until rules load.`,
+          rules, echo };
+      }
+
       // Local preflight first — no auth burned on obvious failures.
       const qtyN = parseFloat(qtyStr);
-      const priceN = priceStr ? parseFloat(priceStr) : order.price ?? 0;
+      let   priceN = priceStr ? parseFloat(priceStr) : order.price ?? 0;
+      if (priceN <= 0 && order.type === 'market') {
+        try { const est = await this.getPrice(rules.symbol); if (est > 0) priceN = est; } catch { /* ignore */ }
+      }
       if (qtyN <= 0)
         return { ok: false, reason: 'LOT_SIZE', detail: `Quantity rounds to 0 at stepSize ${rules.stepSize}.`, rules, echo };
       if (qtyN < rules.minQty)
