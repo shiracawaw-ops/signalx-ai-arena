@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "ZWpaDRviUZi1NavL452D5"
+uri = "file://attached_assets/builds/SignalX-AI-Arena-Windows-61dd83d.zip"
+type = "unspecified"
+title = "SignalX AI Arena — Windows EXE (build 61dd83d)"
