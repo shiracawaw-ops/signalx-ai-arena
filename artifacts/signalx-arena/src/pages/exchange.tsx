@@ -16,7 +16,7 @@ import { useToast } from '@/hooks/use-toast';
 import {
   ArrowLeftRight, CheckCircle2, XCircle, RefreshCw, Shield,
   Eye, EyeOff, Zap, Wallet, Clock, Lock, ExternalLink, Globe,
-  Activity, Settings, FileText, AlertTriangle, Crosshair, Send,
+  Activity, Settings, FileText, AlertTriangle, Crosshair, Send, X,
 } from 'lucide-react';
 
 // ── New engine imports ────────────────────────────────────────────────────────
@@ -205,6 +205,12 @@ export default function ExchangePage() {
   const [manualPriceOverride, setManualPriceOverride] = useState<string>('');
   const [manualSubmitting, setManualSubmitting] = useState(false);
   const [manualResult, setManualResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  // ── Per-row action busy flags ──────────────────────────────────────────────
+  // Keyed by orderId for cancels and by asset symbol for close-position so the
+  // user can't double-click and so spinners only show on the row being acted on.
+  const [cancellingOrders, setCancellingOrders] = useState<Set<string>>(new Set());
+  const [closingPositions, setClosingPositions] = useState<Set<string>>(new Set());
 
   const { toast } = useToast();
   const adapter = getExchangeAdapter(selectedEx.id);
@@ -395,6 +401,142 @@ export default function ExchangePage() {
       setRefreshing(false);
     }
   }, [mode, apiKey, secretKey, passphrase, selectedEx.id, toast]);
+
+  // ── Cancel a live order ─────────────────────────────────────────────────
+  // Only enabled in real/testnet modes; calls the existing apiClient.cancelOrder
+  // path with the saved credentials, records the result in the Execution Log,
+  // toasts the outcome, and refreshes the live orders table so the cancelled
+  // row drops out (or shows the new status from the exchange).
+  const cancelLiveOrder = useCallback(async (orderId: string, symbol: string, side: 'buy' | 'sell') => {
+    if (!orderId) return;
+    if (mode !== 'real' && mode !== 'testnet') {
+      toast({ title: 'Cancel unavailable', description: 'Switch to Real or Testnet mode to cancel live orders.', variant: 'destructive' });
+      return;
+    }
+    if (!apiKey || !secretKey) {
+      toast({ title: 'Not connected', description: 'Connect with API credentials before cancelling orders.', variant: 'destructive' });
+      return;
+    }
+
+    if (mode === 'real') {
+      const ok = window.confirm(
+        `Cancel live order on ${selectedEx.name}?\n\n` +
+        `Order: ${orderId}\nSymbol: ${symbol || '—'}\n\n` +
+        `This will send a cancel request to the exchange. The position (if filled) is NOT closed by this action.`
+      );
+      if (!ok) return;
+    }
+
+    setCancellingOrders(prev => { const n = new Set(prev); n.add(orderId); return n; });
+    const creds = { apiKey, secretKey, ...(passphrase ? { passphrase } : {}) };
+    exchangeEvents.log('connect', selectedEx.id, `Cancelling order ${orderId} (${symbol})`);
+
+    const pending = executionLog.add({
+      mode,
+      exchange:  selectedEx.id,
+      symbol:    symbol || '—',
+      side,
+      orderType: 'market',
+      quantity:  0,
+      price:     0,
+      amountUSD: 0,
+      status:    'executing',
+      orderId,
+      signalId:  `cancel_${orderId}`,
+    });
+
+    try {
+      const res = await apiClient.cancelOrder(selectedEx.id, creds, orderId, symbol || undefined);
+      if (res.ok) {
+        executionLog.update(pending.id, { status: 'executed', exchangeResponse: res.data });
+        exchangeEvents.log('connect', selectedEx.id, `Order ${orderId} cancelled`);
+        toast({ title: 'Order cancelled', description: `${symbol || 'Order'} ${orderId.slice(0, 12)}… cancelled on ${selectedEx.name}.` });
+      } else {
+        const errMsg = res.error ?? 'Cancel failed';
+        executionLog.update(pending.id, { status: 'failed', errorMsg: errMsg, exchangeResponse: res });
+        exchangeEvents.log('connect', selectedEx.id, `Cancel failed for ${orderId}: ${errMsg}`, { level: 'error', data: { code: res.code } });
+        toast({ title: 'Cancel failed', description: errMsg, variant: 'destructive' });
+      }
+    } catch (e) {
+      const msg = (e as Error).message ?? 'Unexpected error';
+      executionLog.update(pending.id, { status: 'failed', errorMsg: msg });
+      exchangeEvents.log('connect', selectedEx.id, `Cancel error for ${orderId}: ${msg}`, { level: 'error' });
+      toast({ title: 'Cancel failed', description: msg, variant: 'destructive' });
+    } finally {
+      setCancellingOrders(prev => { const n = new Set(prev); n.delete(orderId); return n; });
+      // Refresh so the cancelled order drops/updates in the live table.
+      refreshLiveData();
+    }
+  }, [mode, apiKey, secretKey, passphrase, selectedEx.id, selectedEx.name, toast, refreshLiveData]);
+
+  // ── Close a non-zero asset position ────────────────────────────────────
+  // Submits a market SELL through executeSignal so the close action inherits
+  // every gating/risk check the rest of the app uses (armed, validated,
+  // perms, dedupe, retry, risk-manager). The amount sized by the engine is
+  // governed by trade-config (same as any other signal) — this is intentional
+  // so users can't bypass risk caps via close-position.
+  const closePosition = useCallback(async (asset: string) => {
+    if (!asset) return;
+    if (mode !== 'real' && mode !== 'testnet') {
+      toast({ title: 'Close unavailable', description: 'Switch to Real or Testnet mode to close live positions.', variant: 'destructive' });
+      return;
+    }
+
+    if (mode === 'real') {
+      const ok = window.confirm(
+        `Close ${asset} position on ${selectedEx.name}?\n\n` +
+        `This submits a MARKET SELL through the trading engine. The size is ` +
+        `governed by your Trade Config (not the full balance) so risk caps still apply.\n\n` +
+        `Continue?`
+      );
+      if (!ok) return;
+    }
+
+    setClosingPositions(prev => { const n = new Set(prev); n.add(asset); return n; });
+
+    try {
+      // Resolve a live reference price — same approach as the manual order form.
+      let price = 0;
+      try {
+        const pr = await apiClient.getPrice(selectedEx.id, asset);
+        if (pr.ok) price = Number((pr.data as { price?: number }).price) || 0;
+      } catch { /* fall through */ }
+
+      if (price <= 0) {
+        const m = `Cannot resolve a live price for ${asset} on ${selectedEx.name}. Retry once the exchange responds — refusing to size a live close from a placeholder.`;
+        toast({ title: 'Close blocked', description: m, variant: 'destructive' });
+        return;
+      }
+
+      const res = await executeSignal({
+        id:     `close_${asset}_${Date.now()}`,
+        symbol: asset,
+        side:   'sell',
+        price,
+        ts:     Date.now(),
+        source: 'close-position',
+      });
+
+      if (res.ok) {
+        toast({
+          title:       'Close submitted',
+          description: `Live SELL ${asset} placed — orderId ${res.orderId ?? '—'}`,
+        });
+      } else {
+        toast({
+          title:       'Close blocked',
+          description: `${res.rejectReason ?? 'Rejected'}${res.detail ? ' — ' + res.detail : ''}`,
+          variant:     'destructive',
+        });
+      }
+    } catch (e) {
+      const m = (e as Error).message ?? 'Unexpected error';
+      toast({ title: 'Close failed', description: m, variant: 'destructive' });
+    } finally {
+      setClosingPositions(prev => { const n = new Set(prev); n.delete(asset); return n; });
+      refreshLiveData();
+    }
+  }, [mode, selectedEx.id, selectedEx.name, toast, refreshLiveData]);
 
   // ── Connect ───────────────────────────────────────────────────────────────
   const handleConnect = async () => {
@@ -1109,7 +1251,11 @@ export default function ExchangePage() {
           )}
           {isLive && liveBalances.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-              {liveBalances.map(b => (
+              {liveBalances.map(b => {
+                const isStable = STABLES.has(b.asset.toUpperCase());
+                const canClose = !isStable && b.available > 0;
+                const closing  = closingPositions.has(b.asset);
+                return (
                 <Card key={b.asset} className="border-zinc-800/60">
                   <CardContent className="p-4">
                     <div className="flex items-center justify-between mb-2">
@@ -1122,9 +1268,26 @@ export default function ExchangePage() {
                       {typeof b.usdtValue === 'number' ? `≈ $${fmt(b.usdtValue)} USDT` : '≈ — USDT'}
                     </div>
                     {b.hold > 0 && <div className="text-[10px] text-amber-400 mt-0.5">Locked: {fmt(b.hold, 6)}</div>}
+                    {canClose && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="mt-3 w-full h-7 text-[10px] border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300 gap-1"
+                        disabled={closing}
+                        onClick={() => closePosition(b.asset)}
+                        data-testid={`button-close-position-${b.asset}`}
+                        title={`Submit a market SELL of ${b.asset} via the trading engine`}
+                      >
+                        {closing
+                          ? <RefreshCw size={11} className="animate-spin" />
+                          : <X size={11} />}
+                        {closing ? 'Closing…' : `Close ${b.asset} Position`}
+                      </Button>
+                    )}
                   </CardContent>
                 </Card>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -1173,17 +1336,30 @@ export default function ExchangePage() {
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="border-b border-zinc-800 text-zinc-500">
-                      {['Order ID', 'Symbol', 'Side', 'Type', 'Qty', 'Price', 'Filled', 'Status', 'Time'].map(h => (
+                      {['Order ID', 'Symbol', 'Side', 'Type', 'Qty', 'Price', 'Filled', 'Status', 'Time', 'Actions'].map(h => (
                         <th key={h} className="text-left px-3 py-2 font-medium">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {(liveOrders as Array<Record<string, unknown>>).map((o, i) => (
-                      <tr key={String(o['orderId'] ?? i)} className="border-b border-zinc-800/40 hover:bg-zinc-900/40">
-                        <td className="px-3 py-2 font-mono text-zinc-500 text-[10px]">{String(o['orderId'] ?? '').slice(0, 12)}…</td>
-                        <td className="px-3 py-2">{String(o['symbol'] ?? '')}</td>
-                        <td className={`px-3 py-2 font-semibold ${String(o['side']) === 'buy' ? 'text-emerald-400' : 'text-red-400'}`}>{String(o['side'] ?? '').toUpperCase()}</td>
+                    {(liveOrders as Array<Record<string, unknown>>).map((o, i) => {
+                      const orderId  = String(o['orderId'] ?? '');
+                      const symbol   = String(o['symbol'] ?? '');
+                      const sideStr  = String(o['side'] ?? '').toLowerCase();
+                      const sideForCancel: 'buy' | 'sell' = sideStr === 'sell' ? 'sell' : 'buy';
+                      const status   = String(o['status'] ?? 'open').toLowerCase();
+                      // Only "open / new / partially filled" orders are cancellable.
+                      // Filled / cancelled / rejected orders show a disabled placeholder.
+                      const isCancellable = !!orderId && (
+                        status === 'open' || status === 'new' || status === 'partially_filled' ||
+                        status === 'partial' || status === 'pending' || status === 'accepted'
+                      );
+                      const busy = cancellingOrders.has(orderId);
+                      return (
+                      <tr key={orderId || i} className="border-b border-zinc-800/40 hover:bg-zinc-900/40">
+                        <td className="px-3 py-2 font-mono text-zinc-500 text-[10px]">{orderId.slice(0, 12)}…</td>
+                        <td className="px-3 py-2">{symbol}</td>
+                        <td className={`px-3 py-2 font-semibold ${sideStr === 'buy' ? 'text-emerald-400' : 'text-red-400'}`}>{sideStr.toUpperCase()}</td>
                         <td className="px-3 py-2 text-zinc-400">{String(o['type'] ?? o['orderType'] ?? '').toUpperCase()}</td>
                         <td className="px-3 py-2 font-mono">{fmt(Number(o['quantity'] ?? 0), 6)}</td>
                         <td className="px-3 py-2 font-mono">{Number(o['price']) > 0 ? `$${fmt(Number(o['price']))}` : 'Market'}</td>
@@ -1193,8 +1369,29 @@ export default function ExchangePage() {
                         </td>
                         {/* eslint-disable-next-line react-hooks/purity */}
                         <td className="px-3 py-2 text-zinc-500">{new Date(Number(o['timestamp']) || Date.now()).toLocaleTimeString()}</td>
+                        <td className="px-3 py-2">
+                          {isCancellable ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 px-2 text-[10px] border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300 gap-1"
+                              disabled={busy}
+                              onClick={() => cancelLiveOrder(orderId, symbol, sideForCancel)}
+                              data-testid={`button-cancel-order-${orderId}`}
+                              title={`Cancel order ${orderId}`}
+                            >
+                              {busy
+                                ? <RefreshCw size={11} className="animate-spin" />
+                                : <X size={11} />}
+                              {busy ? 'Cancelling…' : 'Cancel'}
+                            </Button>
+                          ) : (
+                            <span className="text-[10px] text-zinc-600">—</span>
+                          )}
+                        </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
