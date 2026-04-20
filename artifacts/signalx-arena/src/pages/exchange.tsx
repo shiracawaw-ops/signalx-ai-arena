@@ -16,7 +16,7 @@ import { useToast } from '@/hooks/use-toast';
 import {
   ArrowLeftRight, CheckCircle2, XCircle, RefreshCw, Shield,
   Eye, EyeOff, Zap, Wallet, Clock, Lock, ExternalLink, Globe,
-  Activity, Settings, FileText, AlertTriangle, Crosshair,
+  Activity, Settings, FileText, AlertTriangle, Crosshair, Send,
 } from 'lucide-react';
 
 // ── New engine imports ────────────────────────────────────────────────────────
@@ -25,7 +25,7 @@ import type { ExchangeModeState, ConnectionState } from '@/lib/exchange-mode';
 import { tradeConfig, type TradeConfig } from '@/lib/trade-config';
 import { executionLog, type ExecutionEntry } from '@/lib/execution-log';
 import { apiClient, type ExchangeErrorCode } from '@/lib/api-client';
-import { setCredentials }           from '@/lib/execution-engine';
+import { setCredentials, executeSignal } from '@/lib/execution-engine';
 import { credentialStore }          from '@/lib/credential-store';
 import { exchangeEvents, type ExchangeEvent } from '@/lib/exchange-events';
 
@@ -141,6 +141,7 @@ const TABS = [
   { key: 'permissions', label: 'Permissions',   icon: Shield         },
   { key: 'livestatus',  label: 'Live Status',   icon: Activity       },
   { key: 'tradeconfig', label: 'Trade Config',  icon: Settings       },
+  { key: 'manual',      label: 'Manual Order',  icon: Send           },
   { key: 'execlog',     label: 'Execution Log', icon: FileText       },
   { key: 'diagnostics', label: 'Diagnostics',   icon: AlertTriangle  },
 ] as const;
@@ -194,6 +195,16 @@ export default function ExchangePage() {
   const [validating,   setValidating]  = useState(false);
   const [balError,     setBalError]    = useState<string | null>(null);
   const [ordError,     setOrdError]    = useState<string | null>(null);
+
+  // ── Manual Order form state ─────────────────────────────────────────────
+  // The form is just a thin shell over executeSignal — it inherits every
+  // gate (mode, armed, validated, perms, creds, risk, dedupe, retry) from
+  // the engine. We deliberately do NOT bypass the engine here.
+  const [manualSymbol, setManualSymbol] = useState('BTC');
+  const [manualSide,   setManualSide]   = useState<'buy' | 'sell'>('buy');
+  const [manualPriceOverride, setManualPriceOverride] = useState<string>('');
+  const [manualSubmitting, setManualSubmitting] = useState(false);
+  const [manualResult, setManualResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   const { toast } = useToast();
   const adapter = getExchangeAdapter(selectedEx.id);
@@ -1504,6 +1515,172 @@ export default function ExchangePage() {
             className="text-xs text-zinc-500 border-zinc-700">
             Reset to defaults
           </Button>
+        </div>
+      </ErrorBoundary>)}
+
+      {/* ── Manual Order ── */}
+      {tab === 'manual' && (<ErrorBoundary label="exchange:tab:manual">
+        <div className="space-y-4">
+          <Card className="border-zinc-800/60">
+            <CardHeader className="py-3 px-4">
+              <CardTitle className="text-sm flex items-center gap-2">
+                <Send size={13} /> Manual Order — {selectedEx.name}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="p-4 space-y-4">
+              <div className={`p-3 rounded-xl border text-xs ${
+                mode === 'real'    ? 'border-red-500/30 bg-red-500/5 text-red-300' :
+                mode === 'testnet' ? 'border-orange-500/30 bg-orange-500/5 text-orange-300' :
+                mode === 'paper'   ? 'border-yellow-500/30 bg-yellow-500/5 text-yellow-300' :
+                                     'border-blue-500/30 bg-blue-500/5 text-blue-300'
+              }`}>
+                {mode === 'real'    && <><b>Real mode:</b> this places a LIVE order on {selectedEx.name} using your real funds. Trading must be armed in Live Status.</>}
+                {mode === 'testnet' && <><b>Testnet mode:</b> orders go to the {selectedEx.name} sandbox. No real funds used.</>}
+                {mode === 'paper'   && <><b>Paper mode:</b> simulated fill at the live market price. No real order is sent.</>}
+                {mode === 'demo'    && <><b>Demo mode:</b> virtual fill — no API key used and no order is sent.</>}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label className="text-[11px] text-zinc-400">Symbol</Label>
+                  <Input
+                    value={manualSymbol}
+                    onChange={e => setManualSymbol(e.target.value.toUpperCase().trim())}
+                    placeholder="BTC"
+                    className="h-9 text-sm font-mono"
+                  />
+                  <p className="text-[10px] text-zinc-500">Use the bare ticker (e.g. <span className="font-mono">BTC</span>, <span className="font-mono">ETH</span>) — the engine resolves the trading pair per exchange.</p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-[11px] text-zinc-400">Side</Label>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant={manualSide === 'buy' ? 'default' : 'outline'}
+                      onClick={() => setManualSide('buy')}
+                      className={`flex-1 h-9 text-xs font-bold ${manualSide === 'buy' ? 'bg-emerald-600 hover:bg-emerald-700' : 'border-zinc-700'}`}
+                    >BUY</Button>
+                    <Button
+                      type="button"
+                      variant={manualSide === 'sell' ? 'default' : 'outline'}
+                      onClick={() => setManualSide('sell')}
+                      className={`flex-1 h-9 text-xs font-bold ${manualSide === 'sell' ? 'bg-red-600 hover:bg-red-700' : 'border-zinc-700'}`}
+                    >SELL</Button>
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-[11px] text-zinc-400">Order amount (USD)</Label>
+                  <Input
+                    type="number"
+                    value={config.tradeAmountUSD}
+                    min={1}
+                    onChange={e => tradeConfig.set(selectedEx.id, { tradeAmountUSD: Number(e.target.value) })}
+                    className="h-9 text-sm font-mono text-right"
+                  />
+                  <p className="text-[10px] text-zinc-500">Sourced from Trade Config — change here or in the Trade Config tab.</p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-[11px] text-zinc-400">Reference price (optional)</Label>
+                  <Input
+                    type="number"
+                    value={manualPriceOverride}
+                    onChange={e => setManualPriceOverride(e.target.value)}
+                    placeholder="auto-fetch"
+                    className="h-9 text-sm font-mono text-right"
+                  />
+                  <p className="text-[10px] text-zinc-500">Used for stale-price guard + risk sizing. Leave blank to fetch from the exchange.</p>
+                </div>
+              </div>
+
+              <Button
+                type="button"
+                disabled={manualSubmitting || !manualSymbol}
+                onClick={async () => {
+                  setManualSubmitting(true);
+                  setManualResult(null);
+                  try {
+                    // Resolve a reference price. The engine sizes the
+                    // order from amountUSD / price, so a wrong price in
+                    // live modes silently produces a wrong-sized live
+                    // order. We therefore REFUSE to fall back to a
+                    // placeholder in real/testnet — the user must either
+                    // type a valid override or the exchange must return
+                    // a real price. Demo/paper get a $1 fallback so the
+                    // form remains usable when the API server is down.
+                    let price = Number(manualPriceOverride) || 0;
+                    if (price <= 0) {
+                      try {
+                        const pr = await apiClient.getPrice(selectedEx.id, manualSymbol);
+                        if (pr.ok) {
+                          price = Number((pr.data as { price?: number }).price) || 0;
+                        }
+                      } catch { /* fall through */ }
+                    }
+                    const isLiveMode = mode === 'real' || mode === 'testnet';
+                    if (price <= 0) {
+                      if (isLiveMode) {
+                        const m = `Cannot resolve a live price for ${manualSymbol} on ${selectedEx.name}. Enter a reference price or retry once the exchange responds — refusing to size a live order from a placeholder.`;
+                        setManualResult({ ok: false, message: m });
+                        toast({ title: 'Order blocked', description: m, variant: 'destructive' });
+                        setManualSubmitting(false);
+                        return;
+                      }
+                      price = 1; // demo / paper fallback only
+                    }
+
+                    const res = await executeSignal({
+                      id:     `manual_${manualSide}_${manualSymbol}_${Date.now()}`,
+                      symbol: manualSymbol,
+                      side:   manualSide,
+                      price,
+                      ts:     Date.now(),
+                      source: 'manual',
+                    });
+
+                    if (res.ok) {
+                      const m = res.demo
+                        ? `Simulated ${manualSide.toUpperCase()} ${manualSymbol} logged.`
+                        : `Live ${manualSide.toUpperCase()} ${manualSymbol} placed — orderId ${res.orderId ?? '—'}`;
+                      setManualResult({ ok: true, message: m });
+                      toast({ title: 'Order accepted', description: m });
+                    } else {
+                      const m = `${res.rejectReason ?? 'Rejected'}${res.detail ? ' — ' + res.detail : ''}`;
+                      setManualResult({ ok: false, message: m });
+                      toast({ title: 'Order blocked', description: m, variant: 'destructive' });
+                    }
+                  } catch (e) {
+                    const m = (e as Error).message ?? 'Unexpected error';
+                    setManualResult({ ok: false, message: m });
+                    toast({ title: 'Submission failed', description: m, variant: 'destructive' });
+                  } finally {
+                    setManualSubmitting(false);
+                  }
+                }}
+                className={`w-full h-10 font-bold ${manualSide === 'buy' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-red-600 hover:bg-red-700'} text-white`}
+              >
+                {manualSubmitting
+                  ? 'Submitting…'
+                  : `Submit ${manualSide.toUpperCase()} ${manualSymbol || ''} via Engine`}
+              </Button>
+
+              {manualResult && (
+                <div className={`p-3 rounded-xl border text-xs ${
+                  manualResult.ok
+                    ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-300'
+                    : 'border-red-500/30 bg-red-500/5 text-red-300'
+                }`}>
+                  {manualResult.message}
+                </div>
+              )}
+
+              <p className="text-[10px] text-zinc-500 leading-relaxed">
+                Every submission flows through the same Execution Engine the bots and AutoPilot use, so it inherits all safety
+                gates: mode check, trading-armed check, API validation, balance fetch, trade permission, credentials, risk
+                manager, symbol rules and one-shot retry on transient network failures. Successes and rejections both appear
+                in the <b>Execution Log</b> tab.
+              </p>
+            </CardContent>
+          </Card>
         </div>
       </ErrorBoundary>)}
 

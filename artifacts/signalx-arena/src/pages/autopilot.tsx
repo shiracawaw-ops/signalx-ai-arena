@@ -9,6 +9,9 @@ import {
 import { getBotTotalValue } from '@/lib/engine';
 import { calcFeeAdjusted, PLATFORM_FEE_RATE } from '@/lib/platform';
 import { ShieldAlert } from 'lucide-react';
+import { executeSignal } from '@/lib/execution-engine';
+import { exchangeMode } from '@/lib/exchange-mode';
+import { ASSET_MAP } from '@/lib/storage';
 
 // ── Formatters ─────────────────────────────────────────────────────────────
 function fmt(n: number, d = 2) { return n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }); }
@@ -202,6 +205,14 @@ export default function AutoPilotPage() {
   const stopRef          = useRef(stop);
   const lastBotIdRef     = useRef<string | null>(null);
   const lastRiskRef      = useRef<string | null>(null);
+  // Dedupe live dispatches: only latch when an order was ACCEPTED by the
+  // engine. If the engine rejected (e.g. not armed yet, validation pending,
+  // transient network), we leave the latch clear so the next decision tick
+  // retries — otherwise readiness coming online later would never fire.
+  // The latch is also explicitly cleared on any false→true transition of
+  // exchangeMode.isExecutionReady().
+  const lastDispatchRef  = useRef<{ botId: string; action: string } | null>(null);
+  const lastReadyRef     = useRef<boolean>(exchangeMode.isExecutionReady());
   // eslint-disable-next-line react-hooks/refs
   botsRef.current        = bots;
   // eslint-disable-next-line react-hooks/refs
@@ -246,6 +257,59 @@ export default function AutoPilotPage() {
     // Log HOLD override
     if (d.selectedBot && d.masterAction !== d.selectedBot.action && d.masterAction === 'HOLD') {
       setLog(prev => [makeLogEntry('hold', `Signal overridden to HOLD — risk level ${d.riskLevel}`, 'warn'), ...prev].slice(0, MAX_LOG));
+    }
+
+    // ── Live execution bridge ─────────────────────────────────────────────
+    // In REAL / TESTNET mode, forward the master decision to the unified
+    // Execution Engine so an actual order is sent to the exchange. Demo /
+    // Paper modes never enter this branch — those continue to be handled
+    // by the bot tick simulator. Stocks/metals/forex are skipped because
+    // crypto exchanges have no matching tradable pair. We only dispatch
+    // when (botId, action) transitions to avoid hammering the engine on
+    // every 5-second decision cycle while a signal stays the same.
+    // Clear the dispatch latch whenever execution readiness flips from
+    // false to true so a previously blocked signal gets a fresh attempt.
+    const readyNow = exchangeMode.isExecutionReady();
+    if (readyNow && !lastReadyRef.current) {
+      lastDispatchRef.current = null;
+    }
+    lastReadyRef.current = readyNow;
+
+    if (d.selectedBot && (d.masterAction === 'BUY' || d.masterAction === 'SELL')) {
+      const sym  = d.selectedBot.bot.symbol;
+      const mode = exchangeMode.get().mode;
+      const isLive   = mode === 'real' || mode === 'testnet';
+      const isCrypto = ASSET_MAP[sym]?.category === 'Crypto';
+
+      const sig = { botId: d.selectedBot.bot.id, action: d.masterAction };
+      const last = lastDispatchRef.current;
+      const transitioned = !last || last.botId !== sig.botId || last.action !== sig.action;
+
+      if (isLive && isCrypto && transitioned) {
+        const price = gcRef.current(sym);
+        void executeSignal({
+          id:     `autopilot_${sig.botId}_${sig.action}_${Date.now()}`,
+          symbol: sym,
+          side:   sig.action === 'BUY' ? 'buy' : 'sell',
+          price,
+          ts:     Date.now(),
+          source: 'autopilot',
+        }).then(res => {
+          // Only latch on success. Rejections leave the latch clear so
+          // the next decision tick will retry once readiness comes
+          // online (e.g., user finishes arming, balance fetch finishes).
+          if (res.ok) lastDispatchRef.current = sig;
+          const msg = res.ok
+            ? `AutoPilot ${sig.action} ${sym} → live order ${res.orderId ?? ''}`
+            : `AutoPilot ${sig.action} ${sym} blocked — ${res.rejectReason ?? 'unknown'}${res.detail ? ': ' + res.detail : ''}`;
+          setLog(prev => [makeLogEntry('select', msg, res.ok ? 'success' : 'warn'), ...prev].slice(0, MAX_LOG));
+        }).catch((err: unknown) => {
+          console.error('[autopilot→engine] dispatch error:', err);
+        });
+      }
+    } else {
+      // Reset the dedupe latch on HOLD so the next BUY/SELL transition fires.
+      lastDispatchRef.current = null;
     }
   }, []);
 
