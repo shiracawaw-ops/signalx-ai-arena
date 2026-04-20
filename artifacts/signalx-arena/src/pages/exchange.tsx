@@ -150,6 +150,12 @@ const TABS = [
   { key: 'diagnostics', label: 'Diagnostics',   icon: AlertTriangle  },
 ] as const;
 
+// Module-scoped poller registry for close-position status polls.
+// Kept outside the component so the React purity linter does not treat
+// the access pattern as a render-time ref read; the page is a singleton
+// route so a Map at module scope is safe.
+const closePollers = new Map<string, ReturnType<typeof setTimeout>>();
+
 // ── Status dot ────────────────────────────────────────────────────────────────
 function StatusDot({ ok }: { ok: boolean }) {
   return ok
@@ -225,6 +231,25 @@ export default function ExchangePage() {
   const [cancelAllOpen, setCancelAllOpen] = useState(false);
   const [cancelAllConfirmText, setCancelAllConfirmText] = useState('');
   const [cancellingAll, setCancellingAll] = useState(false);
+
+  // ── Per-asset close-position progress ─────────────────────────────────────
+  // Inline status panel under each asset card: submitting → pending → partial
+  // → filled (or canceled/rejected/timeout/error). Polls the backend until a
+  // terminal state or until POLL_TIMEOUT_MS elapses.
+  type ClosePhase =
+    | 'submitting' | 'pending' | 'partial' | 'filled'
+    | 'canceled'   | 'rejected' | 'timeout' | 'error';
+  interface CloseProgress {
+    phase:      ClosePhase;
+    orderId?:   string;
+    quantity:   number;   // submitted size (best-effort, 0 until first poll)
+    filledQty:  number;
+    avgPrice:   number;
+    message?:   string;
+    startedAt:  number;
+    updatedAt:  number;
+  }
+  const [closeProgress, setCloseProgress] = useState<Record<string, CloseProgress>>({});
 
   const { toast } = useToast();
   const adapter = getExchangeAdapter(selectedEx.id);
@@ -596,6 +621,17 @@ export default function ExchangePage() {
     }
 
     setClosingPositions(prev => { const n = new Set(prev); n.add(asset); return n; });
+    // Cancel any in-flight poller for this asset so a re-click doesn't
+    // produce two competing pollers.
+    if (closePollers.get(asset)) {
+      clearTimeout(closePollers.get(asset));
+      closePollers.delete(asset);
+    }
+    const startedAt = Date.now();
+    setCloseProgress(prev => ({
+      ...prev,
+      [asset]: { phase: 'submitting', quantity: 0, filledQty: 0, avgPrice: 0, startedAt, updatedAt: startedAt },
+    }));
 
     try {
       // Resolve a live reference price — same approach as the manual order form.
@@ -608,6 +644,11 @@ export default function ExchangePage() {
       if (price <= 0) {
         const m = `Cannot resolve a live price for ${asset} on ${selectedEx.name}. Retry once the exchange responds — refusing to size a live close from a placeholder.`;
         toast({ title: 'Close blocked', description: m, variant: 'destructive' });
+        setCloseProgress(prev => ({
+          ...prev,
+          [asset]: { ...(prev[asset] ?? { quantity: 0, filledQty: 0, avgPrice: 0, startedAt }),
+            phase: 'error', message: m, updatedAt: Date.now() },
+        }));
         return;
       }
 
@@ -621,25 +662,116 @@ export default function ExchangePage() {
       });
 
       if (res.ok) {
+        const orderId = res.orderId;
         toast({
           title:       'Close submitted',
-          description: `Live SELL ${asset} placed — orderId ${res.orderId ?? '—'}`,
+          description: `Live SELL ${asset} placed — orderId ${orderId ?? '—'}`,
         });
+        setCloseProgress(prev => ({
+          ...prev,
+          [asset]: { ...(prev[asset] ?? { quantity: 0, filledQty: 0, avgPrice: 0, startedAt }),
+            phase: 'pending', orderId, updatedAt: Date.now() },
+        }));
+
+        // Begin polling getOrderStatus until terminal or timeout.
+        // Demo/paper orderIds (prefixed `demo_`/`paper_`) are not real
+        // exchange orders — skip the poll for those.
+        const looksReal = !!orderId && !orderId.startsWith('demo_') && !orderId.startsWith('paper_');
+        if (orderId && looksReal && (mode === 'real' || mode === 'testnet') && apiKey && secretKey) {
+          const creds = { apiKey, secretKey, ...(passphrase ? { passphrase } : {}) };
+          const POLL_TIMEOUT_MS = 60_000;
+          const POLL_INTERVAL_MS = 1500;
+          const poll = async () => {
+            const elapsed = Date.now() - startedAt;
+            if (elapsed > POLL_TIMEOUT_MS) {
+              setCloseProgress(prev => {
+                const cur = prev[asset]; if (!cur) return prev;
+                if (cur.phase === 'filled' || cur.phase === 'canceled' ||
+                    cur.phase === 'rejected' || cur.phase === 'error') return prev;
+                return { ...prev, [asset]: { ...cur, phase: 'timeout',
+                  message: 'Stopped polling after 60s — check the order history for the final status.',
+                  updatedAt: Date.now() } };
+              });
+              closePollers.delete(asset);
+              return;
+            }
+            try {
+              const r = await apiClient.getOrderStatus(selectedEx.id, creds, orderId, asset);
+              if (r.ok) {
+                const o = r.data.order;
+                if (o) {
+                  const filled = num(o.filledQty);
+                  const qty    = num(o.quantity);
+                  const avg    = num(o.avgPrice);
+                  const isPartial  = o.status === 'partial' || (o.status === 'open' && filled > 0);
+                  const isTerminal = o.status === 'filled' || o.status === 'canceled' || o.status === 'rejected';
+                  const phase: ClosePhase =
+                    o.status === 'filled'   ? 'filled'   :
+                    o.status === 'canceled' ? 'canceled' :
+                    o.status === 'rejected' ? 'rejected' :
+                    isPartial               ? 'partial'  : 'pending';
+                  setCloseProgress(prev => ({
+                    ...prev,
+                    [asset]: { ...(prev[asset] ?? { startedAt }),
+                      phase, orderId, quantity: qty, filledQty: filled, avgPrice: avg,
+                      updatedAt: Date.now() },
+                  }));
+                  if (isTerminal) {
+                    closePollers.delete(asset);
+                    refreshLiveData();
+                    return;
+                  }
+                }
+              }
+            } catch { /* swallow — try again next tick */ }
+            closePollers.set(asset, setTimeout(poll, POLL_INTERVAL_MS));
+          };
+          closePollers.set(asset, setTimeout(poll, POLL_INTERVAL_MS));
+        } else {
+          // No reliable orderId to poll (demo/paper or missing creds) —
+          // mark as filled optimistically since executeSignal already
+          // recorded the simulated fill in the execution log.
+          setCloseProgress(prev => ({
+            ...prev,
+            [asset]: { ...(prev[asset] ?? { quantity: 0, filledQty: 0, avgPrice: 0, startedAt }),
+              phase: 'filled', updatedAt: Date.now() },
+          }));
+        }
       } else {
-        toast({
-          title:       'Close blocked',
-          description: `${res.rejectReason ?? 'Rejected'}${res.detail ? ' — ' + res.detail : ''}`,
-          variant:     'destructive',
-        });
+        const reason = `${res.rejectReason ?? 'Rejected'}${res.detail ? ' — ' + res.detail : ''}`;
+        toast({ title: 'Close blocked', description: reason, variant: 'destructive' });
+        setCloseProgress(prev => ({
+          ...prev,
+          [asset]: { ...(prev[asset] ?? { quantity: 0, filledQty: 0, avgPrice: 0, startedAt }),
+            phase: 'rejected', message: reason, updatedAt: Date.now() },
+        }));
       }
     } catch (e) {
       const m = (e as Error).message ?? 'Unexpected error';
       toast({ title: 'Close failed', description: m, variant: 'destructive' });
+      setCloseProgress(prev => ({
+        ...prev,
+        [asset]: { ...(prev[asset] ?? { quantity: 0, filledQty: 0, avgPrice: 0, startedAt }),
+          phase: 'error', message: m, updatedAt: Date.now() },
+      }));
     } finally {
       setClosingPositions(prev => { const n = new Set(prev); n.delete(asset); return n; });
       refreshLiveData();
     }
-  }, [mode, selectedEx.id, selectedEx.name, toast, refreshLiveData]);
+  }, [mode, selectedEx.id, selectedEx.name, apiKey, secretKey, passphrase, toast, refreshLiveData]);
+
+  // Dismiss an inline close-progress panel and stop any active poller.
+  const dismissCloseProgress = useCallback((asset: string) => {
+    if (closePollers.get(asset)) {
+      clearTimeout(closePollers.get(asset));
+      closePollers.delete(asset);
+    }
+    setCloseProgress(prev => {
+      if (!prev[asset]) return prev;
+      const { [asset]: _omit, ...rest } = prev;
+      return rest;
+    });
+  }, []);
 
   // ── Connect ───────────────────────────────────────────────────────────────
   const handleConnect = async () => {
@@ -1387,6 +1519,105 @@ export default function ExchangePage() {
                         {closing ? 'Closing…' : `Close ${b.asset} Position`}
                       </Button>
                     )}
+                    {closeProgress[b.asset] && (() => {
+                      const p = closeProgress[b.asset]!;
+                      const STEPS: Array<{ key: ClosePhase; label: string }> = [
+                        { key: 'submitting', label: 'Submitting' },
+                        { key: 'pending',    label: 'Pending'    },
+                        { key: 'filled',     label: 'Filled'     },
+                      ];
+                      const order: Record<ClosePhase, number> = {
+                        submitting: 0, pending: 1, partial: 1,
+                        filled: 2, canceled: 2, rejected: 2, timeout: 2, error: 2,
+                      };
+                      const cur = order[p.phase];
+                      const isErr = p.phase === 'rejected' || p.phase === 'error' || p.phase === 'canceled' || p.phase === 'timeout';
+                      const fillPct = p.quantity > 0
+                        ? Math.min(100, Math.max(0, (p.filledQty / p.quantity) * 100))
+                        : (p.phase === 'filled' ? 100 : 0);
+                      const phaseLabel =
+                        p.phase === 'submitting' ? 'Submitting…'
+                      : p.phase === 'pending'    ? 'Pending on exchange'
+                      : p.phase === 'partial'    ? 'Partial fill'
+                      : p.phase === 'filled'     ? 'Fully filled — position flattened'
+                      : p.phase === 'canceled'   ? 'Canceled by exchange'
+                      : p.phase === 'rejected'   ? 'Rejected'
+                      : p.phase === 'timeout'    ? 'Polling timed out'
+                                                 : 'Error';
+                      return (
+                        <div
+                          className={`mt-3 rounded-md border p-2 text-[10px] ${
+                            isErr ? 'border-red-500/40 bg-red-500/5'
+                                  : p.phase === 'filled' ? 'border-emerald-500/40 bg-emerald-500/5'
+                                                         : 'border-zinc-700/60 bg-zinc-800/30'}`}
+                          data-testid={`close-progress-${b.asset}`}
+                        >
+                          <div className="flex items-center justify-between mb-1.5">
+                            <div className="flex items-center gap-1.5">
+                              {STEPS.map((s, i) => {
+                                const done = i < cur || (i === cur && (p.phase === 'filled' || p.phase === 'partial'));
+                                const active = i === cur && !isErr;
+                                return (
+                                  <div key={s.key} className="flex items-center gap-1.5">
+                                    <span className={`h-1.5 w-1.5 rounded-full ${
+                                      isErr && i === cur ? 'bg-red-400'
+                                        : done   ? 'bg-emerald-400'
+                                        : active ? 'bg-amber-400 animate-pulse'
+                                                 : 'bg-zinc-600'}`} />
+                                    <span className={`${
+                                      isErr && i === cur ? 'text-red-300'
+                                        : done ? 'text-emerald-300'
+                                        : active ? 'text-amber-300'
+                                                 : 'text-zinc-500'}`}>{s.label}</span>
+                                    {i < STEPS.length - 1 && <span className="text-zinc-700">›</span>}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => dismissCloseProgress(b.asset)}
+                              className="text-zinc-500 hover:text-zinc-300"
+                              aria-label="Dismiss close-progress panel"
+                              data-testid={`button-dismiss-close-progress-${b.asset}`}
+                            >
+                              <X size={11} />
+                            </button>
+                          </div>
+                          <div className="font-mono text-zinc-300">
+                            <span className={isErr ? 'text-red-400' : p.phase === 'filled' ? 'text-emerald-400' : 'text-zinc-200'}>
+                              {phaseLabel}
+                            </span>
+                          </div>
+                          {(p.quantity > 0 || p.filledQty > 0) && (
+                            <>
+                              <div className="mt-1.5 h-1 w-full overflow-hidden rounded bg-zinc-800">
+                                <div
+                                  className={`h-full ${p.phase === 'filled' ? 'bg-emerald-400' : isErr ? 'bg-red-400' : 'bg-amber-400'}`}
+                                  style={{ width: `${fillPct}%` }}
+                                />
+                              </div>
+                              <div className="mt-1 flex items-center justify-between text-zinc-400">
+                                <span>
+                                  Filled <span className="font-mono text-zinc-200">{fmt(p.filledQty, 6)}</span>
+                                  {p.quantity > 0 && <> / <span className="font-mono">{fmt(p.quantity, 6)}</span></>}
+                                  {' '}{b.asset}
+                                </span>
+                                <span>
+                                  Avg <span className="font-mono text-zinc-200">${p.avgPrice > 0 ? fmt(p.avgPrice, 2) : '—'}</span>
+                                </span>
+                              </div>
+                            </>
+                          )}
+                          {p.message && (
+                            <div className={`mt-1 ${isErr ? 'text-red-300' : 'text-zinc-400'}`}>{p.message}</div>
+                          )}
+                          {p.orderId && (
+                            <div className="mt-1 text-zinc-500">Order: <span className="font-mono">{p.orderId.slice(0, 16)}{p.orderId.length > 16 ? '…' : ''}</span></div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </CardContent>
                 </Card>
                 );

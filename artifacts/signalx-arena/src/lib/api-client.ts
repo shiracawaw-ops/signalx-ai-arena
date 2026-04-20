@@ -304,6 +304,30 @@ export const apiClient = {
     });
   },
 
+  async getOrderStatus(
+    exchange: string,
+    creds: ExchangeCredentials,
+    orderId: string,
+    symbol?: string,
+  ): Promise<ApiResult<{ order: {
+    orderId:    string;
+    symbol:     string;
+    side:       'buy' | 'sell';
+    type:       'market' | 'limit';
+    status:     'open' | 'filled' | 'canceled' | 'rejected' | 'partial';
+    quantity:   number;
+    filledQty:  number;
+    price:      number;
+    avgPrice:   number;
+    timestamp:  number;
+  } | null }>> {
+    return request(`${BACKEND}/exchange/${exchange}/order/get`, {
+      method:  'POST',
+      headers: credHeaders(creds),
+      body:    JSON.stringify({ orderId, symbol }),
+    });
+  },
+
   async getOrderHistory(
     exchange: string,
     creds: ExchangeCredentials,
