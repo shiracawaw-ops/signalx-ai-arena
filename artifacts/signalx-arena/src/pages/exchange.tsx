@@ -2374,7 +2374,7 @@ export default function ExchangePage() {
                 <Switch checked={config.onlyLong}
                   onCheckedChange={v => tradeConfig.set(selectedEx.id, { onlyLong: v })} />
               </CfgRow>
-              <CfgRow label="Allowed symbols (comma-separated, empty = all)">
+              <CfgRow label="Allowed symbols (comma-separated, empty = all supported crypto)">
                 <Input value={config.allowedSymbols.join(',')} placeholder="BTC,ETH,SOL"
                   onChange={e => tradeConfig.set(selectedEx.id, { allowedSymbols: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
                   className="h-7 w-36 text-xs font-mono" />

@@ -38,6 +38,19 @@ export interface RiskResult {
   price?:    number;  // rounded price if ok
 }
 
+/**
+ * Strip any common USD-stable suffix (USDT/USDC/USD/BUSD/USDE) from a
+ * symbol and return just the base ticker. Used by the allowed-symbols
+ * gate so `BTC` in the user's whitelist matches a `BTCUSDT` (or `BTC-USD`,
+ * `BTCUSDC`, …) signal coming from the connected exchange, regardless of
+ * which platform's quote convention is in play.
+ */
+export function baseTicker(symbol: string): string {
+  return String(symbol ?? '')
+    .toUpperCase()
+    .replace(/[-_/]?(USDT|USDC|USDE|BUSD|USD)$/u, '');
+}
+
 /** Round a number to a given step size */
 export function roundToStep(value: number, step: number): number {
   if (!step || step <= 0) return value;
@@ -58,11 +71,23 @@ export function validateRisk(input: RiskInput): RiskResult {
     return { ok: false, reason: REJECT.EMERGENCY_STOP, detail: 'Emergency stop is active — all trading halted.' };
   }
 
-  // Allowed symbols check
+  // Allowed symbols check.
+  //
+  // Empty list = allow ALL supported crypto on the connected exchange. The
+  // exchange itself is the source of truth: the bot/autopilot bridge already
+  // rejects non-crypto (stocks/forex/metals) with `unsupported_asset_class`,
+  // and the exchange adapter rejects unknown tickers via `getSymbolRules` /
+  // `placeOrder` errors when we forward them. We therefore only run this
+  // gate when the user has explicitly typed a comma-separated whitelist.
+  //
+  // Custom list = match by base ticker, tolerant of any common USD-stable
+  // suffix on either side. This prevents false `symbol_blocked` rejections
+  // when the user types `BTC` but the signal carries `BTCUSDT`, or vice
+  // versa, and works the same in real, testnet and paper modes.
   if (config.allowedSymbols.length > 0) {
-    const base = symbol.replace(/USDT$|USD$|-USDT$|-USD$/i, '').toUpperCase();
-    const allowed = config.allowedSymbols.map(s => s.toUpperCase());
-    if (!allowed.includes(base) && !allowed.includes(symbol.toUpperCase())) {
+    const sigBase   = baseTicker(symbol);
+    const allowed   = config.allowedSymbols.map(baseTicker);
+    if (!allowed.includes(sigBase)) {
       return { ok: false, reason: REJECT.SYMBOL_BLOCKED, detail: `Symbol ${symbol} is not in the allowed list: ${config.allowedSymbols.join(', ')}` };
     }
   }

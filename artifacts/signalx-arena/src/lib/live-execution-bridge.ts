@@ -14,6 +14,7 @@ import { executionLog, REJECT } from './execution-log.js';
 import { tradeConfig } from './trade-config.js';
 import { credentialStore } from './credential-store.js';
 import { orderProgress } from './order-progress.js';
+import { baseTicker } from './risk-manager.js';
 import type { AutoPilotDecision } from './autopilot.js';
 
 // ── Mode helpers ─────────────────────────────────────────────────────────────
@@ -25,7 +26,14 @@ export function isLiveTradingMode(mode: string): mode is LiveMode {
 }
 
 export function isCryptoSymbol(symbol: string): boolean {
-  return ASSET_MAP[symbol]?.category === 'Crypto';
+  // Tolerant lookup so signals carrying the connected exchange's
+  // quote-suffixed pair (e.g. `BTCUSDT`, `BTC-USD`, `BTCUSDC`) resolve to
+  // the same crypto entry as the bare ticker (`BTC`). Without this, a
+  // signal that already came back from the exchange in its native pair
+  // form would be falsely rejected as non-crypto.
+  if (ASSET_MAP[symbol]?.category === 'Crypto') return true;
+  const base = baseTicker(symbol);
+  return ASSET_MAP[base]?.category === 'Crypto';
 }
 
 // Tracks which (mode, exchange, symbol, side) combos we've already
@@ -248,6 +256,18 @@ export interface ManualOrderOutcome {
 
 export async function submitManualOrder(input: ManualOrderInput): Promise<ManualOrderOutcome> {
   const { exchangeId, exchangeName, symbol, side, priceOverride, mode } = input;
+
+  // Reject non-crypto tickers up front in live modes so users get a clear
+  // `unsupported_asset_class` instead of a downstream exchange error like
+  // "symbol not whitelisted". Paper/demo still let them simulate any
+  // ticker so the rest of the simulator UX is unchanged.
+  const liveMode = mode === 'real' || mode === 'testnet';
+  if (liveMode && !isCryptoSymbol(symbol)) {
+    return {
+      ok: false,
+      message: `unsupported_asset_class — ${symbol} is not a crypto asset supported on ${exchangeName}.`,
+    };
+  }
 
   let price = Number(priceOverride) || 0;
   if (price <= 0) {
