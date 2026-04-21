@@ -15,6 +15,8 @@ import { ASSET_MAP } from '@/lib/storage';
 import { EXCHANGE_MAP } from '@/lib/exchange';
 import { BotFleetPanel } from '@/components/bot-fleet-panel';
 import { loadWallet } from '@/lib/wallet';
+import { botFleet } from '@/lib/bot-fleet';
+import { scoreAllBots } from '@/lib/bot-scoring';
 
 // ── Sim-only detection ─────────────────────────────────────────────────────
 // A bot is "simulator-only" when the user is in a live/testnet mode but the
@@ -274,6 +276,16 @@ export default function AutoPilotPage() {
   stopRef.current        = stop;
 
   const runDecision = useCallback(() => {
+    // Re-rank the fleet's "real bots" every cycle using fresh scoring data so
+    // the smart-assignment modes ('auto_best', 'auto_recent', etc.) actually
+    // promote the best candidates instead of holding the first N inserted.
+    try {
+      const scores = scoreAllBots(botsRef.current, tradesRef.current);
+      botFleet.syncRealBotIds(scores);
+    } catch (err) {
+      console.warn('[autopilot] fleet score sync failed:', err);
+    }
+
     const d = computeAutoPilotDecision(botsRef.current, tradesRef.current, gcRef.current);
     setDecision(d);
 

@@ -5,7 +5,10 @@ import {
   summarizeFleet,
   FLEET_MAX_BOTS,
   FLEET_MIN_BOTS,
+  CAPITAL_USAGE_OPTIONS,
   type RemainingMode,
+  type CapitalUsagePct,
+  type AssignmentMode,
 } from '@/lib/bot-fleet';
 
 interface Props {
@@ -26,6 +29,14 @@ const MODE_DESC: Record<RemainingMode, string> = {
   disabled: 'Stopped — bot will not run at all',
 };
 
+const ASSIGNMENT_OPTIONS: { id: AssignmentMode; title: string; desc: string }[] = [
+  { id: 'auto_best',             title: 'Smart (Best Overall)',  desc: 'Composite score: win-rate × confidence × stability' },
+  { id: 'auto_recent',           title: 'Recent Performance',    desc: 'Bots that just had a hot streak' },
+  { id: 'auto_lowest_rejection', title: 'Fewest Rejections',     desc: 'Bots whose orders fill the most reliably' },
+  { id: 'auto_highest_stability',title: 'Most Stable',           desc: 'Bots with the smoothest equity curve' },
+  { id: 'manual',                title: 'Manual (Pinned)',       desc: 'Keep whichever bots you currently selected' },
+];
+
 export function BotFleetPanel({ totalBots, realBalanceUSD, minNotionalUSD = 10 }: Props) {
   const cfg = useBotFleet();
 
@@ -37,6 +48,8 @@ export function BotFleetPanel({ totalBots, realBalanceUSD, minNotionalUSD = 10 }
   const setMax = (n: number) => botFleet.set({ maxBots: n });
   const setActive = (n: number) => botFleet.set({ activeRealBots: n });
   const setMode = (m: RemainingMode) => botFleet.set({ remainingMode: m });
+  const setUsage = (p: CapitalUsagePct) => botFleet.set({ capitalUsagePct: p });
+  const setAssign = (a: AssignmentMode) => botFleet.set({ assignmentMode: a });
 
   return (
     <div
@@ -136,6 +149,79 @@ export function BotFleetPanel({ totalBots, realBalanceUSD, minNotionalUSD = 10 }
         </div>
       </div>
 
+      {/* ── Capital Usage % ── */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <label className="text-[11px] font-semibold text-zinc-300">
+            Capital Usage
+            <span className="ml-2 text-zinc-500 font-normal">(of real balance)</span>
+          </label>
+          <span className="font-mono text-sm text-cyan-400 font-bold" data-testid="value-capital-usage">
+            {cfg.capitalUsagePct}%
+          </span>
+        </div>
+        <div className="grid grid-cols-5 gap-1.5">
+          {CAPITAL_USAGE_OPTIONS.map(p => {
+            const selected = cfg.capitalUsagePct === p;
+            return (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setUsage(p)}
+                data-testid={`button-usage-${p}`}
+                className={
+                  'rounded-lg px-2 py-1.5 text-xs font-bold border transition-colors ' +
+                  (selected
+                    ? 'border-cyan-500/60 bg-cyan-600/15 text-cyan-300'
+                    : 'border-zinc-800 bg-zinc-950/40 text-zinc-400 hover:bg-zinc-800/40')
+                }
+              >
+                {p}%
+              </button>
+            );
+          })}
+        </div>
+        <div className="text-[10px] text-zinc-500 leading-snug">
+          Only this share of your real balance is exposed to live trading. The rest stays in reserve.
+        </div>
+      </div>
+
+      {/* ── Assignment Mode ── */}
+      <div className="space-y-2">
+        <label className="text-[11px] font-semibold text-zinc-300">
+          Real-Bot Selection
+        </label>
+        <div className="grid grid-cols-1 gap-1.5">
+          {ASSIGNMENT_OPTIONS.map(opt => {
+            const selected = cfg.assignmentMode === opt.id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => setAssign(opt.id)}
+                data-testid={`button-assignment-${opt.id}`}
+                className={
+                  'rounded-lg px-3 py-2 text-left text-xs font-semibold border transition-colors ' +
+                  (selected
+                    ? 'border-emerald-500/60 bg-emerald-600/15 text-emerald-300'
+                    : 'border-zinc-800 bg-zinc-950/40 text-zinc-400 hover:bg-zinc-800/40')
+                }
+              >
+                <div className="flex items-center gap-1.5">
+                  <span>{opt.title}</span>
+                  {opt.id === 'auto_best' && (
+                    <span className="text-[8px] uppercase tracking-wider text-emerald-500/80">recommended</span>
+                  )}
+                </div>
+                <div className="text-[10px] font-normal text-zinc-500 mt-0.5 leading-snug">
+                  {opt.desc}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* ── Remaining Bots Mode ── */}
       <div className="space-y-2">
         <label className="text-[11px] font-semibold text-zinc-300">
@@ -191,6 +277,16 @@ export function BotFleetPanel({ totalBots, realBalanceUSD, minNotionalUSD = 10 }
                 ? 'text-red-400'
                 : 'text-emerald-400'
             }
+          />
+          <SummaryStat
+            label={`Usable Capital (${summary.capitalUsagePct}%)`}
+            value={`$${summary.usableCapitalUSD.toFixed(2)}`}
+            color="text-cyan-400"
+          />
+          <SummaryStat
+            label="Held in Reserve"
+            value={`$${summary.reservedCapitalUSD.toFixed(2)}`}
+            color="text-zinc-300"
           />
         </div>
 

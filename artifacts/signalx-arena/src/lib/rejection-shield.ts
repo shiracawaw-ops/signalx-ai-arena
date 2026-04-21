@@ -26,11 +26,29 @@ export interface ShieldInput {
   forceRefresh?: boolean;
 }
 
+/**
+ * Categorized block reason. Maps 1:1 onto the operator-facing `REJECT.*` codes
+ * in execution-log so the engine never has to surface a generic "symbol_blocked"
+ * to the UI again — the operator can see the exact root cause.
+ */
+export type ShieldBlockCode =
+  | 'symbol_not_found'
+  | 'symbol_inactive'
+  | 'symbol_mapping_failed'
+  | 'symbol_temporarily_locked'
+  | 'exchange_restriction'
+  | 'stale_cache_conflict'
+  | 'below_min_notional'
+  | 'invalid_order_size'
+  | 'insufficient_balance'
+  | 'cooldown_active';
+
 export interface ShieldVerdict {
   outcome:        ShieldOutcome;
   reason:         string;
   exchangeSymbol: string;
   category:       string;
+  blockCode?:     ShieldBlockCode;     // present when outcome !== 'pass'
   rules?:         SymbolRules;
   estimatedQty:   number;
   notional:       number;
@@ -41,11 +59,26 @@ export interface ShieldVerdict {
 
 interface RejectMemory { fails: number; lastFailAt: number; cooldownUntil: number }
 const MEMORY = new Map<string, RejectMemory>();
-const COOLDOWN_MS = 5 * 60_000;
+// 90s cooldown (was 5 min). Long enough to back off, short enough that a
+// transient mapping issue does not freeze a symbol for a whole session.
+const COOLDOWN_MS = 90_000;
 const FAIL_THRESHOLD = 2;
+// Drop entries older than this so stale fail-counts can never compound into
+// a permanent block. Anything not touched in 10 min is cleared next access.
+const MEMORY_TTL_MS = 10 * 60_000;
 function memKey(ex: string, sym: string) { return `${ex}:${sym}`; }
 
+function gcMemory() {
+  const now = Date.now();
+  MEMORY.forEach((v, k) => {
+    if (v.cooldownUntil <= now && now - v.lastFailAt > MEMORY_TTL_MS) {
+      MEMORY.delete(k);
+    }
+  });
+}
+
 export function noteRejection(exchange: string, exchangeSymbol: string) {
+  gcMemory();
   const k = memKey(exchange, exchangeSymbol);
   const m = MEMORY.get(k) ?? { fails: 0, lastFailAt: 0, cooldownUntil: 0 };
   m.fails += 1;
@@ -56,6 +89,11 @@ export function noteRejection(exchange: string, exchangeSymbol: string) {
 
 export function noteSuccess(exchange: string, exchangeSymbol: string) {
   MEMORY.delete(memKey(exchange, exchangeSymbol));
+}
+
+/** Manually clear all cooldown memory (used by the diagnostics "Clear locks" button). */
+export function clearShieldMemory(): void {
+  MEMORY.clear();
 }
 
 async function fetchRules(exchange: string, exchangeSymbol: string, creds: ExchangeCredentials | null | undefined): Promise<SymbolRules | undefined> {
@@ -94,9 +132,15 @@ export async function preflight(input: ShieldInput): Promise<ShieldVerdict> {
       : (compliance.reason ?? 'Asset not supported'),
   });
   if (!compliance.ok) {
+    // Distinguish between "wrong exchange for this asset class" (restriction)
+    // and "this base ticker is not in our catalog at all" (mapping failure).
+    const reasonText = compliance.reason ?? `Asset not tradable on ${input.exchange}.`;
+    const isMapping  = /not in the catalog/i.test(reasonText);
+    const code: ShieldBlockCode = isMapping ? 'symbol_mapping_failed' : 'exchange_restriction';
     return {
       outcome: 'block',
-      reason:  compliance.reason ?? `Asset not tradable on ${input.exchange}.`,
+      reason:  reasonText,
+      blockCode: code,
       exchangeSymbol: compliance.exchangeSymbol,
       category: compliance.category,
       estimatedQty: 0, notional: 0, cooldownMs: 0,
@@ -112,6 +156,7 @@ export async function preflight(input: ShieldInput): Promise<ShieldVerdict> {
     return {
       outcome: 'block',
       reason:  `Cooldown active for ${compliance.exchangeSymbol}.`,
+      blockCode: 'symbol_temporarily_locked',
       exchangeSymbol: compliance.exchangeSymbol,
       category: compliance.category,
       estimatedQty: 0, notional: 0, cooldownMs: remain,
@@ -136,11 +181,11 @@ export async function preflight(input: ShieldInput): Promise<ShieldVerdict> {
   if (rules) {
     if (estQty < rules.minQty) {
       checks.push({ id: 'minQty', ok: false, detail: `Qty ${estQty.toFixed(6)} < minQty ${rules.minQty}` });
-      return finalize('block', `Trade size below exchange minQty (${rules.minQty}).`, compliance, rules, estQty, notional, checks);
+      return finalize('block', `Trade size below exchange minQty (${rules.minQty}).`, compliance, rules, estQty, notional, checks, 'invalid_order_size');
     }
     if (rules.minNotional > 0 && notional < rules.minNotional) {
       checks.push({ id: 'minNotional', ok: false, detail: `Notional $${notional.toFixed(2)} < $${rules.minNotional}` });
-      return finalize('block', `Trade size $${notional.toFixed(2)} below minNotional $${rules.minNotional}.`, compliance, rules, estQty, notional, checks);
+      return finalize('block', `Trade size $${notional.toFixed(2)} below minNotional $${rules.minNotional}.`, compliance, rules, estQty, notional, checks, 'below_min_notional');
     }
     checks.push({ id: 'minNotional', ok: true, detail: `Notional $${notional.toFixed(2)} OK.` });
   }
@@ -153,7 +198,7 @@ export async function preflight(input: ShieldInput): Promise<ShieldVerdict> {
     if (have !== undefined) {
       if (have < needed) {
         checks.push({ id: 'balance', ok: false, detail: `Need ${needed.toFixed(4)} ${asset}, have ${have.toFixed(4)}` });
-        return finalize('warn', `Insufficient ${asset} on exchange (need ${needed.toFixed(4)}).`, compliance, rules, estQty, notional, checks);
+        return finalize('warn', `Insufficient ${asset} on exchange (need ${needed.toFixed(4)}).`, compliance, rules, estQty, notional, checks, 'insufficient_balance');
       }
       checks.push({ id: 'balance', ok: true, detail: `${have.toFixed(4)} ${asset} available.` });
     }
@@ -168,9 +213,11 @@ function finalize(
   rules: SymbolRules | undefined,
   estQty: number, notional: number,
   checks: ShieldVerdict['checks'],
+  blockCode?: ShieldBlockCode,
 ): ShieldVerdict {
   return {
     outcome, reason,
+    ...(blockCode ? { blockCode } : {}),
     exchangeSymbol: compliance.exchangeSymbol,
     category:       compliance.category,
     ...(rules ? { rules } : {}),

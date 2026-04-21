@@ -14,12 +14,45 @@ export const FLEET_MIN_BOTS = 1;
 
 export type RemainingMode = 'standby' | 'paper' | 'disabled';
 
+/**
+ * How the system picks which bots receive real balance when the user only
+ * activates a subset. `manual` keeps whatever the user pinned; the four
+ * `auto_*` modes re-rank every sync using a different score component so the
+ * best candidates float to the top automatically.
+ */
+export type AssignmentMode =
+  | 'manual'
+  | 'auto_best'              // composite score (recommended)
+  | 'auto_recent'            // recent performance only
+  | 'auto_lowest_rejection'  // fewest rejections recently
+  | 'auto_highest_stability';// lowest drawdown / steadiest equity
+
+export const CAPITAL_USAGE_OPTIONS = [10, 25, 50, 75, 100] as const;
+export type CapitalUsagePct = typeof CAPITAL_USAGE_OPTIONS[number];
+
 export interface FleetConfig {
-  maxBots:        number;          // 1..50
-  activeRealBots: number;          // 0..maxBots
-  remainingMode:  RemainingMode;
+  maxBots:         number;          // 1..50
+  activeRealBots:  number;          // 0..maxBots
+  remainingMode:   RemainingMode;
+  capitalUsagePct: CapitalUsagePct; // % of REAL balance allowed for live trading
+  assignmentMode:  AssignmentMode;
   /** Ordered bot IDs (top-N is "real"). Recomputed when bot list changes. */
-  realBotIds:     string[];
+  realBotIds:      string[];
+}
+
+/**
+ * One row of scoring data per bot, supplied by the caller. The selection
+ * engine only reads what it needs for the active assignment mode, so callers
+ * can safely send a partial set of metrics during warm-up.
+ */
+export interface BotScore {
+  id:                string;
+  name?:             string;
+  compositeScore?:   number;     // 0..100 — overall efficiency
+  recentScore?:      number;     // 0..100 — last-N performance
+  rejectionRate?:    number;     // 0..1   — rejected / submitted
+  stabilityScore?:   number;     // 0..100 — inverse of drawdown
+  realizedPnl?:      number;     // for ranking ties
 }
 
 export interface FleetSummary {
@@ -29,7 +62,13 @@ export interface FleetSummary {
   effectiveRealBots: number;       // min(activeRealBots, totalBots)
   remainingBots:     number;       // totalBots - effectiveRealBots
   remainingMode:     RemainingMode;
-  allocationPerBot:  number;       // realBalance / effectiveRealBots
+  allocationPerBot:  number;       // perBotNet (after fees)
+  capitalUsagePct:   CapitalUsagePct;
+  totalBalanceUSD:   number;       // raw balance the user supplied
+  usableCapitalUSD:  number;       // balance * capitalUsagePct
+  reservedCapitalUSD: number;      // balance held back by capital % cap
+  deployableUSD:     number;       // usable * (1 - safetyReserve)
+  assignmentMode:    AssignmentMode;
   warnings:          string[];
   blocking:          boolean;      // true → config invalid, can't trade
 }
@@ -45,7 +84,22 @@ function clampInt(n: unknown, lo: number, hi: number, fb: number): number {
 }
 
 function defaultConfig(): FleetConfig {
-  return { maxBots: 20, activeRealBots: 5, remainingMode: 'paper', realBotIds: [] };
+  return {
+    maxBots: 20, activeRealBots: 5, remainingMode: 'paper',
+    capitalUsagePct: 25, assignmentMode: 'auto_best', realBotIds: [],
+  };
+}
+
+function normalizeUsage(n: unknown, fb: CapitalUsagePct): CapitalUsagePct {
+  const v = Math.round(Number(n)) as CapitalUsagePct;
+  return (CAPITAL_USAGE_OPTIONS as readonly number[]).includes(v) ? v : fb;
+}
+
+function normalizeAssignment(raw: unknown, fb: AssignmentMode): AssignmentMode {
+  const allowed: AssignmentMode[] = [
+    'manual', 'auto_best', 'auto_recent', 'auto_lowest_rejection', 'auto_highest_stability',
+  ];
+  return allowed.includes(raw as AssignmentMode) ? (raw as AssignmentMode) : fb;
 }
 
 function normalize(raw: Partial<FleetConfig> | null | undefined): FleetConfig {
@@ -58,7 +112,12 @@ function normalize(raw: Partial<FleetConfig> | null | undefined): FleetConfig {
   const realBotIds = Array.isArray(raw.realBotIds)
     ? raw.realBotIds.filter(x => typeof x === 'string').slice(0, FLEET_MAX_BOTS)
     : [];
-  return { maxBots, activeRealBots, remainingMode: mode, realBotIds };
+  return {
+    maxBots, activeRealBots, remainingMode: mode,
+    capitalUsagePct: normalizeUsage(raw.capitalUsagePct, d.capitalUsagePct),
+    assignmentMode:  normalizeAssignment(raw.assignmentMode, d.assignmentMode),
+    realBotIds,
+  };
 }
 
 type Listener = (cfg: FleetConfig) => void;
@@ -126,9 +185,39 @@ class BotFleetManager {
     return picked;
   }
 
-  /** Persist the picked list so the same bots keep their "real" slot. */
-  syncRealBotIds(allBots: BotLite[]) {
-    const next = this.pickRealBots(allBots);
+  /**
+   * Smart selection: rank bots by the metric that matches the active
+   * `assignmentMode`, then pick the top N.  In `manual` mode the previous
+   * pinned IDs are kept and only filled up if the user raised the count.
+   */
+  pickRealBotsScored(scores: BotScore[], mode: AssignmentMode = this.cfg.assignmentMode): string[] {
+    const need = Math.min(this.cfg.activeRealBots, scores.length);
+    if (need <= 0) return [];
+
+    if (mode === 'manual') {
+      const lite: BotLite[] = scores.map(s => ({ id: s.id, name: s.name }));
+      return this.pickRealBots(lite);
+    }
+
+    const ranked = [...scores].sort((a, b) => scoreFor(b, mode) - scoreFor(a, mode));
+    return ranked.slice(0, need).map(s => s.id);
+  }
+
+  /**
+   * Persist the picked list so the same bots keep their "real" slot.  When
+   * `scores` is provided the smart selection engine is used; otherwise the
+   * legacy insertion-order picker runs (kept for backwards compatibility).
+   */
+  syncRealBotIds(allBots: BotLite[] | BotScore[]) {
+    const looksLikeScores = allBots.length > 0 && (
+      'compositeScore' in allBots[0] ||
+      'recentScore'    in allBots[0] ||
+      'rejectionRate'  in allBots[0] ||
+      'stabilityScore' in allBots[0]
+    );
+    const next = looksLikeScores
+      ? this.pickRealBotsScored(allBots as BotScore[])
+      : this.pickRealBots(allBots as BotLite[]);
     const same =
       next.length === this.cfg.realBotIds.length &&
       next.every((id, i) => id === this.cfg.realBotIds[i]);
@@ -138,6 +227,16 @@ class BotFleetManager {
       this.notify();
     }
     return next;
+  }
+}
+
+function scoreFor(s: BotScore, mode: AssignmentMode): number {
+  switch (mode) {
+    case 'auto_recent':             return s.recentScore     ?? 0;
+    case 'auto_lowest_rejection':   return 100 - 100 * (s.rejectionRate ?? 0);
+    case 'auto_highest_stability':  return s.stabilityScore  ?? 0;
+    case 'auto_best':
+    default:                        return s.compositeScore  ?? 0;
   }
 }
 
@@ -164,11 +263,17 @@ export function summarizeFleet(input: ValidateInput): FleetSummary {
   const minNotional   = Math.max(1, input.minNotionalUSD   ?? 10);
   const feeBuffer     = Math.max(0, input.feeBufferPct     ?? 0.5) / 100;
   const safetyReserve = Math.max(0, Math.min(50, input.safetyReservePct ?? 10)) / 100;
+  const capitalUsage  = Math.max(0, Math.min(100, cfg.capitalUsagePct)) / 100;
 
   const effectiveRealBots = Math.max(0, Math.min(cfg.activeRealBots, totalBots));
   const remainingBots     = Math.max(0, totalBots - effectiveRealBots);
 
-  const deployable     = Math.max(0, realBalanceUSD * (1 - safetyReserve));
+  // Capital pipeline:
+  //   balance → (× capitalUsagePct) usable → (× 1-safety) deployable
+  //          → split equally → (× 1-feeBuffer) perBotNet
+  const usableCapital  = Math.max(0, realBalanceUSD * capitalUsage);
+  const reservedCapital = Math.max(0, realBalanceUSD - usableCapital);
+  const deployable     = Math.max(0, usableCapital * (1 - safetyReserve));
   const perBotGross    = effectiveRealBots > 0 ? deployable / effectiveRealBots : 0;
   const perBotNet      = perBotGross * (1 - feeBuffer);
   const allocationPerBot = Math.round(perBotNet * 100) / 100;
@@ -210,6 +315,12 @@ export function summarizeFleet(input: ValidateInput): FleetSummary {
     remainingBots,
     remainingMode:  cfg.remainingMode,
     allocationPerBot,
+    capitalUsagePct: cfg.capitalUsagePct,
+    totalBalanceUSD:    Math.round(realBalanceUSD     * 100) / 100,
+    usableCapitalUSD:   Math.round(usableCapital      * 100) / 100,
+    reservedCapitalUSD: Math.round(reservedCapital    * 100) / 100,
+    deployableUSD:      Math.round(deployable         * 100) / 100,
+    assignmentMode: cfg.assignmentMode,
     warnings,
     blocking,
   };

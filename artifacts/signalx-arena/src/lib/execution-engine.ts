@@ -261,8 +261,21 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       credentials,
     });
     if (shield.outcome === 'block') {
-      return reject(signal, exchange, mode, REJECT.SYMBOL_BLOCKED,
-        `Pipeline shield: ${shield.reason}`);
+      // Translate the shield's categorized blockCode into a specific REJECT
+      // code so the operator never sees a generic "symbol_blocked" again.
+      const code =
+        shield.blockCode === 'symbol_temporarily_locked' ? REJECT.SYMBOL_TEMPORARILY_LOCKED :
+        shield.blockCode === 'exchange_restriction'      ? REJECT.EXCHANGE_RESTRICTION      :
+        shield.blockCode === 'symbol_mapping_failed'     ? REJECT.SYMBOL_MAPPING_FAILED     :
+        shield.blockCode === 'symbol_not_found'          ? REJECT.SYMBOL_NOT_FOUND          :
+        shield.blockCode === 'symbol_inactive'           ? REJECT.SYMBOL_INACTIVE           :
+        shield.blockCode === 'below_min_notional'        ? REJECT.BELOW_MIN_NOTIONAL        :
+        shield.blockCode === 'invalid_order_size'        ? REJECT.INVALID_ORDER_SIZE        :
+        shield.blockCode === 'insufficient_balance'      ? REJECT.INSUFFICIENT_BALANCE      :
+        shield.blockCode === 'cooldown_active'           ? REJECT.COOLDOWN_ACTIVE           :
+        shield.blockCode === 'stale_cache_conflict'      ? REJECT.STALE_CACHE_CONFLICT      :
+                                                           REJECT.PREFLIGHT_NOT_READY;
+      return reject(signal, exchange, mode, code, `Pre-flight: ${shield.reason}`);
     }
   } catch (e) {
     console.warn('[engine] Pipeline shield preflight failed (non-fatal):', (e as Error).message);

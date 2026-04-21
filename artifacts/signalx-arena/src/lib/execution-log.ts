@@ -130,6 +130,17 @@ export const REJECT = {
   INVALID_SIDE:            'invalid_side',
   UNSUPPORTED_ASSET:       'unsupported_asset_class',
   FLEET_GATE_BENCHED:      'fleet_gate_benched',
+  // ── Categorized symbol-block reasons (replace generic SYMBOL_BLOCKED) ──────
+  SYMBOL_NOT_FOUND:           'symbol_not_found',
+  SYMBOL_INACTIVE:            'symbol_inactive',
+  SYMBOL_MAPPING_FAILED:      'symbol_mapping_failed',
+  SYMBOL_TEMPORARILY_LOCKED:  'symbol_temporarily_locked',
+  EXCHANGE_RESTRICTION:       'exchange_restriction',
+  STALE_CACHE_CONFLICT:       'stale_cache_conflict',
+  DUPLICATE_POSITION_GUARD:   'duplicate_position_guard',
+  PRECISION_VALIDATION_FAILED:'precision_validation_failed',
+  ACCOUNT_MODE_MISMATCH:      'account_mode_mismatch',
+  PREFLIGHT_NOT_READY:        'preflight_not_ready',
 } as const;
 
 export type RejectReason = typeof REJECT[keyof typeof REJECT];

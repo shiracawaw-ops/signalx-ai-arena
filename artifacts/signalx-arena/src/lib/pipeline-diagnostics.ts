@@ -41,7 +41,8 @@ export function takeSnapshot(input: SnapshotInput): PipelineSnapshot {
     maxPerBot: input.totalCapital * 0.30,
     reservePct: 0.10,
     realBotIds,
-    remainingMode: fleetCfg.remainingMode,
+    remainingMode:   fleetCfg.remainingMode,
+    capitalUsagePct: fleetCfg.capitalUsagePct,
   });
   return {
     takenAt:      Date.now(),
