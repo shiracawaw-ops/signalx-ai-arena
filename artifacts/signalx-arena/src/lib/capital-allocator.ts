@@ -12,6 +12,7 @@
 //      minimums and overall risk caps.
 
 import type { AssetStudy } from './asset-study';
+import type { RemainingMode } from './bot-fleet';
 
 export interface AllocationInput {
   totalCapitalUSD: number;
@@ -19,6 +20,10 @@ export interface AllocationInput {
   minPerBot?:      number;   // exchange minNotional fallback (default 10)
   maxPerBot?:      number;   // hard ceiling per bot (default totalCapital * 0.35)
   reservePct?:     number;   // % held as cash (default 10%)
+  /** When set, only these bot IDs may receive real capital. */
+  realBotIds?:     string[];
+  /** What to label the non-real bots in the skipped list. Default: 'paper'. */
+  remainingMode?:  RemainingMode;
 }
 
 export interface BotAllocation {
@@ -51,8 +56,35 @@ export function allocateCapital(input: AllocationInput): AllocationPlan {
   const allocations: BotAllocation[] = [];
   const skipped:     BotAllocation[] = [];
 
-  const eligible = input.studies.filter(s => s.verdict === 'ready' || s.verdict === 'warm-up');
-  const blocked  = input.studies.filter(s => s.verdict === 'blocked' || s.verdict === 'risky' || s.verdict === 'stalled');
+  const realSet = input.realBotIds && input.realBotIds.length > 0
+    ? new Set(input.realBotIds)
+    : null;
+  const remainingMode: RemainingMode = input.remainingMode ?? 'paper';
+  const remainingLabel =
+    remainingMode === 'standby'  ? 'Standby — fleet limit reached, no real capital'  :
+    remainingMode === 'disabled' ? 'Disabled — fleet limit reached, bot inactive'    :
+                                   'Paper mode — fleet limit reached, sim trades only';
+
+  // Step 1: enforce fleet gating BEFORE verdict filtering. Bots not in the
+  // real-bot allow-list never receive real capital regardless of verdict.
+  const fleetEligible = realSet
+    ? input.studies.filter(s => realSet.has(s.botId))
+    : input.studies;
+  const fleetBenched = realSet
+    ? input.studies.filter(s => !realSet.has(s.botId))
+    : [];
+
+  for (const s of fleetBenched) {
+    skipped.push({
+      botId: s.botId, botName: s.botName, symbol: s.arenaSymbol,
+      amountUSD: 0, weight: 0,
+      reason: remainingLabel,
+      active: false,
+    });
+  }
+
+  const eligible = fleetEligible.filter(s => s.verdict === 'ready' || s.verdict === 'warm-up');
+  const blocked  = fleetEligible.filter(s => s.verdict === 'blocked' || s.verdict === 'risky' || s.verdict === 'stalled');
 
   for (const s of blocked) {
     skipped.push({

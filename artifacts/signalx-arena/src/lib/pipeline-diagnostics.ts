@@ -7,6 +7,7 @@ import { shieldStats } from './rejection-shield';
 import { complianceMatrix, SUPPORTED_EXCHANGES, type ExchangeId } from './asset-compliance';
 import { studyAll, studySummary, type AssetStudy, type BotInputs } from './asset-study';
 import { allocateCapital, type AllocationPlan } from './capital-allocator';
+import { botFleet } from './bot-fleet';
 
 export interface PipelineSnapshot {
   takenAt:        number;
@@ -29,12 +30,18 @@ export interface SnapshotInput {
 
 export function takeSnapshot(input: SnapshotInput): PipelineSnapshot {
   const studies = studyAll(input.bots);
+  // Fleet-gating: keep the persisted real-bot list in sync with the live bots
+  // and pass it down so non-real bots never receive real capital.
+  const fleetCfg = botFleet.get();
+  const realBotIds = botFleet.syncRealBotIds(input.bots.map(b => ({ id: b.bot.id, name: b.bot.name })));
   const allocation = allocateCapital({
     totalCapitalUSD: input.totalCapital,
     studies,
     minPerBot: 10,
     maxPerBot: input.totalCapital * 0.30,
     reservePct: 0.10,
+    realBotIds,
+    remainingMode: fleetCfg.remainingMode,
   });
   return {
     takenAt:      Date.now(),

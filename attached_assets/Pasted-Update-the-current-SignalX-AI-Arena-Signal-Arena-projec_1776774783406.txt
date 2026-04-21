@@ -1,0 +1,94 @@
+Update the current SignalX AI Arena / Signal Arena project to add advanced bot-count control for real balance trading.
+
+Do not redesign the whole app.
+Keep the existing UI style as much as possible.
+
+Add the following functionality:
+
+1. Max Bot Capacity
+   Allow the system to support up to 50 bots total.
+   Add a configurable setting:
+
+* Max Bots
+  Range:
+* minimum sensible value
+* maximum 50
+
+2. Active Real Bot Count
+   Add a setting that lets the user choose exactly how many bots are allowed to trade using the real balance.
+   Examples:
+
+* total bots = 20
+* active real bots = 5
+  Then only 5 bots may use real capital.
+
+3. Remaining Bots Mode
+   Add a setting for what happens to all non-real bots.
+   The user must be able to choose one of these modes for the remaining bots:
+
+* standby
+* paper
+* disabled
+
+Example behavior:
+
+* total bots = 20
+* active real bots = 5
+* remaining bots mode = paper
+  Result:
+* 5 bots trade on real balance
+* 15 bots run in paper mode
+
+Another example:
+
+* total bots = 50
+* active real bots = 8
+* remaining bots mode = standby
+  Result:
+* 8 bots trade on real balance
+* 42 bots stay in standby mode
+
+4. Validation Rules
+   Add internal safeguards:
+
+* active real bot count cannot exceed total bot count
+* total bot count cannot exceed 50
+* if real balance is too small, warn the user
+* if allocated capital per real bot is too low to create valid orders, show warning or suggest reducing active real bot count
+* prevent impossible configurations
+
+5. Smart Capital Allocation
+   Distribute usable real capital only across the selected active real bots.
+   Do not allocate real capital to the remaining bots unless user explicitly changes their mode later.
+   Respect:
+
+* min notional
+* fee buffer
+* safety reserve
+* per-bot allocation validity
+
+6. UI Additions
+   Inside Exchange or AutoPilot settings, add:
+
+* Total Bots selector
+* Active Real Bots selector
+* Remaining Bots Mode selector
+* Summary panel showing:
+
+  * total bots
+  * active real bots
+  * remaining bots
+  * remaining bots mode
+  * allocation per real bot
+  * warnings if configuration is unsafe
+
+7. Final behavior
+   The user should be able to do this clearly:
+
+* set total bots up to 50
+* choose how many trade with real balance
+* choose whether the rest are standby, paper, or disabled
+* see a clear summary before trading starts
+
+Implement this directly in the current working project, not as mock UI only.
+Wire it into the actual bot activation and allocation logic.

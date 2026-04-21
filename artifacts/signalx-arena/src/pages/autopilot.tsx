@@ -13,6 +13,8 @@ import { exchangeMode, type ExchangeModeState } from '@/lib/exchange-mode';
 import { dispatchAutoPilotLiveSignal, type AutoPilotDispatchKey } from '@/lib/live-execution-bridge';
 import { ASSET_MAP } from '@/lib/storage';
 import { EXCHANGE_MAP } from '@/lib/exchange';
+import { BotFleetPanel } from '@/components/bot-fleet-panel';
+import { loadWallet } from '@/lib/wallet';
 
 // ── Sim-only detection ─────────────────────────────────────────────────────
 // A bot is "simulator-only" when the user is in a live/testnet mode but the
@@ -403,6 +405,13 @@ export default function AutoPilotPage() {
             ) : null}
           </div>
         </div>
+
+        {/* ── Bot Fleet Control (real-balance allocation) ── */}
+        <BotFleetPanel
+          totalBots={bots.length}
+          realBalanceUSD={loadWallet().virtualBalance}
+          minNotionalUSD={10}
+        />
 
         {/* ── No data state ── */}
         {!selected && (
