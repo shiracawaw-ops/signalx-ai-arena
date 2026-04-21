@@ -8,6 +8,20 @@
 // re-render on changes. validateFleet() returns warnings the UI can surface.
 
 import { useEffect, useState } from 'react';
+import { botDoctorStore } from './bot-doctor-store.js';
+
+/**
+ * Live snapshot of bot IDs the Doctor has benched. Read on every selection
+ * pass so freshly benched bots drop out of the eligible set immediately
+ * (without a config change). Lookup is O(1) per bot via the returned Set.
+ */
+function getBenchedSet(): Set<string> {
+  try {
+    return new Set(botDoctorStore.benchList().map(e => e.botId));
+  } catch {
+    return new Set();
+  }
+}
 
 export const FLEET_MAX_BOTS = 50;
 export const FLEET_MIN_BOTS = 1;
@@ -173,12 +187,14 @@ class BotFleetManager {
    * `activeRealBots` IDs that still exist. Pure relative to inputs.
    */
   pickRealBots(allBots: BotLite[]): string[] {
-    const alive = new Set(allBots.map(b => b.id));
+    const benched = getBenchedSet();
+    const eligible = allBots.filter(b => !benched.has(b.id));
+    const alive = new Set(eligible.map(b => b.id));
     const previous = this.cfg.realBotIds.filter(id => alive.has(id));
-    const need = Math.min(this.cfg.activeRealBots, allBots.length);
+    const need = Math.min(this.cfg.activeRealBots, eligible.length);
     if (previous.length >= need) return previous.slice(0, need);
     const picked = [...previous];
-    for (const b of allBots) {
+    for (const b of eligible) {
       if (picked.length >= need) break;
       if (!picked.includes(b.id)) picked.push(b.id);
     }
@@ -191,15 +207,17 @@ class BotFleetManager {
    * pinned IDs are kept and only filled up if the user raised the count.
    */
   pickRealBotsScored(scores: BotScore[], mode: AssignmentMode = this.cfg.assignmentMode): string[] {
-    const need = Math.min(this.cfg.activeRealBots, scores.length);
+    const benched = getBenchedSet();
+    const eligibleScores = scores.filter(s => !benched.has(s.id));
+    const need = Math.min(this.cfg.activeRealBots, eligibleScores.length);
     if (need <= 0) return [];
 
     if (mode === 'manual') {
-      const lite: BotLite[] = scores.map(s => ({ id: s.id, name: s.name }));
+      const lite: BotLite[] = eligibleScores.map(s => ({ id: s.id, name: s.name }));
       return this.pickRealBots(lite);
     }
 
-    const ranked = [...scores].sort((a, b) => scoreFor(b, mode) - scoreFor(a, mode));
+    const ranked = [...eligibleScores].sort((a, b) => scoreFor(b, mode) - scoreFor(a, mode));
     return ranked.slice(0, need).map(s => s.id);
   }
 

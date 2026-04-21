@@ -40,6 +40,10 @@ export interface RealProfitState {
   perBot:             Record<string, BotRealStat>;
   // FIFO inventory per exchange:baseAsset
   lots:               Record<string, RealLot[]>;
+  // Append-only audit log of every closed real-mode SELL match. Capped at
+  // MAX_CLOSED_TRADES so localStorage stays bounded. Powers the
+  // "Real Profit Proof" panel — every entry is a real, executed trade.
+  closedTrades:       ClosedRealTrade[];
   lastUpdated:        number;
 }
 
@@ -50,6 +54,22 @@ export interface BotRealStat {
   wins:           number;
   losses:         number;
 }
+
+export interface ClosedRealTrade {
+  ts:           number;
+  exchange:     string;
+  baseAsset:    string;
+  qty:          number;
+  entryPrice:   number;
+  exitPrice:    number;
+  feesUSD:      number;     // entry fee share + sell fee share for this match
+  grossPnlUSD:  number;     // (exit - entry) * qty
+  netPnlUSD:    number;     // gross - feesUSD
+  botId?:       string;
+  botName?:     string;
+}
+
+const MAX_CLOSED_TRADES = 200;
 
 function emptyState(): RealProfitState {
   return {
@@ -62,6 +82,7 @@ function emptyState(): RealProfitState {
     lossesClosed:       0,
     perBot:             {},
     lots:               {},
+    closedTrades:       [],
     lastUpdated:        0,
   };
 }
@@ -84,6 +105,7 @@ class RealProfitStore {
         this.state = { ...emptyState(), ...parsed };
         if (!this.state.perBot || typeof this.state.perBot !== 'object') this.state.perBot = {};
         if (!this.state.lots   || typeof this.state.lots   !== 'object') this.state.lots   = {};
+        if (!Array.isArray(this.state.closedTrades))                     this.state.closedTrades = [];
       }
     } catch { this.state = emptyState(); }
   }
@@ -147,7 +169,7 @@ class RealProfitStore {
    */
   recordRealSell(input: {
     exchange: string; baseAsset: string; qty: number; price: number;
-    feeUSD?: number; botId?: string;
+    feeUSD?: number; botId?: string; botName?: string;
   }): { realizedUSD: number; matchedQty: number } {
     const key = lotKey(input.exchange, input.baseAsset);
     const lots = this.state.lots[key] ?? [];
@@ -179,6 +201,24 @@ class RealProfitStore {
       if (netRealized > 0) this.state.winsClosed   += 1;
       else                 this.state.lossesClosed += 1;
 
+      // Append to the immutable trade ledger for the Real Profit Proof panel.
+      this.state.closedTrades = [
+        {
+          ts:          Date.now(),
+          exchange:    input.exchange,
+          baseAsset:   input.baseAsset.toUpperCase(),
+          qty:         take,
+          entryPrice:  lot.price,
+          exitPrice:   input.price,
+          feesUSD:     lotFeeShare + sellFeeShare,
+          grossPnlUSD: grossRealized,
+          netPnlUSD:   netRealized,
+          botId:       owner,
+          botName:     input.botName,
+        },
+        ...this.state.closedTrades,
+      ].slice(0, MAX_CLOSED_TRADES);
+
       lot.qty -= take;
       lot.fee -= lotFeeShare;
       remainingToClose -= take;
@@ -209,6 +249,11 @@ class RealProfitStore {
     this.state.lastUpdated      = Date.now();
     this.save();
     this.notify();
+  }
+
+  /** Most-recent-first list of closed REAL trades (capped). */
+  getClosedTrades(limit = 50): ClosedRealTrade[] {
+    return this.state.closedTrades.slice(0, Math.max(1, Math.min(limit, MAX_CLOSED_TRADES)));
   }
 
   /** Erase the entire realized history (use only when keys are rotated). */

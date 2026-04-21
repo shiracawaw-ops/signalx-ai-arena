@@ -10,8 +10,18 @@ import {
   Stethoscope, AlertTriangle, CheckCircle2, XCircle,
   RefreshCw, TrendingDown, Activity, Zap, ChevronDown, ChevronUp,
   AlertCircle, ShieldAlert, SkipForward, RotateCcw, Volume2,
+  Trophy, Copy, Undo2, Radio,
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import {
+  useBotDoctor, botDoctorStore,
+  DOCTOR_MODE_LABELS, DOCTOR_MODE_DESCRIPTIONS,
+  type DoctorMode,
+} from '@/lib/bot-doctor-store';
+import { useBotActivity, botActivityStore } from '@/lib/bot-activity-store';
+import { useRealProfit } from '@/lib/real-profit-store';
+import { diagnoseReal, summarizeReal } from '@/lib/real-mode-diagnostics';
+import { findChampion } from '@/lib/champion';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 function HealthRing({ score }: { score: number }) {
@@ -409,6 +419,9 @@ export default function BotDoctorPage() {
         </>
       )}
 
+      {/* Real Mode Doctor section */}
+      <RealModeSection />
+
       {/* Self-healing event log */}
       {recentHealEvents.length > 0 && (
         <div className="mt-8">
@@ -432,6 +445,336 @@ export default function BotDoctorPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Real Mode Doctor — extends the page with: mode selector, real-bot
+// diagnostics list, bench list w/ restore, champion + clone-to-eligible.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MODE_TONE: Record<DoctorMode, string> = {
+  OFF:         'border-zinc-700 text-zinc-400',
+  MONITOR:     'border-blue-600/40 text-blue-300 bg-blue-600/10',
+  AUTO_FIX:    'border-amber-600/40 text-amber-300 bg-amber-600/10',
+  FULL_ACTIVE: 'border-emerald-600/40 text-emerald-300 bg-emerald-600/10',
+};
+
+function RealModeSection() {
+  const { bots, cloneStrategy } = useArena();
+  const { toast } = useToast();
+  const doctor   = useBotDoctor();
+  const activity = useBotActivity();
+  const profit   = useRealProfit();
+
+  // Live diagnostics — pure-function, no side effects.
+  const realDiags = useMemo(() => diagnoseReal({
+    activity,
+    profit,
+    isBenched:  id => !!doctor.bench[id],
+    benchEntry: id => doctor.bench[id],
+  }), [activity, profit, doctor.bench]);
+
+  const summary = useMemo(() => summarizeReal(realDiags), [realDiags]);
+
+  // Champion lookup — uses real-profit per-bot stats only.
+  const nameLookup = useMemo(() => {
+    const m: Record<string, string> = {};
+    bots.forEach(b => { m[b.id] = b.name; });
+    return m;
+  }, [bots]);
+  const rejectionRates = useMemo(() => {
+    const m: Record<string, number> = {};
+    Object.keys(profit.perBot).forEach(id => { m[id] = botActivityStore.rejectionRate(id); });
+    return m;
+  }, [profit.perBot]);
+  const championResult = useMemo(
+    () => findChampion(profit.perBot, rejectionRates, nameLookup),
+    [profit.perBot, rejectionRates, nameLookup],
+  );
+
+  const [cloneTarget, setCloneTarget] = useState<string>('');
+  const champBot = championResult ? bots.find(b => b.id === championResult.champion.botId) : undefined;
+
+  // Eligible clone targets: not the champion, not benched.
+  const cloneTargets = useMemo(() => bots.filter(b => {
+    if (!championResult) return false;
+    if (b.id === championResult.champion.botId) return false;
+    if (doctor.bench[b.id]) return false;
+    return true;
+  }), [bots, championResult, doctor.bench]);
+
+  const benchList = useMemo(
+    () => Object.values(doctor.bench).sort((a, b) => b.benchedAt - a.benchedAt),
+    [doctor.bench],
+  );
+
+  const handleClone = () => {
+    if (!champBot || !cloneTarget) return;
+    const ok = cloneStrategy(champBot.id, cloneTarget);
+    if (ok) {
+      const tgt = bots.find(b => b.id === cloneTarget);
+      toast({
+        title: `Strategy cloned: ${champBot.strategy}`,
+        description: `${tgt?.name ?? 'Bot'} now uses the champion's playbook on ${tgt?.symbol ?? ''}.`,
+      });
+      setCloneTarget('');
+    } else {
+      toast({ title: 'Clone failed', description: 'Bot not found.', variant: 'destructive' });
+    }
+  };
+
+  const handleRestore = (botId: string, botName: string) => {
+    botDoctorStore.unbench(botId);
+    toast({ title: `${botName} restored`, description: 'Bot is back in the pool — Doctor will keep watching.' });
+  };
+
+  const fmtMoney = (n: number) =>
+    (n >= 0 ? '+' : '') + n.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+
+  return (
+    <div className="mt-8 space-y-4">
+      {/* Section header */}
+      <div className="flex items-center gap-3 mb-2">
+        <div className="w-8 h-8 rounded-lg bg-emerald-600/10 border border-emerald-600/30 flex items-center justify-center">
+          <Radio size={14} className="text-emerald-400" />
+        </div>
+        <div>
+          <h2 className="text-base font-bold">Real Mode Doctor</h2>
+          <p className="text-xs text-zinc-500">
+            Live diagnostics for real-exchange bots. Reads activity log + realized P/L only — never paper data.
+          </p>
+        </div>
+      </div>
+
+      {/* Mode selector */}
+      <Card className="border-zinc-800/60">
+        <CardContent className="p-4">
+          <div className="flex flex-wrap items-center gap-2 mb-2">
+            <span className="text-xs font-semibold text-zinc-300">Doctor mode:</span>
+            {(['OFF','MONITOR','AUTO_FIX','FULL_ACTIVE'] as DoctorMode[]).map(m => (
+              <button
+                key={m}
+                onClick={() => botDoctorStore.setMode(m)}
+                className={`text-[11px] px-2.5 py-1 rounded-md border font-medium transition-colors
+                  ${doctor.mode === m
+                    ? MODE_TONE[m] + ' ring-1 ring-emerald-500/30'
+                    : 'border-zinc-700 text-zinc-500 hover:text-zinc-300 hover:border-zinc-500'}`}
+              >
+                {DOCTOR_MODE_LABELS[m]}
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px] text-zinc-500">{DOCTOR_MODE_DESCRIPTIONS[doctor.mode]}</p>
+
+          {/* Summary */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mt-4">
+            {[
+              { label: 'Real bots',  value: summary.totalBots,        tone: 'text-zinc-200' },
+              { label: 'Eligible',   value: summary.eligible,         tone: 'text-blue-400' },
+              { label: 'Critical',   value: summary.withCriticalIssue, tone: 'text-red-400' },
+              { label: 'Benched',    value: summary.benched,          tone: 'text-amber-400' },
+              { label: 'Avg health', value: `${summary.avgHealth}/100`, tone: 'text-emerald-400' },
+            ].map(s => (
+              <div key={s.label} className="bg-zinc-900/60 rounded-md p-2 text-center border border-zinc-800/60">
+                <div className="text-[9px] text-zinc-500 uppercase tracking-wide">{s.label}</div>
+                <div className={`font-mono font-bold text-sm mt-0.5 ${s.tone}`}>{s.value}</div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Champion card */}
+      {championResult && champBot && (
+        <Card className="border-yellow-600/30 bg-gradient-to-br from-yellow-950/30 to-zinc-900/40">
+          <CardContent className="p-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-lg bg-yellow-600/15 border border-yellow-600/40 flex items-center justify-center flex-shrink-0">
+                <Trophy size={18} className="text-yellow-400" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm font-bold text-yellow-300">Champion bot</span>
+                  <Badge variant="outline" className="text-[9px] border-yellow-600/40 text-yellow-200">
+                    REAL DATA
+                  </Badge>
+                </div>
+                <div className="mt-1 flex items-center gap-2 flex-wrap text-xs">
+                  <span className="font-semibold text-zinc-100">{champBot.name}</span>
+                  <Badge variant="outline" className="text-[9px]">{champBot.symbol}</Badge>
+                  <Badge variant="outline" className="text-[9px]">{champBot.strategy}</Badge>
+                </div>
+                <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                  <Stat label="Net realized" value={`$${fmtMoney(championResult.champion.netRealized)}`} tone="up" />
+                  <Stat label="Win-rate"     value={`${(championResult.champion.winRate * 100).toFixed(0)}%`} tone="up" />
+                  <Stat label="Trades"       value={String(championResult.champion.trades)}     tone="neutral" />
+                  <Stat label="Reject-rate"  value={`${(championResult.champion.rejectionRate * 100).toFixed(0)}%`} tone="neutral" />
+                </div>
+
+                {/* Clone control */}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] text-zinc-400">Clone strategy onto:</span>
+                  <select
+                    value={cloneTarget}
+                    onChange={e => setCloneTarget(e.target.value)}
+                    className="text-[11px] bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-zinc-200 focus:outline-none focus:border-yellow-500/50"
+                  >
+                    <option value="">-- select target bot --</option>
+                    {cloneTargets.map(b => (
+                      <option key={b.id} value={b.id}>{b.name} ({b.symbol})</option>
+                    ))}
+                  </select>
+                  <button
+                    disabled={!cloneTarget}
+                    onClick={handleClone}
+                    className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded border border-yellow-600/40 bg-yellow-600/10 text-yellow-300 hover:bg-yellow-600/20 transition-colors font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Copy size={11} /> Clone strategy
+                  </button>
+                </div>
+                {championResult.runnersUp.length > 0 && (
+                  <div className="mt-2 text-[10px] text-zinc-500">
+                    Runners-up:{' '}
+                    {championResult.runnersUp.map((r, i) => (
+                      <span key={r.botId}>
+                        {i > 0 ? ' · ' : ''}
+                        {r.botName ?? r.botId} (${fmtMoney(r.netRealized)})
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Bench list */}
+      {benchList.length > 0 && (
+        <Card className="border-amber-600/20">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <ShieldAlert size={14} className="text-amber-400" />
+              <h3 className="text-sm font-semibold text-amber-300">Benched by Doctor ({benchList.length})</h3>
+              <span className="text-[10px] text-zinc-500">
+                Auto-restored when timer expires. Click Restore for an immediate retry.
+              </span>
+            </div>
+            <div className="space-y-1.5">
+              {benchList.map(entry => {
+                const b = bots.find(x => x.id === entry.botId);
+                const remainingMs = entry.expiresAt > 0 ? Math.max(0, entry.expiresAt - Date.now()) : 0;
+                const remainingMin = Math.ceil(remainingMs / 60_000);
+                return (
+                  <div key={entry.botId} className="flex items-center gap-3 text-[11px] py-1.5 px-3 rounded bg-amber-950/20 border border-amber-900/30">
+                    <Badge variant="outline" className="text-[9px] border-amber-600/40 text-amber-300">{entry.code}</Badge>
+                    <span className="text-zinc-200 font-medium truncate w-32 flex-shrink-0">
+                      {b?.name ?? entry.botId}
+                    </span>
+                    <span className="text-zinc-400 truncate flex-1">{entry.reason}</span>
+                    <span className="text-zinc-500 font-mono w-20 text-right flex-shrink-0">
+                      {entry.expiresAt === 0 ? 'manual' : remainingMs > 0 ? `${remainingMin}m left` : 'expired'}
+                    </span>
+                    <button
+                      onClick={() => handleRestore(entry.botId, b?.name ?? entry.botId)}
+                      className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border border-emerald-600/40 bg-emerald-600/10 text-emerald-300 hover:bg-emerald-600/20 transition-colors font-medium"
+                    >
+                      <Undo2 size={10} /> Restore
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Per-bot real diagnostics list */}
+      <Card className="border-zinc-800/60">
+        <CardContent className="p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Activity size={14} className="text-emerald-400" />
+            <h3 className="text-sm font-semibold">Real-mode diagnostics ({realDiags.length})</h3>
+          </div>
+          {realDiags.length === 0 ? (
+            <div className="text-center py-6 text-zinc-500 text-xs">
+              No real-mode activity yet. Diagnostics appear once real bots start submitting orders.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {realDiags.map(d => {
+                const issueLevel = d.issues.find(i => i.level === 'critical')?.level
+                                 ?? d.issues.find(i => i.level === 'warning')?.level
+                                 ?? d.issues[0]?.level;
+                const borderClass =
+                  issueLevel === 'critical' ? 'border-red-600/30 bg-red-600/5' :
+                  issueLevel === 'warning'  ? 'border-amber-600/20 bg-amber-600/5' :
+                  d.issues.length === 0     ? 'border-emerald-700/20 bg-emerald-700/5'
+                                            : 'border-zinc-800/60';
+                return (
+                  <div key={d.botId} className={`rounded-lg border p-3 ${borderClass}`}>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-semibold text-zinc-100">{d.name ?? d.botId}</span>
+                      {d.eligibleNow && <Badge variant="outline" className="text-[9px] border-blue-600/40 text-blue-300">eligible</Badge>}
+                      {d.benched && <Badge variant="outline" className="text-[9px] border-amber-600/40 text-amber-300">benched</Badge>}
+                      <span className="text-[10px] text-zinc-500 ml-auto font-mono">
+                        health {d.healthScore}/100
+                      </span>
+                    </div>
+                    <div className="mt-1.5 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
+                      <div className="text-zinc-500">
+                        Recent: <span className="text-zinc-300 font-mono">{d.recentAttempts}</span>
+                        {' / '}
+                        rej <span className={d.rejectRate > 0.5 ? 'text-red-400 font-mono' : 'text-zinc-300 font-mono'}>{(d.rejectRate * 100).toFixed(0)}%</span>
+                      </div>
+                      <div className="text-zinc-500">
+                        Net: <span className={d.realizedNetUSD >= 0 ? 'text-emerald-400 font-mono' : 'text-red-400 font-mono'}>${fmtMoney(d.realizedNetUSD)}</span>
+                      </div>
+                      <div className="text-zinc-500">
+                        Trades: <span className="text-zinc-300 font-mono">{d.realTrades}</span>
+                      </div>
+                      <div className="text-zinc-500">
+                        Win: <span className="text-zinc-300 font-mono">{d.realTrades > 0 ? `${(d.winRate * 100).toFixed(0)}%` : '—'}</span>
+                      </div>
+                    </div>
+                    {d.issues.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        {d.issues.map((iss, idx) => {
+                          const Icon = LEVEL_ICON[iss.level] ?? AlertCircle;
+                          return (
+                            <div key={idx} className="flex items-start gap-1.5 text-[10px]">
+                              <Icon size={11} className={`flex-shrink-0 mt-0.5 ${LEVEL_COLORS[iss.level]}`} />
+                              <div>
+                                <span className={`font-semibold ${LEVEL_COLORS[iss.level]}`}>{iss.title}</span>
+                                <span className="text-zinc-500"> — {iss.description}</span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// Tiny stat block reused for champion KPIs.
+function Stat(p: { label: string; value: string; tone: 'up' | 'down' | 'neutral' }) {
+  const colour =
+    p.tone === 'up'   ? 'text-emerald-400' :
+    p.tone === 'down' ? 'text-red-400'     : 'text-zinc-200';
+  return (
+    <div className="border border-zinc-800/60 rounded px-2 py-1 bg-zinc-900/40">
+      <div className="text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">{p.label}</div>
+      <div className={`mt-0.5 text-xs font-bold tabular-nums ${colour}`}>{p.value}</div>
     </div>
   );
 }

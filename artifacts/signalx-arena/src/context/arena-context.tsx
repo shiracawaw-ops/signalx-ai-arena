@@ -139,6 +139,7 @@ export interface ArenaContextType {
   resetAll:        () => void;
   getCurrentPrice: (symbol: string) => number;
   activateStandby: (id: string) => void;
+  cloneStrategy:   (sourceId: string, targetId: string) => boolean;
 }
 
 export const ArenaContext = createContext<ArenaContextType | null>(null);
@@ -504,6 +505,22 @@ export function ArenaProvider({ children }: { children: React.ReactNode }) {
     setTrades(prev => { const u = prev.filter(t => t.botId !== id); saveTrades(u); return u; });
   }, []);
 
+  // Clone champion's strategy onto target — strategy field only, balance/position untouched.
+  const cloneStrategy = useCallback((sourceId: string, targetId: string): boolean => {
+    if (sourceId === targetId) return false;
+    let ok = false;
+    setBots(prev => {
+      const src = prev.find(b => b.id === sourceId);
+      const tgt = prev.find(b => b.id === targetId);
+      if (!src || !tgt) return prev;
+      ok = true;
+      const u = prev.map(b => b.id === targetId ? { ...b, strategy: src.strategy } : b);
+      saveBots(u);
+      return u;
+    });
+    return ok;
+  }, []);
+
   // Manually activate a specific standby bot
   const activateStandby = useCallback((id: string) => {
     setBots(prev => { const u = prev.map(b => b.id === id ? { ...b, isRunning: true } : b); saveBots(u); return u; });
@@ -520,7 +537,7 @@ export function ArenaProvider({ children }: { children: React.ReactNode }) {
       bots, trades, market, isGlobalRunning, tickCount, spendPct, botCount, demoBalance,
       searchQuery, setSearchQuery, healLog,
       setBotCount, setDemoBalance, setSpendPct, start, stop,
-      addBot, removeBot, toggleBot, resetBot, resetAll, getCurrentPrice, activateStandby,
+      addBot, removeBot, toggleBot, resetBot, resetAll, getCurrentPrice, activateStandby, cloneStrategy,
     }}>
       {children}
     </ArenaContext.Provider>

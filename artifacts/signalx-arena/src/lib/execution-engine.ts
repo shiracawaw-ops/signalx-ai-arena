@@ -19,6 +19,7 @@ import { recordBuy, recordSell, getOwned } from './internal-positions.js';
 import { baseTicker } from './risk-manager.js';
 import { realProfitStore }  from './real-profit-store.js';
 import { botActivityStore } from './bot-activity-store.js';
+import { botDoctorStore }   from './bot-doctor-store.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -255,6 +256,16 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
   const baseTk   = baseTicker(signal.symbol);
   const ownedHere = getOwned(exchange, baseTk);
   const isClosingSell = signal.side === 'sell' && ownedHere > 0;
+
+  // 6a-bis. Bot Doctor dust gate — once a symbol has been classified as
+  // dust (position size persistently below exchange minimum), block
+  // further BUY/SELL attempts so the user does not burn fees + rate-limit
+  // on retries that cannot succeed. Only enforced in real mode; cleared
+  // automatically when the user clears the dust mark from the Doctor UI.
+  if (mode === 'real' && botDoctorStore.canAutoAct() && botDoctorStore.isDust(exchange, baseTk)) {
+    return reject(signal, exchange, mode, REJECT.BELOW_MIN_NOTIONAL,
+      `Doctor: ${exchange}:${baseTk} is marked as dust. Clear the dust mark to retry.`);
+  }
   const gate     = feGateBlocked(gateKey);
   if (gate.blocked && !isClosingSell) {
     return reject(signal, exchange, mode, REJECT.EXCHANGE_REJECTED,
@@ -492,7 +503,7 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
           realProfitStore.recordRealSell({
             exchange, baseAsset: baseTk,
             qty: risk.quantity!, price: risk.price!,
-            botId: signal.botId,
+            botId: signal.botId, botName: signal.botName,
           });
         }
       }
@@ -549,6 +560,27 @@ function reject(
         reason, detail,
       });
     } catch { /* never throw from logger */ }
+  }
+  // Bot Doctor: classify + (in AUTO_FIX/FULL_ACTIVE) auto-bench. Real mode
+  // only — testnet rejects must not bench the user's real-trading bots.
+  if (mode === 'real') {
+    try {
+      const rate = signal.botId ? botActivityStore.rejectionRate(signal.botId) : 0;
+      const recent = signal.botId
+        ? (botActivityStore.snapshot().bots[signal.botId]?.recent ?? []).filter(
+            r => r.kind === 'attempt' || r.kind === 'success' || r.kind === 'reject',
+          ).length
+        : 0;
+      botDoctorStore.observe({
+        botId:           signal.botId,
+        rejectReason:    reason,
+        rejectDetail:    detail,
+        rejectionRate:   rate,
+        submittedRecent: recent,
+        exchange,
+        baseAsset:       baseTicker(signal.symbol),
+      });
+    } catch { /* doctor must never throw */ }
   }
   return { ok: false, logId: entry.id, rejectReason: reason, detail };
 }
