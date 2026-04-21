@@ -1,0 +1,217 @@
+Upgrade the existing SignalX AI Arena / Signal Arena project into a stronger, lower-cost, multi-exchange smart trading system with strict pre-trade validation, full symbol compatibility, intelligent bot capital allocation, and rejection-prevention logic.
+
+Core goals:
+- Keep the current UI and main structure as much as possible.
+- Strengthen the backend, execution engine, exchange compatibility, validation, and bot orchestration.
+- Minimize exchange order rejections as much as practically possible.
+- Use the cheapest reliable architecture and APIs already available in the project whenever possible.
+- Do not add expensive unnecessary paid dependencies unless absolutely required.
+
+Main upgrade requirements:
+
+1) Add a full Asset Study Engine before any trade:
+For every stock / crypto / tradable symbol that a bot wants to buy, perform a complete study first:
+- trend analysis
+- momentum analysis
+- volatility analysis
+- spread and slippage analysis
+- liquidity and order book quality
+- volume confirmation
+- breakout / pullback / continuation logic
+- support / resistance zones
+- risk/reward estimation
+- optional sentiment/news factor if already available
+- multi-timeframe confirmation when possible
+
+Generate:
+- asset_score (0–100)
+- confidence_score (0–100)
+- execution_safety_score (0–100)
+- final verdict = EXECUTE / SKIP
+
+No trade should be sent unless the study passes configurable thresholds.
+
+2) Add a strict Exchange Compliance Engine:
+Before sending any order, the bot must study the selected exchange and symbol rules live from the exchange API.
+
+Support at least:
+- Binance
+- Bybit
+
+Architecture must be extensible for more exchanges later.
+
+For each exchange and symbol, automatically validate:
+- symbol exists on selected exchange
+- symbol trading status is active
+- correct symbol mapping for that exchange
+- tick size / price precision
+- qty step / quantity precision
+- min qty
+- max qty
+- min notional / min order value
+- max order size if applicable
+- supported order types
+- account mode compatibility
+- permissions of API key
+- available balance including fee buffer
+- rate-limit awareness
+- liquidity / slippage precheck
+- whether market order is safe or limit order is better
+
+If any validation fails:
+- do NOT send the order
+- show exact internal reason in logs/UI
+- classify the issue clearly
+
+3) Add Smart Symbol Normalization for all supported symbols:
+Automatically support all crypto symbols and symbol styles of the chosen exchange.
+Examples:
+- BTC / BTCUSDT / BTC-USD / XBTUSDT if needed by adapter logic
+- ETH / ETHUSDT
+- exchange-specific formats
+
+Requirements:
+- auto-discover tradable symbols directly from exchange
+- map user input to real exchange symbols safely
+- reject only if symbol truly does not exist after normalization attempts
+- maintain a symbol registry/cache per exchange
+- auto-refresh symbol lists periodically
+
+4) Add Rejection Prevention Layer:
+Create a pre-trade rejection prevention pipeline.
+The system should prevent as many rejection reasons as possible before order submission.
+
+Possible rejection causes to detect internally:
+- insufficient balance
+- invalid symbol
+- wrong precision
+- below minimum notional
+- unsupported order type
+- invalid account mode
+- low liquidity
+- excessive spread
+- rate limit risk
+- exchange temporary issue
+
+Important:
+Do not claim impossible 100% rejection-free execution.
+Instead, implement the strongest practical prevention architecture so that most avoidable rejections are eliminated before submission.
+The only common unavoidable reasons should be things like:
+- insufficient balance
+- sudden exchange-side change
+- sudden liquidity collapse
+- temporary exchange/network issue
+
+5) Add Intelligent Capital Allocation across user-selected bots:
+The user can choose number of bots.
+Distribute available balance fairly and intelligently across the selected bot count.
+
+Requirements:
+- detect available free balance in real time
+- subtract configurable fee/risk reserve first
+- divide remaining capital intelligently and evenly
+- support equal allocation by default
+- support smart adjustment if some bots are inactive or blocked
+- support per-bot maximum exposure
+- prevent over-allocation
+- never allow total allocations to exceed safe available balance
+- if one bot cannot trade, optionally reassign its unused allocation to other eligible bots
+- keep allocation logic transparent in UI/logs
+
+Add:
+- allocation_per_bot
+- reserved_balance
+- total_allocated
+- unallocated_balance
+- active_bot_count
+- blocked_bot_count
+
+6) Add Smart Execution Planner:
+Before placing a trade:
+- choose market vs limit intelligently
+- avoid market orders when spread/slippage is poor
+- round price/qty exactly to exchange rules
+- optionally split large orders into smaller child orders if safer
+- avoid sending unrealistic quantities
+- include fee buffer
+- include balance safety buffer
+
+7) Add Exchange Adapters:
+Create modular adapters such as:
+- BinanceAdapter
+- BybitAdapter
+
+Each adapter must handle:
+- auth checks
+- balance fetch
+- tradable symbols fetch
+- exchange filters/rules fetch
+- order payload building
+- order submission
+- error parsing
+- symbol normalization
+- status checks
+
+8) Add detailed diagnostics and decision trace:
+For every bot decision, log:
+- asset study result
+- exchange compliance result
+- allocation result
+- execution plan
+- final reason for EXECUTE or SKIP
+- parsed exchange response if order fails
+
+9) Add safe caching for low cost and efficiency:
+To reduce cost and API load:
+- cache exchange rules
+- cache symbols
+- refresh at sensible intervals
+- avoid repeated unnecessary calls
+- reuse data safely
+- throttle requests
+- respect exchange rate limits
+
+10) Improve performance and stability:
+- move all network-heavy operations off the UI thread
+- use background workers/threads
+- prevent freezing
+- add retry logic where safe
+- add timeout handling
+- add robust fallback behavior
+- protect against corrupted local config/cache files
+
+11) UI requirement:
+Keep the existing interface and appearance as much as possible.
+Only add clear panels/tabs/sections for:
+- asset study
+- exchange constraints
+- bot capital allocation
+- rejection diagnostics
+- execution decision trace
+
+12) Final behavior target:
+The system should behave like this:
+- user selects exchange
+- system loads real symbols/rules for that exchange automatically
+- user chooses bot count
+- system distributes available balance intelligently
+- each bot studies the asset deeply
+- each bot validates exchange constraints before submission
+- only valid, compliant, high-score setups are executed
+- weak or invalid setups are skipped with a clear reason
+
+13) Cost requirement:
+Prefer the lowest-cost implementation path:
+- use existing exchange APIs already in project
+- avoid costly new providers
+- reuse existing libraries if possible
+- keep architecture efficient
+
+14) Delivery requirement:
+- implement this directly in the current project
+- do not replace the whole app unnecessarily
+- do not break the current UI
+- provide the final full updated code
+- fix integration issues
+- make the system actually work, not just mock the logic
+- add comments in important modules for maintainability
