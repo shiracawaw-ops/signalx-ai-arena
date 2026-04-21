@@ -28,7 +28,8 @@
     "typescript": "~5.9.2"
   },
   "dependencies": {
-    "@replit/connectors-sdk": "^0.4.0"
+    "@replit/connectors-sdk": "^0.4.0",
+    "adm-zip": "^0.5.17"
   },
   "lint-staged": {
     "artifacts/signalx-arena/**/*.{ts,tsx}": [
