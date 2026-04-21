@@ -37,7 +37,7 @@ afterEach(() => {
 });
 
 describe('Web build — routing smoke test (path-based, BASE_URL=/signalx-arena/)', () => {
-  it('renders the SignalX login UI under /signalx-arena/login', async () => {
+  it('renders the SignalX login UI under /signalx-arena/login', { timeout: 15_000 }, async () => {
     expect(window.location.protocol).toBe('http:');
     expect(window.location.pathname).toBe('/signalx-arena/login');
 

@@ -14,6 +14,7 @@ import { dispatchAutoPilotLiveSignal, type AutoPilotDispatchKey } from '@/lib/li
 import { ASSET_MAP } from '@/lib/storage';
 import { EXCHANGE_MAP } from '@/lib/exchange';
 import { BotFleetPanel } from '@/components/bot-fleet-panel';
+import { BotActivityPanel } from '@/components/bot-activity-panel';
 import { loadWallet } from '@/lib/wallet';
 import { botFleet } from '@/lib/bot-fleet';
 import { scoreAllBots } from '@/lib/bot-scoring';
@@ -424,6 +425,9 @@ export default function AutoPilotPage() {
           realBalanceUSD={loadWallet().virtualBalance}
           minNotionalUSD={10}
         />
+
+        {/* ── Bot Activity Transparency (who's eligible / standby / blocked) ── */}
+        <BotActivityPanel />
 
         {/* ── No data state ── */}
         {!selected && (

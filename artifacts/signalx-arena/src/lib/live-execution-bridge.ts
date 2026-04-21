@@ -182,6 +182,7 @@ export function bridgeBotTradeToExchange(trade: Trade): Promise<EngineResult> | 
     price:  trade.price,
     ts:     trade.timestamp,
     source: 'bot-engine',
+    botId:  trade.botId,
   };
   return executeSignal(signal);
 }
@@ -292,12 +293,14 @@ export async function dispatchAutoPilotLiveSignal(args: {
 
   const price = getCurrentPrice(sym);
   const signal: Signal = {
-    id:     `autopilot_${sig.botId}_${sig.action}_${Date.now()}`,
-    symbol: sym,
-    side:   sig.action === 'BUY' ? 'buy' : 'sell',
+    id:      `autopilot_${sig.botId}_${sig.action}_${Date.now()}`,
+    symbol:  sym,
+    side:    sig.action === 'BUY' ? 'buy' : 'sell',
     price,
-    ts:     Date.now(),
-    source: 'autopilot',
+    ts:      Date.now(),
+    source:  'autopilot',
+    botId:   sig.botId,
+    botName: d.selectedBot.bot.name,
   };
   const result = await executeSignal(signal);
 

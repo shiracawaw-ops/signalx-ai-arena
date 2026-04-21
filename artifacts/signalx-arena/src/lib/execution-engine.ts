@@ -17,6 +17,8 @@ import { preflight, noteRejection, noteSuccess, clearShieldCooldownFor } from '.
 import type { ExchangeId } from './asset-compliance.js';
 import { recordBuy, recordSell, getOwned } from './internal-positions.js';
 import { baseTicker } from './risk-manager.js';
+import { realProfitStore }  from './real-profit-store.js';
+import { botActivityStore } from './bot-activity-store.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -27,6 +29,8 @@ export interface Signal {
   price:    number;         // current price at signal time
   ts:       number;
   source?:  string;         // e.g. "autopilot", "manual"
+  botId?:   string;         // origin bot — used for transparency + realized-PnL attribution
+  botName?: string;
 }
 
 export interface EngineResult {
@@ -473,6 +477,34 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       if (signal.side === 'sell') recordSell(exchange, baseTk, risk.quantity!);
     } catch (e) { console.warn('[engine] ledger update failed:', (e as Error).message); }
 
+    // Real-mode telemetry — feeds the Real Profit panel + Bot Activity panel.
+    // Only emit for `real` to keep simulator stats out of the realized-PnL
+    // store. Testnet fills are NOT real money.
+    try {
+      if (mode === 'real') {
+        if (signal.side === 'buy') {
+          realProfitStore.recordRealBuy({
+            exchange, baseAsset: baseTk,
+            qty: risk.quantity!, price: risk.price!,
+            botId: signal.botId,
+          });
+        } else {
+          realProfitStore.recordRealSell({
+            exchange, baseAsset: baseTk,
+            qty: risk.quantity!, price: risk.price!,
+            botId: signal.botId,
+          });
+        }
+      }
+      if (signal.botId && (mode === 'real' || mode === 'testnet')) {
+        botActivityStore.recordAttempt({
+          botId:  signal.botId,
+          kind:   'success',
+          symbol: signal.symbol,
+        });
+      }
+    } catch (e) { console.warn('[engine] telemetry update failed:', (e as Error).message); }
+
     console.log(`[engine][${mode}] Order placed: ${exchange} ${signal.side} ${risk.quantity} ${signal.symbol} @ ${risk.price} → orderId=${orderId} (${latency}ms)`);
     return { ok: true, orderId, logId: pending.id };
 
@@ -508,6 +540,16 @@ function reject(
     signalId:      signal.id,
   });
   console.warn(`[engine][${mode}] REJECTED — ${reason}: ${detail}`);
+  if (signal.botId && (mode === 'real' || mode === 'testnet')) {
+    try {
+      botActivityStore.recordAttempt({
+        botId:  signal.botId,
+        kind:   'reject',
+        symbol: signal.symbol,
+        reason, detail,
+      });
+    } catch { /* never throw from logger */ }
+  }
   return { ok: false, logId: entry.id, rejectReason: reason, detail };
 }
 

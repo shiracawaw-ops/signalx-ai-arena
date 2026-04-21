@@ -7,6 +7,11 @@ const BASE         = 'https://api.bybit.com';
 const TESTNET_BASE = 'https://api-testnet.bybit.com';
 const RECV_WIN     = 5000;
 
+// Symbol-rules cache — parity with binance-adapter (5 min TTL).
+const BYBIT_RULES_TTL_MS = 5 * 60 * 1000;
+const bybitRulesCache = new Map<string, { rules: SymbolRules; ts: number }>();
+export function _resetBybitRulesCache(): void { bybitRulesCache.clear(); }
+
 function sign(apiKey: string, secret: string, ts: number, body: string): string {
   return hmacSHA256(secret, `${ts}${apiKey}${RECV_WIN}${body}`);
 }
@@ -464,13 +469,26 @@ export class BybitAdapter implements ExchangeAdapter {
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {
     const base = _creds.testnet ? TESTNET_BASE : BASE;
-    const sym = this.normalizeSymbol(symbol);
-    const r   = await safeFetch(`${base}/v5/market/instruments-info?category=spot&symbol=${sym}`, {}, 'bybit');
+    const sym  = this.normalizeSymbol(symbol);
+
+    // 5-minute TTL cache to match the Binance adapter — instrument info
+    // changes rarely and every uncached call adds 200-400ms to the order
+    // path. Cache key includes testnet flag so prod and sandbox don't mix.
+    const cacheKey = `${_creds.testnet ? 't' : 'p'}:${sym}`;
+    const now = Date.now();
+    const hit = bybitRulesCache.get(cacheKey);
+    if (hit && now - hit.ts < BYBIT_RULES_TTL_MS) return hit.rules;
+
+    const r = await safeFetch(`${base}/v5/market/instruments-info?category=spot&symbol=${sym}`, {}, 'bybit');
     if (!r.ok) return stubSymbolRules(sym);
-    const info = ((r.data as Record<string, Record<string, unknown[]>>)?.['result']?.['list']?.[0] ?? {}) as Record<string, Record<string, string>>;
-    const lot  = info['lotSizeFilter'] ?? {};
-    const price = info['priceFilter'] ?? {};
-    return {
+    const info = ((r.data as Record<string, Record<string, unknown[]>>)?.['result']?.['list']?.[0] ?? {}) as Record<string, Record<string, string> | string>;
+    const lot   = (info['lotSizeFilter']  as Record<string, string>) ?? {};
+    const price = (info['priceFilter']    as Record<string, string>) ?? {};
+    // Bybit instrument states: "Trading", "PreLaunch", "Settling", "Delivering",
+    // "Closed". Anything other than "Trading" must block submission.
+    const status     = String(info['status'] ?? 'Trading');
+    const innovation = String(info['innovation'] ?? '0');
+    const rules: SymbolRules = {
       symbol, baseCurrency: String(info['baseCoin'] ?? ''), quoteCurrency: String(info['quoteCoin'] ?? 'USDT'),
       minQty:      parseFloat(lot['minOrderQty'] ?? '0.00001'),
       maxQty:      parseFloat(lot['maxOrderQty'] ?? '9000000'),
@@ -478,12 +496,43 @@ export class BybitAdapter implements ExchangeAdapter {
       minNotional: parseFloat(lot['minOrderAmt'] ?? '1'),
       tickSize:    parseFloat(price['tickSize'] ?? '0.01'),
       maxLeverage: 1,
+      status,
+      isSpotTradingAllowed: status === 'Trading',
+      filterSource: 'bybit:instruments-info',
+      // Innovation zone tokens often have stricter listing rules; surface it
+      // so the client can decide whether to allow them by policy.
+      isInnovation: innovation === '1',
     };
+    bybitRulesCache.set(cacheKey, { rules, ts: now });
+    return rules;
   }
 
   async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
     const base = order.testnet ? TESTNET_BASE : BASE;
     const sym  = this.normalizeSymbol(order.symbol);
+
+    // ── Local preflight (parity with binance-adapter) ────────────────────────
+    // Validate qty / status against cached instrument-info BEFORE we burn a
+    // signed network call. Catches: trading=halted, qty < minQty, qty > maxQty,
+    // qty * price < minNotional. We still let the live-price bumper below
+    // adjust qty for market BUYs (so this just ensures we have *some* viable
+    // qty to start from).
+    const rules = await this.getSymbolRules(creds, order.symbol);
+    if (rules.status && rules.status !== 'Trading') {
+      throw new ExchangeOperationError(
+        'unknown', `Symbol ${sym} is not currently tradable on Bybit (status=${rules.status}).`, 422,
+      );
+    }
+    if (rules.minQty > 0 && order.quantity < rules.minQty) {
+      throw new ExchangeOperationError(
+        'unknown', `Order qty ${order.quantity} < minOrderQty ${rules.minQty} for ${sym}.`, 422,
+      );
+    }
+    if (rules.maxQty > 0 && order.quantity > rules.maxQty) {
+      throw new ExchangeOperationError(
+        'unknown', `Order qty ${order.quantity} > maxOrderQty ${rules.maxQty} for ${sym}.`, 422,
+      );
+    }
 
     // Bybit Spot quirk: for Market orders, `qty` defaults to QUOTE currency
     // (USDT) for BUY and BASE currency (BTC) for SELL. We always pass BASE
@@ -500,10 +549,7 @@ export class BybitAdapter implements ExchangeAdapter {
     let qty = order.quantity;
     if (order.type === 'market' && order.side === 'buy') {
       try {
-        const [livePrice, rules] = await Promise.all([
-          this.getPrice(order.symbol),
-          this.getSymbolRules(creds, order.symbol),
-        ]);
+        const livePrice = await this.getPrice(order.symbol);
         if (livePrice > 0 && rules.minNotional > 0) {
           const step    = rules.stepSize > 0 ? rules.stepSize : 0.00001;
           const target  = (rules.minNotional * 1.02) / livePrice;

@@ -8,6 +8,7 @@ import { ASSET_MAP } from '@/lib/storage';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
+import { RealProfitPanel } from '@/components/real-profit-panel';
 import {
   BarChart3, TrendingUp, TrendingDown, Award, AlertTriangle,
   FileText, Download, Trophy, Skull, Activity, Zap,
@@ -425,6 +426,9 @@ export default function ReportsPage() {
               );
             })}
           </div>
+
+          {/* Real Profit (live exchange) — separate from synthetic PnL */}
+          <RealProfitPanel />
 
           {/* P&L Timeline chart */}
           {pnlChartData.length > 1 && (

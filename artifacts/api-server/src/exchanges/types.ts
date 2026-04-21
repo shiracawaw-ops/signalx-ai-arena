@@ -89,7 +89,8 @@ export interface SymbolRules {
   pricePrecision?:      number;   // # decimal places allowed for price
   status?:              string;   // exchange-side trading status (TRADING / BREAK / …)
   isSpotTradingAllowed?: boolean; // whether spot is enabled for this pair on the exchange
-  filterSource?:        'live' | 'cached' | 'stub'; // provenance of these rules
+  isInnovation?:        boolean;  // bybit innovation-zone listing (stricter rules)
+  filterSource?:        'live' | 'cached' | 'stub' | 'binance:exchangeInfo' | 'bybit:instruments-info';
 }
 
 // Result of a "test order" probe — validates filters & permissions WITHOUT

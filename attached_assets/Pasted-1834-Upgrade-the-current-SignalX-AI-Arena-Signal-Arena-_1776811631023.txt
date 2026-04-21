@@ -1,0 +1,100 @@
+1834"}
+Upgrade the current SignalX AI Arena / Signal Arena project for stronger real trading performance, more active bots, and stricter exchange-compliant execution for both Bybit and Binance.
+
+Important:
+Do not promise guaranteed profit.
+The real goal is:
+- more valid real trades
+- more active qualified bots
+- higher-quality entries and exits
+- fewer rejected orders
+- accurate real profit tracking
+- full compliance with Bybit and Binance trading rules
+
+Implement the following:
+
+1) Increase real trading throughput safely
+- allow more bots to trade in real mode when capital and exchange rules allow it
+- do not keep most bots idle if valid setups exist
+- activate more bots dynamically when they pass quality thresholds
+- keep poor or low-ranked bots in standby
+
+2) Smart bot activation
+- choose the best bots automatically for real balance trading
+- rank bots by:
+  - realized performance
+  - stability
+  - low rejection rate
+  - strategy fit to current market
+  - signal quality
+- allow more than one bot to trade at the same time if conditions are valid
+- do not let only one bot do all the work unless it is the only valid one
+
+3) Full Bybit and Binance compliance
+Before any order, validate live exchange constraints using real exchange instrument data:
+- valid symbol
+- tradable status
+- price tick size
+- quantity step size
+- min notional / min order amount
+- max order limits
+- supported order types
+- slippage safety
+- balance sufficiency
+- account mode compatibility
+
+For Binance, validate filters such as price, quantity, and notional constraints.
+For Bybit, validate instrument info such as tick size, qty step, min order value / min notional, and market order limits.
+
+4) Better capital deployment
+- allow more bots to receive capital when valid
+- distribute capital intelligently across qualified bots
+- avoid microscopic allocations that cause invalid orders
+- keep fee reserve and safety reserve
+- increase per-bot allocation only when it improves validity and execution quality
+
+5) Improve real profit generation logic
+- favor bots with real realized profit, not just score
+- prioritize setups with better reward/risk and higher execution quality
+- reduce noise trades and repeated low-value attempts
+- block weak setups before they reach exchange submission
+
+6) Real profit transparency
+Add a real profit panel that shows only:
+- realized PnL
+- unrealized PnL
+- fees paid
+- net realized profit after fees
+- starting balance
+- current equity
+- closed winning trades
+- closed losing trades
+
+Do not mix projected returns, score, ranking, or paper metrics into real profit.
+
+7) Real bot activity transparency
+Show clearly:
+- total bots
+- bots eligible for real trading
+- bots active right now
+- bots that executed at least one real trade today
+- bots in standby
+- bots blocked and why
+- per-bot realized PnL
+
+8) Reduce unnecessary rejections
+- stop repeated attempts during cooldown
+- stop trying to sell dust positions below exchange minimum
+- stop repeated invalid orders below minimum order value
+- prevent invalid retries on the same symbol
+- reduce adapter_not_ready timing issues
+
+9) Execution quality target
+The system should aim for:
+- more real trades from more bots
+- higher valid order rate
+- lower rejection rate
+- clear proof of actual realized profit
+- stronger compliance with Bybit and Binance rules
+
+Keep the current UI style, but improve the real trading engine, bot selection, allocation logic, exchange compliance layer, and real profit repo

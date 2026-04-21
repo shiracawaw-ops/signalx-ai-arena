@@ -135,6 +135,7 @@ describe('bridgeBotTradeToExchange (bot tick → engine)', () => {
       price:  84_000,
       ts:     1_700_000_000_000,
       source: 'bot-engine',
+      botId:  'bot_1',
     });
   });
 

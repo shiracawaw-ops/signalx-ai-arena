@@ -226,6 +226,19 @@ class BotFleetManager {
       this.save();
       this.notify();
     }
+    // Publish the eligible set + the full known fleet to the activity store
+    // so the Bot Activity panel can show standby + blocked bots even when
+    // they never produced a signal this round. Lazy-imported to avoid a
+    // circular dep with stores that read fleet config.
+    try {
+      void import('./bot-activity-store.js').then(({ botActivityStore }) => {
+        botActivityStore.setFleet({
+          totalBots:      allBots.length,
+          eligibleBotIds: next,
+          allBotsHint:    allBots.map(b => ({ id: b.id, name: (b as BotLite).name })),
+        });
+      }).catch(() => { /* ignore — telemetry must never break the picker */ });
+    } catch { /* swallow */ }
     return next;
   }
 }

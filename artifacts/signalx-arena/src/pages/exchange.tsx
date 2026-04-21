@@ -600,6 +600,21 @@ export default function ExchangePage() {
             { level: 'error' });
         }
         setLiveBalances(bals);
+        // Push the live USDT-equivalent equity into the Real Profit store so
+        // the Reports panel can show real starting/current equity + delta.
+        // We sum usdtValue across all assets — for assets without one we
+        // fall back to `total` for stable-coins and 0 otherwise.
+        try {
+          const equity = bals.reduce((sum, b) => {
+            if (typeof b.usdtValue === 'number' && Number.isFinite(b.usdtValue)) return sum + b.usdtValue;
+            const a = b.asset.toUpperCase();
+            if (a === 'USDT' || a === 'USDC' || a === 'BUSD' || a === 'DAI') return sum + b.total;
+            return sum;
+          }, 0);
+          if (exMode.get().mode === 'real') {
+            void import('../lib/real-profit-store.js').then(m => m.realProfitStore.setCurrentEquity(equity));
+          }
+        } catch { /* telemetry must never break refresh */ }
         // Capture optional per-scope breakdown so the UI can show transparently
         // how the displayed totals were assembled (Bybit Unified/Spot/Contract/
         // Funding). Adapters that don't provide one leave summary undefined.
