@@ -66,6 +66,7 @@ describe('allocateCapital — deployable cap invariant', () => {
       totalCapitalUSD: 1000,
       studies,
       minPerBot:  10,
+      maxPerBot:  900,        // lift the default 35% ceiling for this test
       reservePct: 0.10,
     });
     const sum = plan.allocations.reduce((a, b) => a + b.amountUSD, 0);
