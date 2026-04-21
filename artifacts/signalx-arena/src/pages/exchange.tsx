@@ -365,7 +365,8 @@ export default function ExchangePage() {
   const [modeState,   setModeState]   = useState<ExchangeModeState>(exMode.get());
   const [config,      setConfig]      = useState<TradeConfig>(tradeConfig.get(selectedEx.id));
   const [logEntries,  setLogEntries]  = useState<ExecutionEntry[]>(executionLog.all());
-  const [liveBalances, setLiveBalances] = useState<Array<{ asset: string; available: number; hold: number; total: number; usdtValue?: number }>>([]);
+  const [liveBalances, setLiveBalances] = useState<Array<{ asset: string; available: number; hold: number; total: number; usdtValue?: number; scope?: string }>>([]);
+  const [liveSummary,  setLiveSummary]  = useState<import('../lib/api-client.js').BalanceSummary | null>(null);
   const [liveOrders,   setLiveOrders]  = useState<unknown[]>([]);
   const [livePermissions, setLivePermissions] = useState<{
     read: boolean; trade: boolean; withdraw: boolean; futures: boolean;
@@ -509,7 +510,7 @@ export default function ExchangePage() {
       // Active exchange switch: reset everything for the new exchange.
       setBalances([]);
       setOrders([]);
-      setLiveBalances([]);
+      setLiveBalances([]); setLiveSummary(null);
       setLiveOrders([]);
       setLivePermissions(null);
       setLatency(null);
@@ -599,6 +600,15 @@ export default function ExchangePage() {
             { level: 'error' });
         }
         setLiveBalances(bals);
+        // Capture optional per-scope breakdown so the UI can show transparently
+        // how the displayed totals were assembled (Bybit Unified/Spot/Contract/
+        // Funding). Adapters that don't provide one leave summary undefined.
+        const sumRaw = (balRes.data as { summary?: unknown }).summary;
+        if (sumRaw && typeof sumRaw === 'object') {
+          setLiveSummary(sumRaw as import('../lib/api-client.js').BalanceSummary);
+        } else {
+          setLiveSummary(null);
+        }
         credentialStore.setCache(selectedEx.id, { liveBalances: bals });
         exMode.update({ balanceFetched: true });
         if (bals.length === 0) {
@@ -1150,7 +1160,7 @@ export default function ExchangePage() {
     setIsConnected(false);
     setBalances([]);
     setOrders([]);
-    setLiveBalances([]);
+    setLiveBalances([]); setLiveSummary(null);
     setLiveOrders([]);
     setLivePermissions(null);
     setLatency(null);
@@ -1629,6 +1639,102 @@ export default function ExchangePage() {
               <RefreshCw size={12} className={refreshing ? 'animate-spin' : ''} /> Refresh
             </Button>
           </div>
+          {/* ── Per-scope balance breakdown (transparent: shows exactly how the
+                exchange-reported total compares to what the app sees as
+                tradable). Currently populated by the Bybit adapter. ─────── */}
+          {isLive && liveSummary && (
+            <Card className="border-zinc-800/60 bg-zinc-900/40" data-testid="balance-breakdown">
+              <CardContent className="p-4 space-y-4">
+                <div>
+                  <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">
+                    Balance breakdown · {selectedEx.name}
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2.5">
+                      <div className="text-[10px] uppercase tracking-wider text-zinc-500">Total Account Value</div>
+                      <div className="font-mono font-bold text-base">${fmt(liveSummary.totalEquityUSD)}</div>
+                      <div className="text-[10px] text-zinc-500">all scopes incl. funding & PnL</div>
+                    </div>
+                    <div className="rounded-lg border border-emerald-700/40 bg-emerald-950/20 px-3 py-2.5">
+                      <div className="text-[10px] uppercase tracking-wider text-emerald-400">Tradable Available</div>
+                      <div className="font-mono font-bold text-base text-emerald-300">${fmt(liveSummary.totalAvailableUSD)}</div>
+                      <div className="text-[10px] text-zinc-500">free in trading accounts</div>
+                    </div>
+                    <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 px-3 py-2.5">
+                      <div className="text-[10px] uppercase tracking-wider text-amber-400">Locked / In Orders</div>
+                      <div className="font-mono font-bold text-base text-amber-300">${fmt(liveSummary.totalLockedUSD)}</div>
+                      <div className="text-[10px] text-zinc-500">open orders + margin</div>
+                    </div>
+                    <div className="rounded-lg border border-sky-700/40 bg-sky-950/20 px-3 py-2.5">
+                      <div className="text-[10px] uppercase tracking-wider text-sky-400">Funding Wallet</div>
+                      <div className="font-mono font-bold text-base text-sky-300">${fmt(liveSummary.fundingUSD)}</div>
+                      <div className="text-[10px] text-zinc-500">not tradable until transferred</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Per-scope detail */}
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">Per-scope detail</div>
+                  <div className="overflow-x-auto rounded-lg border border-zinc-800">
+                    <table className="w-full text-xs">
+                      <thead className="bg-zinc-900/60 text-[10px] uppercase tracking-wider text-zinc-500">
+                        <tr>
+                          <th className="text-left px-3 py-2">Scope</th>
+                          <th className="text-right px-3 py-2">Total Equity</th>
+                          <th className="text-right px-3 py-2">Wallet Balance</th>
+                          <th className="text-right px-3 py-2">Available</th>
+                          <th className="text-right px-3 py-2">Locked</th>
+                          <th className="text-right px-3 py-2">Coins</th>
+                          <th className="text-left px-3 py-2">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="font-mono">
+                        {liveSummary.scopes.map(sc => (
+                          <tr key={sc.accountType} className="border-t border-zinc-800">
+                            <td className="px-3 py-2 font-sans font-semibold">{sc.accountType}</td>
+                            <td className="text-right px-3 py-2">{typeof sc.totalEquityUSD   === 'number' ? `$${fmt(sc.totalEquityUSD)}`   : '—'}</td>
+                            <td className="text-right px-3 py-2">{typeof sc.walletBalanceUSD === 'number' ? `$${fmt(sc.walletBalanceUSD)}` : '—'}</td>
+                            <td className="text-right px-3 py-2 text-emerald-300">{typeof sc.availableUSD === 'number' ? `$${fmt(sc.availableUSD)}` : '—'}</td>
+                            <td className="text-right px-3 py-2 text-amber-300">{typeof sc.lockedUSD    === 'number' ? `$${fmt(sc.lockedUSD)}`    : '—'}</td>
+                            <td className="text-right px-3 py-2">{sc.coinCount ?? 0}</td>
+                            <td className="px-3 py-2 font-sans">
+                              {sc.fetched
+                                ? <span className="text-emerald-400">OK</span>
+                                : <span className="text-zinc-500" title={sc.error ?? ''}>not active</span>}
+                              {sc.note && <div className="text-[10px] text-zinc-500 mt-0.5 max-w-md whitespace-normal">{sc.note}</div>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Exchange-reported reconciliation */}
+                {liveSummary.exchangeReported?.totalEquityUSD && liveSummary.exchangeReported.totalEquityUSD > 0 && (
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-[11px] text-zinc-300">
+                    <span className="text-zinc-500">Exchange-reported (matches what you see inside {selectedEx.name}): </span>
+                    Total Equity <span className="font-mono">${fmt(liveSummary.exchangeReported.totalEquityUSD)}</span>
+                    {liveSummary.exchangeReported.totalAvailableUSD ? <> · Available <span className="font-mono">${fmt(liveSummary.exchangeReported.totalAvailableUSD)}</span></> : null}
+                  </div>
+                )}
+
+                {/* Notes (e.g. funding-wallet reminder) */}
+                {liveSummary.notes.length > 0 && (
+                  <ul className="text-[11px] text-zinc-400 space-y-1">
+                    {liveSummary.notes.map((n, i) => (
+                      <li key={i} className="flex items-start gap-2">
+                        <AlertTriangle size={11} className="mt-0.5 flex-shrink-0 text-amber-400" />
+                        <span>{n}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
           {isLive && balError && modeState.connectionState !== 'balance_empty' && (
             modeState.autoRetryAt ? (
               <div

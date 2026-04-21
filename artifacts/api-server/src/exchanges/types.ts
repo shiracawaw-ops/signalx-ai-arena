@@ -23,6 +23,49 @@ export interface Balance {
   // for other assets it is left undefined so the frontend can render
   // "—" instead of a misleading "$0".
   usdtValue?: number;
+  // Which scope this balance came from when the adapter merged across
+  // multiple account types (e.g. Bybit "UNIFIED" / "SPOT" / "FUND").
+  // Optional — adapters that only have one scope leave it undefined.
+  scope?:    string;
+}
+
+// Per-scope summary produced by adapters that expose granular balance
+// breakdowns (Bybit Unified/Spot/Contract/Funding, OKX trading vs funding,
+// etc.). The frontend renders this as a transparent table so the user can
+// see exactly how the displayed totals were computed and why on-exchange
+// total (e.g. 163.61 USD) differs from app-detected tradable (e.g. 12 USD).
+export interface BalanceScope {
+  accountType:        string;     // "UNIFIED" | "SPOT" | "CONTRACT" | "FUND" | …
+  fetched:            boolean;    // did the call succeed for this scope
+  totalEquityUSD?:    number;     // exchange-reported total (incl. UPL & margin)
+  walletBalanceUSD?:  number;     // exchange-reported wallet balance
+  availableUSD?:      number;     // tradable now (free, not in orders/margin)
+  lockedUSD?:         number;     // in open orders or used as margin
+  coinCount?:         number;     // # coins surfaced for this scope
+  error?:             string;     // why this scope failed (if !fetched)
+  note?:              string;     // adapter-provided context
+}
+
+export interface BalanceSummary {
+  // Aggregate across all successfully-fetched scopes.
+  totalEquityUSD:     number;     // what Bybit/exchange shows as "total assets"
+  totalWalletUSD:     number;     // sum of wallet balances (no UPL)
+  totalAvailableUSD:  number;     // tradable across all scopes
+  totalLockedUSD:     number;     // locked in orders / used as margin
+  fundingUSD:         number;     // sitting in funding wallet (not yet tradable)
+  tradingUSD:         number;     // sitting in trading-side accounts
+  scopes:             BalanceScope[];
+  // Free-form notes the UI surfaces verbatim under the breakdown table —
+  // e.g. "USDC was found via per-coin usdValue", "Funding wallet contains
+  // 151 USDC; transfer to Unified to use it for spot trades".
+  notes:              string[];
+  // The raw exchange-reported totals so the user can see the same number
+  // they see in the Bybit app — independently of how the app sums coins.
+  exchangeReported?: {
+    totalEquityUSD?:    number;
+    totalWalletUSD?:    number;
+    totalAvailableUSD?: number;
+  };
 }
 
 export interface SymbolRules {
@@ -164,6 +207,13 @@ export interface ExchangeAdapter {
   validateCredentials(creds: ExchangeCredentials): Promise<ConnectResult>;
   getPermissions(creds: ExchangeCredentials): Promise<Permission>;
   getBalances(creds: ExchangeCredentials): Promise<Balance[]>;
+  /**
+   * Optional: return balances WITH a per-scope breakdown so the UI can show
+   * exactly how the displayed totals were assembled (Bybit Unified vs Spot
+   * vs Contract vs Funding, etc.). Adapters that don't implement this fall
+   * back to plain getBalances().
+   */
+  getBalanceBreakdown?(creds: ExchangeCredentials): Promise<{ balances: Balance[]; summary: BalanceSummary }>;
   getSymbolRules(creds: ExchangeCredentials, symbol: string): Promise<SymbolRules>;
   placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult>;
   /**

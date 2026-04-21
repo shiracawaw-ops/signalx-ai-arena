@@ -1,7 +1,7 @@
 // ─── Bybit REST Adapter (Unified v5) ─────────────────────────────────────────
 import { hmacSHA256, safeFetch, stubSymbolRules, toUsdtPair } from './base-adapter.js';
 import { ExchangeOperationError, withUsdtValue, enrichBalancesWithUsdtValue } from './exchange-error.js';
-import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, SymbolRules, OrderRequest, OrderResult } from './types.js';
+import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, BalanceScope, BalanceSummary, SymbolRules, OrderRequest, OrderResult } from './types.js';
 
 const BASE         = 'https://api.bybit.com';
 const TESTNET_BASE = 'https://api-testnet.bybit.com';
@@ -89,14 +89,22 @@ export class BybitAdapter implements ExchangeAdapter {
   }
 
   async getBalances(creds: ExchangeCredentials): Promise<Balance[]> {
+    return (await this.getBalanceBreakdown(creds)).balances;
+  }
+
+  async getBalanceBreakdown(creds: ExchangeCredentials): Promise<{ balances: Balance[]; summary: BalanceSummary }> {
     // Bybit accounts may be Unified, Spot-only, or Contract-only depending on
-    // whether the user migrated to Unified Margin. Try each in order and
-    // merge the non-empty results so we don't show an empty balance pane to
-    // a user whose funds happen to live in Spot or Contract.
+    // whether the user migrated to Unified Margin. Try each in order, capture
+    // per-scope subtotals AND the exchange-reported `totalEquity` so the UI
+    // can show the same number the user sees inside the Bybit app.
     const base       = creds.testnet ? TESTNET_BASE : BASE;
     const accountTypes = ['UNIFIED', 'SPOT', 'CONTRACT'] as const;
 
     const merged: Map<string, Balance> = new Map();
+    const scopes:  BalanceScope[] = [];
+    const notes:   string[] = [];
+    const exchangeReported = { totalEquityUSD: 0, totalWalletUSD: 0, totalAvailableUSD: 0 };
+    let   anyExchangeReported = false;
     let lastError: { code: 'auth' | 'rate_limit' | 'permission' | 'network' | 'account_type' | 'unknown'; message: string; status?: number } | null = null;
 
     for (const accountType of accountTypes) {
@@ -155,50 +163,103 @@ export class BybitAdapter implements ExchangeAdapter {
         continue;
       }
 
+      // ── Successful response — capture scope-level + per-coin numbers ─────
       const rawList = (r.data as Record<string, Record<string, unknown>>)?.['result']?.['list'];
       const list    = Array.isArray(rawList) ? rawList : [];
       const first   = (list[0] ?? {}) as Record<string, unknown>;
       const coinsRaw = first['coin'];
       const coins    = Array.isArray(coinsRaw) ? coinsRaw as Array<Record<string, unknown>> : [];
 
+      const pickNum = (...vals: unknown[]): number => {
+        for (const v of vals) {
+          const s = String(v ?? '').trim();
+          if (!s) continue;
+          const n = parseFloat(s);
+          if (Number.isFinite(n)) return n;
+        }
+        return 0;
+      };
+      const pickPos = (...vals: unknown[]): number => {
+        const n = pickNum(...vals);
+        return n > 0 ? n : 0;
+      };
+
+      // Exchange-reported scope totals (Unified shows the same number the
+      // user sees inside the Bybit app under "Total Equity").
+      const scopeTotalEquityUSD    = pickNum(first['totalEquity'],          first['accountTotalEquity']);
+      const scopeWalletBalanceUSD  = pickNum(first['totalWalletBalance']);
+      const scopeAvailableUSD      = pickNum(first['totalAvailableBalance'], first['totalMarginBalance']);
+      const scopeLockedUSD         = pickPos(first['totalInitialMargin'],   first['totalMaintenanceMargin']);
+      if (scopeTotalEquityUSD > 0) {
+        anyExchangeReported = true;
+        exchangeReported.totalEquityUSD    += scopeTotalEquityUSD;
+        exchangeReported.totalWalletUSD    += scopeWalletBalanceUSD;
+        exchangeReported.totalAvailableUSD += scopeAvailableUSD;
+      }
+
+      let scopeCoinCount = 0;
       for (const c of coins) {
         const asset = String(c['coin'] ?? '');
         if (!asset) continue;
-        const total     = parseFloat(String(c['walletBalance'] ?? '0'));
-        if (!Number.isFinite(total) || total <= 0) continue;
-        // Bybit Unified accounts often return empty `availableToWithdraw`
-        // for collateral assets like USDT (they're locked as margin even
-        // when no positions exist). Fall back to walletBalance minus any
-        // explicit locked/IM amounts so trading checks see the real
-        // spendable balance.
-        const pickNum = (...vals: unknown[]): number => {
-          for (const v of vals) {
-            const s = String(v ?? '').trim();
-            if (!s) continue;
-            const n = parseFloat(s);
-            if (Number.isFinite(n) && n > 0) return n;
-          }
-          return 0;
-        };
-        const hold      = pickNum(c['locked'], c['totalOrderIM'], c['totalPositionIM']);
-        const available = pickNum(c['availableToWithdraw'], c['free'], total - hold, total);
-        // Merge across account types — sum same-asset balances.
+
+        // Use `equity` (includes UPL/collateral value) when it exceeds raw
+        // walletBalance — this captures Unified-account collateral that's
+        // currently backing positions.
+        const wallet  = pickPos(c['walletBalance']);
+        const equity  = pickPos(c['equity']);
+        const total   = Math.max(wallet, equity);
+        if (total <= 0) continue;
+
+        const hold      = pickPos(c['locked'], c['totalOrderIM'], c['totalPositionIM']);
+        const available = pickPos(c['availableToWithdraw'], c['free'],
+                                  total - hold > 0 ? total - hold : 0,
+                                  total);
+
+        // Bybit gives us an authoritative USD valuation per coin. Use it
+        // verbatim — this is how `163.61 USD` is computed on the exchange
+        // side and avoids the price-lookup hole that drops USDC etc.
+        const usdValue = pickPos(c['usdValue']);
+
         const prev = merged.get(asset);
         if (prev) {
+          const newUsd = (prev.usdtValue ?? 0) + usdValue;
           merged.set(asset, {
             asset,
-            available: prev.available + (Number.isFinite(available) ? available : 0),
-            hold:      prev.hold      + (Number.isFinite(hold)      ? hold      : 0),
+            available: prev.available + available,
+            hold:      prev.hold      + hold,
             total:     prev.total     + total,
+            ...(usdValue > 0 || prev.usdtValue !== undefined ? { usdtValue: newUsd } : {}),
+            scope:     prev.scope ? `${prev.scope}+${accountType}` : accountType,
           });
         } else {
           merged.set(asset, {
-            asset,
-            available: Number.isFinite(available) ? available : 0,
-            hold:      Number.isFinite(hold)      ? hold      : 0,
-            total,
+            asset, available, hold, total,
+            ...(usdValue > 0 ? { usdtValue: usdValue } : {}),
+            scope: accountType,
           });
         }
+        scopeCoinCount += 1;
+      }
+
+      scopes.push({
+        accountType,
+        fetched: true,
+        ...(scopeTotalEquityUSD   > 0 ? { totalEquityUSD:   scopeTotalEquityUSD }   : {}),
+        ...(scopeWalletBalanceUSD > 0 ? { walletBalanceUSD: scopeWalletBalanceUSD } : {}),
+        ...(scopeAvailableUSD     > 0 ? { availableUSD:     scopeAvailableUSD }     : {}),
+        ...(scopeLockedUSD        > 0 ? { lockedUSD:        scopeLockedUSD }        : {}),
+        coinCount: scopeCoinCount,
+      });
+    }
+
+    // Record account-types that errored out so the UI can surface them too.
+    for (const at of accountTypes) {
+      if (!scopes.find(s => s.accountType === at)) {
+        scopes.push({
+          accountType: at,
+          fetched: false,
+          error: lastError?.message ?? 'Account type not active for this user',
+        });
       }
     }
 
@@ -206,9 +267,11 @@ export class BybitAdapter implements ExchangeAdapter {
     // Fresh deposits on Bybit land in the **Funding** account first; users
     // must explicitly transfer to UNIFIED/SPOT/CONTRACT before they appear
     // in the wallet-balance endpoint. We surface FUND coins here so a user
-    // who just deposited sees their balance immediately. Failures on this
-    // endpoint are non-fatal — we still return whatever we got from the
-    // trading accounts.
+    // who just deposited sees their balance immediately.
+    let fundingUSD = 0;
+    let fundingCoinCount = 0;
+    let fundingFetched = false;
+    let fundingError: string | undefined;
     try {
       const ts2 = Date.now();
       const qs2 = `accountType=FUND`;
@@ -220,7 +283,9 @@ export class BybitAdapter implements ExchangeAdapter {
       );
       if (rf.ok) {
         const retCode = (rf.data as Record<string, unknown>)?.['retCode'];
+        const retMsg  = String((rf.data as Record<string, unknown>)?.['retMsg'] ?? '');
         if (typeof retCode === 'number' && retCode === 0) {
+          fundingFetched = true;
           const fundList = (rf.data as Record<string, Record<string, unknown>>)?.['result']?.['balance'];
           const fundCoins = Array.isArray(fundList) ? fundList as Array<Record<string, unknown>> : [];
           for (const c of fundCoins) {
@@ -231,6 +296,12 @@ export class BybitAdapter implements ExchangeAdapter {
             const total    = Number.isFinite(wallet) && wallet > 0 ? wallet : transfer;
             if (!Number.isFinite(total) || total <= 0) continue;
             const available = Number.isFinite(transfer) && transfer > 0 ? transfer : total;
+            // FUND endpoint doesn't return usdValue; estimate via the public
+            // ticker so the breakdown doesn't show "—" for fresh deposits.
+            let usd = 0;
+            try { usd = total * (await this.getPrice(asset)); } catch { /* best-effort */ }
+            if (Number.isFinite(usd) && usd > 0) fundingUSD += usd;
+
             const prev = merged.get(asset);
             if (prev) {
               merged.set(asset, {
@@ -238,16 +309,39 @@ export class BybitAdapter implements ExchangeAdapter {
                 available: prev.available + available,
                 hold:      prev.hold,
                 total:     prev.total + total,
+                ...(usd > 0 || prev.usdtValue !== undefined ? { usdtValue: (prev.usdtValue ?? 0) + usd } : {}),
+                scope:     prev.scope ? `${prev.scope}+FUND` : 'FUND',
               });
             } else {
-              merged.set(asset, { asset, available, hold: 0, total });
+              merged.set(asset, {
+                asset, available, hold: 0, total,
+                ...(usd > 0 ? { usdtValue: usd } : {}),
+                scope: 'FUND',
+              });
             }
+            fundingCoinCount += 1;
           }
+        } else {
+          fundingError = `retCode ${retCode}: ${retMsg}`;
         }
+      } else {
+        fundingError = rf.error?.message ?? 'Funding wallet fetch failed';
       }
-    } catch {
-      // Funding wallet is best-effort; ignore failures so trading accounts
-      // still surface even if the asset endpoint is throttled or rejected.
+    } catch (e) {
+      fundingError = (e as Error).message;
+    }
+    scopes.push({
+      accountType: 'FUND',
+      fetched: fundingFetched,
+      ...(fundingUSD > 0     ? { walletBalanceUSD: fundingUSD, availableUSD: fundingUSD, totalEquityUSD: fundingUSD } : {}),
+      ...(fundingError       ? { error: fundingError } : {}),
+      coinCount: fundingCoinCount,
+      ...(fundingFetched && fundingUSD > 0
+        ? { note: 'Funds in the Funding wallet are NOT tradable from the app — transfer them to your Unified/Spot account inside Bybit first.' }
+        : {}),
+    });
+    if (fundingUSD > 0) {
+      notes.push(`$${fundingUSD.toFixed(2)} sits in your Bybit Funding wallet. Transfer it to Unified/Spot inside Bybit to use it for trading.`);
     }
 
     if (merged.size === 0 && lastError && lastError.code !== 'account_type') {
@@ -255,8 +349,55 @@ export class BybitAdapter implements ExchangeAdapter {
       throw new ExchangeOperationError(lastError.code, lastError.message, lastError.status);
     }
 
-    const balances = [...merged.values()].map(withUsdtValue);
-    return enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
+    // For any coin that ended up without a usdtValue (e.g. CONTRACT/SPOT
+    // where the API doesn't return usdValue), backfill via the public
+    // ticker so the displayed total matches the exchange.
+    let balances = [...merged.values()].map(b =>
+      b.usdtValue !== undefined ? b : withUsdtValue(b),
+    );
+    balances = await enrichBalancesWithUsdtValue(this.id, balances, sym => this.getPrice(sym));
+
+    // Compute aggregate summary numbers from the per-coin breakdown.
+    const tradingUSD = balances
+      .filter(b => b.scope && b.scope !== 'FUND')
+      .reduce((s, b) => s + (b.usdtValue ?? 0), 0);
+    const summedTotalUSD = balances.reduce((s, b) => s + (b.usdtValue ?? 0), 0);
+    const summedAvailableUSD = balances
+      .reduce((s, b) => {
+        const ratio = b.total > 0 ? b.available / b.total : 0;
+        return s + ratio * (b.usdtValue ?? 0);
+      }, 0);
+    const summedLockedUSD = Math.max(0, summedTotalUSD - summedAvailableUSD);
+
+    // Prefer Bybit's own totalEquity (matches the in-app number) when
+    // available — fall back to our per-coin sum.
+    const totalEquityUSD = anyExchangeReported && exchangeReported.totalEquityUSD > 0
+      ? exchangeReported.totalEquityUSD + fundingUSD
+      : summedTotalUSD;
+
+    if (anyExchangeReported && Math.abs(exchangeReported.totalEquityUSD - tradingUSD) > 0.5) {
+      notes.push(
+        `Bybit-reported total equity (trading accounts): $${exchangeReported.totalEquityUSD.toFixed(2)} · ` +
+        `app per-coin sum: $${tradingUSD.toFixed(2)}. ` +
+        `Differences usually mean unrealised PnL or assets without an active USDT pair.`,
+      );
+    }
+
+    const summary: BalanceSummary = {
+      totalEquityUSD,
+      totalWalletUSD:    (anyExchangeReported ? exchangeReported.totalWalletUSD : summedTotalUSD) + fundingUSD,
+      totalAvailableUSD: (anyExchangeReported && exchangeReported.totalAvailableUSD > 0
+                          ? exchangeReported.totalAvailableUSD
+                          : summedAvailableUSD),
+      totalLockedUSD:    summedLockedUSD,
+      fundingUSD,
+      tradingUSD,
+      scopes,
+      notes,
+      ...(anyExchangeReported ? { exchangeReported } : {}),
+    };
+
+    return { balances, summary };
   }
 
   async getSymbolRules(_creds: ExchangeCredentials, symbol: string): Promise<SymbolRules> {

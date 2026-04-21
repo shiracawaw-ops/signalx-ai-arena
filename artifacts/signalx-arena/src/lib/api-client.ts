@@ -257,7 +257,13 @@ export const apiClient = {
   async getBalances(
     exchange: string,
     creds: ExchangeCredentials,
-  ): Promise<ApiResult<{ balances: Array<{ asset: string; available: number; hold: number; total: number }> }>> {
+  ): Promise<ApiResult<{
+    balances: Array<{ asset: string; available: number; hold: number; total: number; usdtValue?: number; scope?: string }>;
+    // Optional: per-scope breakdown (currently populated for Bybit). When
+    // present the UI shows the breakdown panel; when absent, falls back to
+    // the legacy single-row total.
+    summary?: BalanceSummary;
+  }>> {
     console.log(`[api-client] getBalances ${exchange} key=${maskKey(creds.apiKey)}`);
     return request(`${BACKEND}/exchange/${exchange}/balances`, {
       method:  'POST',
@@ -430,6 +436,34 @@ export const apiClient = {
 };
 
 // ── Diagnostic types (mirror of backend types.ts) ─────────────────────────────
+
+// ── Balance breakdown types (mirror of api-server BalanceScope/Summary) ──────
+export interface BalanceScope {
+  accountType:        string;
+  fetched:            boolean;
+  totalEquityUSD?:    number;
+  walletBalanceUSD?:  number;
+  availableUSD?:      number;
+  lockedUSD?:         number;
+  coinCount?:         number;
+  error?:             string;
+  note?:              string;
+}
+export interface BalanceSummary {
+  totalEquityUSD:     number;
+  totalWalletUSD:     number;
+  totalAvailableUSD:  number;
+  totalLockedUSD:     number;
+  fundingUSD:         number;
+  tradingUSD:         number;
+  scopes:             BalanceScope[];
+  notes:              string[];
+  exchangeReported?: {
+    totalEquityUSD?:    number;
+    totalWalletUSD?:    number;
+    totalAvailableUSD?: number;
+  };
+}
 
 export interface DiagnosticStep {
   step:        string;

@@ -134,6 +134,10 @@ router.post('/exchange/:exchange/permissions', async (req, res) => {
 });
 
 // POST /api/exchange/:exchange/balances — fetch real balances
+// When the adapter implements getBalanceBreakdown(), also return a
+// per-scope summary so the UI can show transparently how the displayed
+// totals were assembled (e.g. Bybit Unified vs Spot vs Contract vs
+// Funding wallet).
 router.post('/exchange/:exchange/balances', async (req, res) => {
   const ex      = requireExchange(req, res); if (!ex) return;
   const creds   = extractCreds(req);
@@ -141,6 +145,11 @@ router.post('/exchange/:exchange/balances', async (req, res) => {
   logAction(ex, 'balances', creds.apiKey);
   const adapter = getAdapter(ex)!;
   try {
+    if (typeof adapter.getBalanceBreakdown === 'function') {
+      const { balances, summary } = await adapter.getBalanceBreakdown(creds);
+      res.json({ ok: true, exchange: ex, balances, summary });
+      return;
+    }
     const balances = await adapter.getBalances(creds);
     res.json({ ok: true, exchange: ex, balances });
   } catch (e) { serverError(res, ex, e); }
