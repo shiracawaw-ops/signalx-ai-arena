@@ -166,9 +166,9 @@ export function allocateCapital(input: AllocationInput): AllocationPlan {
   // Step 4: enforce the deployable cap. If clamping pushed us over budget
   // (typically because `minPer` floors raised some bots), shave the excess
   // proportionally from bots that are still above `minPer`.
-  let total = raw.reduce((a, b) => a + b, 0);
-  if (total > deployable) {
-    let overshoot = total - deployable;
+  let runningTotal = raw.reduce((a, b) => a + b, 0);
+  if (runningTotal > deployable) {
+    let overshoot = runningTotal - deployable;
     // Iteratively trim until we either fit or every bot sits at the floor.
     for (let pass = 0; pass < 5 && overshoot > 0.01; pass++) {
       const trimmable = raw
@@ -181,8 +181,8 @@ export function allocateCapital(input: AllocationInput): AllocationPlan {
         const take = (x.slack / slackTotal) * cut;
         raw[x.i] -= take;
       }
-      total = raw.reduce((a, b) => a + b, 0);
-      overshoot = total - deployable;
+      runningTotal = raw.reduce((a, b) => a + b, 0);
+      overshoot = runningTotal - deployable;
     }
   }
 
