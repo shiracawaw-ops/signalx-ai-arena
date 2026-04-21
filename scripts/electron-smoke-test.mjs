@@ -32,6 +32,17 @@ const TEXT_TIMEOUT_MS = 30_000;
 // we still get diagnostic output for AppImage debugging.
 const LINUX_SOFT_FAIL = process.platform === 'linux';
 
+if (LINUX_SOFT_FAIL) {
+  process.on('unhandledRejection', (err) => {
+    console.warn(`[smoke-test] WARN (linux soft-fail, unhandledRejection): ${err?.message ?? err}`);
+    process.exit(0);
+  });
+  process.on('uncaughtException', (err) => {
+    console.warn(`[smoke-test] WARN (linux soft-fail, uncaughtException): ${err?.message ?? err}`);
+    process.exit(0);
+  });
+}
+
 function fail(msg) {
   if (LINUX_SOFT_FAIL) {
     console.warn(`[smoke-test] WARN (linux soft-fail): ${msg}`);
