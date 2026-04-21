@@ -30,6 +30,12 @@
   "dependencies": {
     "@replit/connectors-sdk": "^0.4.0"
   },
+  "optionalDependencies": {
+    "@rollup/rollup-darwin-arm64": "4.59.0",
+    "@rollup/rollup-darwin-x64": "4.59.0",
+    "@rollup/rollup-linux-x64-gnu": "4.59.0",
+    "@rollup/rollup-win32-x64-msvc": "4.59.0"
+  },
   "lint-staged": {
     "artifacts/signalx-arena/**/*.{ts,tsx}": [
       "artifacts/signalx-arena/node_modules/.bin/eslint --fix"
