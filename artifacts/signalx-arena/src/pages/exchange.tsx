@@ -1649,7 +1649,7 @@ export default function ExchangePage() {
                   <div className="text-xs uppercase tracking-wider text-zinc-500 mb-2">
                     Balance breakdown · {selectedEx.name}
                   </div>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                     <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2.5">
                       <div className="text-[10px] uppercase tracking-wider text-zinc-500">Total Account Value</div>
                       <div className="font-mono font-bold text-base">${fmt(liveSummary.totalEquityUSD)}</div>
@@ -1669,6 +1669,11 @@ export default function ExchangePage() {
                       <div className="text-[10px] uppercase tracking-wider text-sky-400">Funding Wallet</div>
                       <div className="font-mono font-bold text-base text-sky-300">${fmt(liveSummary.fundingUSD)}</div>
                       <div className="text-[10px] text-zinc-500">not tradable until transferred</div>
+                    </div>
+                    <div className="rounded-lg border border-fuchsia-700/40 bg-fuchsia-950/20 px-3 py-2.5">
+                      <div className="text-[10px] uppercase tracking-wider text-fuchsia-400">External (Earn / Savings)</div>
+                      <div className="font-mono font-bold text-base text-fuchsia-300">${fmt(liveSummary.externalUSD ?? 0)}</div>
+                      <div className="text-[10px] text-zinc-500">redeem inside exchange to trade</div>
                     </div>
                   </div>
                 </div>
@@ -1703,6 +1708,7 @@ export default function ExchangePage() {
                                 ? <span className="text-emerald-400">OK</span>
                                 : <span className="text-zinc-500" title={sc.error ?? ''}>not active</span>}
                               {sc.note && <div className="text-[10px] text-zinc-500 mt-0.5 max-w-md whitespace-normal">{sc.note}</div>}
+                              {!sc.fetched && sc.error && <div className="text-[10px] text-rose-400 mt-0.5 max-w-md whitespace-normal">{sc.error}</div>}
                             </td>
                           </tr>
                         ))}
@@ -1710,6 +1716,35 @@ export default function ExchangePage() {
                     </table>
                   </div>
                 </div>
+
+                {/* External (Earn) breakdown */}
+                {liveSummary.externalBreakdown && liveSummary.externalBreakdown.length > 0 && (
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">External (Earn / Savings / Staking)</div>
+                    <div className="overflow-x-auto rounded-lg border border-fuchsia-900/40">
+                      <table className="w-full text-xs">
+                        <thead className="bg-fuchsia-950/30 text-[10px] uppercase tracking-wider text-fuchsia-300">
+                          <tr>
+                            <th className="text-left px-3 py-2">Source</th>
+                            <th className="text-right px-3 py-2">USD Value</th>
+                            <th className="text-right px-3 py-2">Coins</th>
+                            <th className="text-left px-3 py-2">Note</th>
+                          </tr>
+                        </thead>
+                        <tbody className="font-mono">
+                          {liveSummary.externalBreakdown.map((e, i) => (
+                            <tr key={i} className="border-t border-fuchsia-900/30">
+                              <td className="px-3 py-2 font-sans font-semibold">{e.source}</td>
+                              <td className="text-right px-3 py-2 text-fuchsia-300">${fmt(e.usd)}</td>
+                              <td className="text-right px-3 py-2">{e.coinCount}</td>
+                              <td className="px-3 py-2 font-sans text-[11px] text-zinc-400">{e.note ?? ''}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
 
                 {/* Exchange-reported reconciliation */}
                 {liveSummary.exchangeReported?.totalEquityUSD && liveSummary.exchangeReported.totalEquityUSD > 0 && (

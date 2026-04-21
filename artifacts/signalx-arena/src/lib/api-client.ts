@@ -456,6 +456,8 @@ export interface BalanceSummary {
   totalLockedUSD:     number;
   fundingUSD:         number;
   tradingUSD:         number;
+  externalUSD?:       number;
+  externalBreakdown?: Array<{ source: string; usd: number; coinCount: number; note?: string }>;
   scopes:             BalanceScope[];
   notes:              string[];
   exchangeReported?: {

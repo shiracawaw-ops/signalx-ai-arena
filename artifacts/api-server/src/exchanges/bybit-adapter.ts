@@ -343,6 +343,65 @@ export class BybitAdapter implements ExchangeAdapter {
     if (fundingUSD > 0) {
       notes.push(`$${fundingUSD.toFixed(2)} sits in your Bybit Funding wallet. Transfer it to Unified/Spot inside Bybit to use it for trading.`);
     }
+    if (!fundingFetched && fundingError) {
+      notes.push(`Funding wallet check failed: ${fundingError}. If you expect a Funding balance, your API key likely needs the "Wallet" (Asset) read permission.`);
+    }
+
+    // ── Bybit Earn / Savings / Staking / Copy Trading ────────────────────
+    // Funds parked in Earn products do NOT appear in wallet-balance — Bybit
+    // exposes them via /v5/asset/exchange/query-coin-list and the Earn
+    // position endpoints. Probe a few common categories so the user sees
+    // why their on-app total differs from what's tradable.
+    const externalBreakdown: Array<{ source: string; usd: number; coinCount: number; note?: string }> = [];
+    let externalUSD = 0;
+    type EarnProbe = { label: string; category: string; note: string };
+    const earnProbes: EarnProbe[] = [
+      { label: 'Earn · Flexible Savings', category: 'FlexibleSaving',
+        note: 'Funds in Flexible Savings — redeem inside Bybit before they can be traded.' },
+      { label: 'Earn · On-Chain Earn',    category: 'OnChain',
+        note: 'On-Chain Earn principal — redeem inside Bybit to free for trading.' },
+      { label: 'Earn · Fixed-term',       category: 'FixedTerm',
+        note: 'Fixed-term Earn — locked until maturity.' },
+    ];
+    for (const probe of earnProbes) {
+      try {
+        const ts3 = Date.now();
+        const qs3 = `category=${probe.category}`;
+        const sig3 = sign(creds.apiKey, creds.secretKey, ts3, qs3);
+        const re = await safeFetch(
+          `${base}/v5/earn/position?${qs3}`,
+          { headers: headers(creds, ts3, sig3) },
+          'bybit',
+        );
+        if (!re.ok) continue;
+        const retCode = (re.data as Record<string, unknown>)?.['retCode'];
+        if (typeof retCode === 'number' && retCode !== 0) continue;
+        const arr = (re.data as Record<string, Record<string, unknown>>)?.['result']?.['list'];
+        const positions = Array.isArray(arr) ? arr as Array<Record<string, unknown>> : [];
+        let usd = 0;
+        let coinCount = 0;
+        for (const p of positions) {
+          const asset = String(p['coin'] ?? '');
+          if (!asset) continue;
+          const amt = parseFloat(String(p['amount'] ?? p['principalAmount'] ?? p['stakedAmount'] ?? '0'));
+          if (!Number.isFinite(amt) || amt <= 0) continue;
+          let px = 0;
+          try { px = await this.getPrice(asset); } catch { /* best-effort */ }
+          if (Number.isFinite(px) && px > 0) usd += amt * px;
+          coinCount += 1;
+        }
+        if (usd > 0 || coinCount > 0) {
+          externalBreakdown.push({ source: probe.label, usd, coinCount, note: probe.note });
+          externalUSD += usd;
+        }
+      } catch { /* probe failed silently — Earn product simply not used */ }
+    }
+    if (externalUSD > 0) {
+      notes.push(
+        `$${externalUSD.toFixed(2)} is parked in Bybit Earn products (Savings/Staking/etc.) — ` +
+        `redeem them inside Bybit first to make them tradable from this app.`,
+      );
+    }
 
     if (merged.size === 0 && lastError && lastError.code !== 'account_type') {
       // All account types failed for the same non-account-type reason.
@@ -370,10 +429,11 @@ export class BybitAdapter implements ExchangeAdapter {
     const summedLockedUSD = Math.max(0, summedTotalUSD - summedAvailableUSD);
 
     // Prefer Bybit's own totalEquity (matches the in-app number) when
-    // available — fall back to our per-coin sum.
-    const totalEquityUSD = anyExchangeReported && exchangeReported.totalEquityUSD > 0
-      ? exchangeReported.totalEquityUSD + fundingUSD
-      : summedTotalUSD;
+    // available — fall back to our per-coin sum. Always add Funding + Earn
+    // since those are NOT included in Bybit's wallet-balance totalEquity.
+    const totalEquityUSD = (anyExchangeReported && exchangeReported.totalEquityUSD > 0
+      ? exchangeReported.totalEquityUSD
+      : summedTotalUSD) + fundingUSD + externalUSD;
 
     if (anyExchangeReported && Math.abs(exchangeReported.totalEquityUSD - tradingUSD) > 0.5) {
       notes.push(
@@ -392,6 +452,8 @@ export class BybitAdapter implements ExchangeAdapter {
       totalLockedUSD:    summedLockedUSD,
       fundingUSD,
       tradingUSD,
+      ...(externalUSD > 0 ? { externalUSD } : {}),
+      ...(externalBreakdown.length > 0 ? { externalBreakdown } : {}),
       scopes,
       notes,
       ...(anyExchangeReported ? { exchangeReported } : {}),

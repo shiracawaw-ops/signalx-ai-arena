@@ -54,6 +54,8 @@ export interface BalanceSummary {
   totalLockedUSD:     number;     // locked in orders / used as margin
   fundingUSD:         number;     // sitting in funding wallet (not yet tradable)
   tradingUSD:         number;     // sitting in trading-side accounts
+  externalUSD?:       number;     // outside trading wallets — Earn / Savings / Staking / Copy
+  externalBreakdown?: Array<{ source: string; usd: number; coinCount: number; note?: string }>;
   scopes:             BalanceScope[];
   // Free-form notes the UI surfaces verbatim under the breakdown table —
   // e.g. "USDC was found via per-coin usdValue", "Funding wallet contains
