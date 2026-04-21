@@ -1,0 +1,466 @@
+Start now and modify the current SignalX AI Arena / Signal Arena project directly.
+
+Do not create a new project.
+Do not redesign the whole UI.
+Do not leave this as mock logic.
+Modify the actual working app, actual execution path, actual bot fleet logic, and actual Exchange / AutoPilot interface.
+
+Highest priorities in this exact order:
+
+1. Fix persistent symbol_blocked errors at root cause
+2. Fix why Place Order is often disabled / blocked / not executable
+3. Fix UI/backend state mismatches
+4. Add advanced real-balance bot control and smart bot selection
+5. Add per-bot reporting and ranking
+
+==================================================
+PRIORITY 1 — FIX symbol_blocked AT ROOT CAUSE
+=============================================
+
+symbol_blocked is still appearing too often and must be fixed at the root cause, not cosmetically.
+
+Required implementation:
+
+1. Audit every code path that triggers symbol_blocked.
+   Find all causes, including:
+
+* invalid symbol mapping
+* stale cache
+* stale rejection state
+* cooldown overlap
+* failed previous execution
+* exchange status confusion
+* normalization failure
+* temporary internal lock
+* duplicate bot conflict
+* missing position logic
+* symbol registry mismatch
+* stale symbol lock not cleared
+
+2. Reduce aggressive symbol blocking.
+   Do NOT mark symbols blocked for simple mapping issues or normal temporary validation failures.
+   Only allow symbol_blocked when there is a real confirmed reason, such as:
+
+* symbol truly does not exist on selected exchange
+* symbol is inactive / halted / not tradable
+* exchange explicitly restricts the symbol
+* short-lived real safety lock is required
+
+3. Replace generic symbol_blocked with exact reason categories.
+   Whenever a symbol is blocked, classify the exact cause as:
+
+* symbol_not_found
+* symbol_inactive
+* symbol_mapping_failed
+* symbol_temporarily_locked
+* duplicate_position_guard
+* cooldown_lock
+* exchange_restriction
+* stale_cache_conflict
+
+4. Auto-clear temporary symbol locks correctly.
+   Temporary symbol locks must expire and reset safely.
+   No stale symbol_blocked state should persist forever.
+
+5. Full symbol registry and normalization.
+   Load all tradable symbols from the selected exchange automatically.
+   Support Binance and Bybit fully.
+   Normalize inputs such as:
+
+* BTC
+* BTCUSDT
+* BTC-USD
+* ETH
+* XRP
+  Map them safely to the correct exchange format.
+  Do not use symbol_blocked as a substitute for incomplete symbol normalization.
+
+6. Add symbol diagnostics in UI.
+   For each trade candidate symbol, show:
+
+* raw input symbol
+* normalized symbol
+* exchange symbol match
+* tradable status
+* exact block reason
+* temporary or permanent block
+* cache age / registry source if helpful
+
+==================================================
+PRIORITY 2 — FIX PLACE ORDER FIRST
+==================================
+
+Investigate and fix why Place Order is often disabled, blocked, or not executable.
+
+Check and fix all possible blockers:
+
+* wrong paper/real mode gating
+* stale cooldown flags
+* stale symbol_blocked flags
+* invalid symbol normalization state
+* below_min_notional failure
+* missing API permission refresh
+* account mode mismatch
+* invalid payload generation
+* inactive bot selection
+* internal preflight not resetting
+* exchange selection not propagated
+* quantity sizing too small
+* quantity precision failure
+* hidden silent blockers
+* staged real allocation while app is still in paper mode
+* mismatched UI state vs actual backend execution state
+
+Requirements:
+
+* if all validations pass, Place Order must become enabled
+* clicking Place Order must submit a valid order
+* if Place Order is disabled, show the exact visible reason in UI
+* never fail silently
+
+Add a visible Place Order disabled reason panel with categories:
+
+* exchange_not_connected
+* paper_mode_only
+* no_api_permission
+* invalid_symbol
+* symbol_mapping_failed
+* symbol_temporarily_blocked
+* below_min_notional
+* insufficient_balance
+* insufficient_allocated_capital
+* cooldown_active
+* no_valid_order_payload
+* account_mode_mismatch
+* precision_validation_failed
+* preflight_not_ready
+
+==================================================
+PRIORITY 3 — FIX UI / BACKEND STATE MISMATCH
+============================================
+
+The UI must match the real backend state at all times.
+
+Required fixes:
+
+* total bots slider value must match summary exactly
+* active real bots slider value must match summary exactly
+* remaining bots count must always equal total bots minus active real bots
+* backend fleet configuration must match visible UI values
+* no stale values in summary
+* any slider or mode change must refresh instantly and correctly
+* no contradictory paper/real labels
+
+Mode consistency rules:
+
+* if current mode is paper, clearly state that real allocation is staged only and not live
+* if current mode is real, reflect that consistently everywhere
+* show clearly whether Place Order is currently allowed in this mode
+
+==================================================
+PRIORITY 4 — BOT COUNT CONTROL
+==============================
+
+Keep and fully wire these controls into real logic:
+
+1. Total Bot Count selector
+
+* range from 1 to 50 bots
+
+2. Active Real Bot Count selector
+
+* must never exceed total bot count
+
+3. Remaining Bots Mode selector
+   Options:
+
+* standby
+* paper
+* disabled
+
+Example:
+
+* total bots = 20
+* active real bots = 5
+* remaining bots mode = paper
+  Result:
+* 5 bots = real trading
+* 15 bots = paper mode
+
+==================================================
+PRIORITY 5 — SMART CAPITAL USAGE AND ALLOCATION
+===============================================
+
+Inside Exchange / AutoPilot, add and fully wire:
+
+1. Capital usage percentage selector
+   Options:
+
+* 10%
+* 25%
+* 50%
+* 75%
+* 100%
+
+2. Smart capital allocation
+
+* detect available real balance in real time
+* calculate usable capital from selected percentage
+* subtract fee reserve
+* subtract safety reserve
+* distribute only across active real bots
+* equal allocation by default
+* smart redistribution if some bots are inactive, blocked, skipped, or find no valid trade
+* do not allocate amounts too small to create valid exchange orders
+* respect min notional, lot size, precision, and fee buffer
+
+Expose clearly:
+
+* total balance
+* selected capital %
+* usable capital
+* reserved capital
+* allocation per real bot
+* active real bot count
+* standby bot count
+* blocked bot count
+* unallocated capital
+
+==================================================
+PRIORITY 6 — SMART REAL-BALANCE BOT SELECTION
+=============================================
+
+This is critical:
+When the user chooses how many bots may trade with real balance, the system must automatically choose the best bots for real trading instead of selecting them randomly.
+
+Example:
+
+* total bots = 20
+* active real bots = 5
+  Then the system must automatically choose the best 5 bots for the current real-balance mission.
+
+Implement a real-balance bot selection engine with weighted scoring based on:
+
+* historical win rate
+* realized profit
+* execution stability
+* rejection rate
+* recent performance
+* current market suitability
+* strategy fit / symbol expertise
+* drawdown control
+* signal quality
+* consistency over time
+
+Requirements:
+
+* rank all bots continuously
+* assign real balance only to highest-ranked eligible bots
+* lower-ranked bots remain in the selected remaining mode (standby / paper / disabled)
+* allow user to inspect why each bot was selected or not selected
+* support manual override later, but automatic smart selection must exist and be usable
+
+Add selection result details in UI:
+
+* selected for real balance: yes/no
+* real-balance rank
+* bot efficiency score
+* strategy fit score
+* stability score
+* recent performance score
+* rejection risk score
+* reason for inclusion or exclusion
+
+Add assignment modes:
+
+* manual
+* automatic best bots
+* automatic best recent performers
+* automatic lowest rejection bots
+* automatic highest stability bots
+
+Default recommended mode:
+
+* automatic best bots
+
+==================================================
+PRIORITY 7 — DEEP ASSET STUDY ENGINE
+====================================
+
+Before any bot buys any asset, perform a complete study:
+
+* trend analysis
+* momentum analysis
+* multi-timeframe confirmation when possible
+* volatility analysis
+* liquidity analysis
+* order-book quality if available
+* spread analysis
+* slippage estimate
+* support/resistance zones
+* breakout / pullback / continuation logic
+* volume confirmation
+* risk/reward estimate
+* optional sentiment/news factor if already available
+
+Outputs:
+
+* asset_score
+* confidence_score
+* execution_safety_score
+* risk_score
+* final_verdict = EXECUTE or SKIP
+
+No trade may continue unless configurable thresholds pass.
+
+==================================================
+PRIORITY 8 — EXCHANGE COMPLIANCE ENGINE
+=======================================
+
+Before sending any order, fetch and validate live exchange rules for the selected exchange and symbol.
+
+Support now:
+
+* Binance
+* Bybit
+
+Validate:
+
+* symbol exists
+* symbol active/tradable
+* correct symbol normalization/mapping
+* price precision / tick size
+* qty precision / step size
+* min qty
+* max qty
+* min notional / min order value
+* max order value if applicable
+* supported order types
+* account mode compatibility
+* API key permission compatibility
+* available balance including fee buffer
+* rate-limit awareness
+* liquidity/slippage precheck
+* whether market or limit is safer
+
+If validation fails:
+
+* do not send the order
+* show exact reason in diagnostics
+* do not keep Place Order disabled silently
+
+==================================================
+PRIORITY 9 — FIX below_min_notional AND INVALID ORDERS
+======================================================
+
+Fix repeated invalid small orders.
+
+Before any BUY order:
+
+* fetch real min notional / min order value from exchange
+* calculate the minimum valid quantity required at current price
+* round correctly to step size and precision
+* include fee buffer
+* only submit if final order is valid and allocated capital allows it
+
+If allocated capital is too small:
+
+* do not submit
+* show exact reason:
+
+  * below_min_notional
+  * insufficient_allocated_capital
+  * precision_adjustment_failed
+
+Prevent SELL attempts unless there is a real open position / owned balance.
+
+==================================================
+PRIORITY 10 — SMART EXECUTION PLANNER
+=====================================
+
+Before order placement:
+
+* choose market vs limit intelligently
+* avoid market when spread/slippage is poor
+* round qty and price exactly to exchange rules
+* optionally split large orders into smaller safer child orders
+* include fee buffer
+* include safety buffer
+* prevent duplicate or contradictory orders from multiple bots
+
+==================================================
+PRIORITY 11 — PER-BOT REPORTS
+=============================
+
+Add a detailed report section for each bot individually.
+For every bot, show:
+
+* bot name / id
+* current status
+* total trades
+* executed trades
+* skipped trades
+* rejected trades
+* win count
+* loss count
+* win rate
+* realized PnL
+* unrealized PnL if applicable
+* capital allocated
+* capital used
+* best trade
+* worst trade
+* last activity time
+* major rejection reasons
+* major skip reasons
+* efficiency score
+* real-balance eligibility score
+
+==================================================
+PRIORITY 12 — BOT LEADERBOARD
+=============================
+
+Add a ranking / leaderboard section for bots.
+Allow ranking by:
+
+* highest profit
+* best win rate
+* most successful trades
+* fewest rejected trades
+* best execution stability
+* best overall score
+
+Show top bots clearly as:
+
+* first place
+* second place
+* third place
+  etc.
+
+==================================================
+PRIORITY 13 — PERFORMANCE, STABILITY, AND COST
+==============================================
+
+* move heavy network work off UI thread
+* use background workers/threads
+* prevent freezing
+* add safe retry logic
+* add timeout handling
+* add fallback behavior
+* protect against corrupted cache/config files
+* cache symbols and exchange rules efficiently
+* reduce unnecessary API calls
+* prefer the lowest-cost practical implementation path
+
+==================================================
+FINAL IMPLEMENTATION RULES
+==========================
+
+* Fix symbol_blocked at root cause, not cosmetically
+* Fix Place Order before anything else
+* Fix UI/backend state synchronization completely
+* Add automatic best-bot selection for real-balance trading
+* Keep current UI style and structure as much as possible
+* Do not answer with plan only
+* Actually modify the working execution path and interface
+* Return updated working code and fix integration issues
