@@ -1,0 +1,231 @@
+24"}
+Update the current SignalX AI Arena / Signal Arena project directly.
+
+Do not create a new project.
+Do not redesign the whole UI.
+Keep the current interface style as much as possible.
+Modify the real working app and real execution path.
+
+Main goals:
+1) Enable Bot Doctor in REAL MODE
+2) Improve live trade health and execution quality
+3) Make profit reporting fully transparent and honest
+4) Improve bot quality and real-capital deployment
+5) Increase valid real trading activity safely and reduce rejected/noisy attempts
+
+Important:
+Do not promise guaranteed profit.
+The correct goal is:
+- higher-quality real trades
+- more valid executions
+- better bot selection
+- fewer rejected attempts
+- more accurate real profit reporting
+- better realized results after fees
+
+==================================================
+PRIORITY 1 — ENABLE BOT DOCTOR IN REAL MODE
+==================================================
+
+Bot Doctor must work in real mode, not only as a passive monitor.
+
+Required behavior:
+- allow Bot Doctor to run when real trading mode is active
+- let Bot Doctor inspect real execution health continuously
+- let Bot Doctor detect and classify real issues during live trading
+- let Bot Doctor recommend or auto-apply safe corrective actions when configured
+
+Add clear Bot Doctor modes:
+- OFF
+- Monitor Only
+- Auto-Fix Safe Issues
+- Full Active Real Monitoring
+
+Bot Doctor in real mode must monitor:
+- exchange adapter readiness
+- symbol normalization problems
+- min notional / min order amount failures
+- dust positions / unsellable leftovers
+- cooldown spam
+- repeated rejected attempts
+- bot underperformance
+- capital allocation inefficiency
+- daily trade limit misuse
+- blocked bots and exact reasons
+- inactive bots that should be eligible
+- position tracking / sell readiness issues
+- discrepancy between dashboard profit metrics and actual realized PnL
+
+==================================================
+PRIORITY 2 — BOT DOCTOR ACTIONS
+==================================================
+
+Bot Doctor should be able to diagnose and safely handle:
+- adapter_not_ready
+- owned_qty_below_min_notional
+- cooldown_active spam
+- fleet_gate_benched
+- exchange_rejected_request
+- below minimum order value
+- unhealthy bot behavior
+- repeated noisy attempts
+- stale blocked states
+- poor allocation quality
+
+Bot Doctor should:
+- retry adapter initialization safely
+- stop invalid retries
+- classify dust positions
+- prevent repeated sell attempts on unsellable dust
+- downgrade unstable bots
+- bench unhealthy bots temporarily
+- restore healthy bots when eligible again
+- improve real bot eligibility quality
+
+==================================================
+PRIORITY 3 — FULL PROFIT TRANSPARENCY
+==================================================
+
+Fix profit transparency in the current project.
+
+Problem:
+A bot may appear profitable in the dashboard, but some actual trades are losing or closing worse than expected.
+
+I need the app to separate all profit types clearly.
+
+For each bot, show separately:
+1) realized PnL from closed trades only
+2) unrealized PnL from open positions
+3) gross PnL before fees
+4) net PnL after fees
+5) current open position value
+6) average entry price
+7) actual exit price
+8) last trade PnL
+9) lifetime bot PnL
+10) today’s bot PnL
+
+For each closed trade, show:
+- symbol
+- entry
+- exit
+- quantity
+- fees
+- realized profit/loss
+- slippage impact
+- bot responsible
+- timestamp
+
+Do not mix:
+- historical bot profit
+- current open-position profit
+- score/ranking
+- projected return
+- unrealized gains
+
+Also explain clearly when:
+- a bot is profitable overall but the current trade is losing
+- a bot has unrealized profit but no realized gain yet
+- profit before fees differs from net after fees
+
+Add a “Real Profit Proof” panel showing only actual closed real trades and their true net result.
+
+==================================================
+PRIORITY 4 — BOT QUALITY IMPROVEMENT
+==================================================
+
+Improve bot quality for real trading.
+
+Requirements:
+- rank bots by real performance, not cosmetic score only
+- prioritize bots with:
+  - stronger realized PnL
+  - lower rejection rate
+  - better execution stability
+  - better recent results
+  - better fit to the current market
+- demote bots with noisy low-quality behavior
+- allow more than one strong bot to trade real capital when valid conditions exist
+
+Add per-bot quality metrics:
+- realized PnL
+- reject %
+- execution quality score
+- stability score
+- recent form
+- real capital eligibility
+- doctor health status
+
+==================================================
+PRIORITY 5 — BETTER CAPITAL DEPLOYMENT
+==================================================
+
+Improve real capital usage.
+
+Requirements:
+- only allocate capital to bots that are eligible and healthy
+- avoid microscopic allocations that cause invalid orders
+- respect exchange min notional / min order amount
+- keep fee reserve and safety reserve
+- redistribute capital from unhealthy or benched bots to stronger eligible bots
+- increase execution quality, not just bot count
+
+Show clearly:
+- total balance
+- usable capital
+- reserved capital
+- allocated capital
+- unallocated capital
+- active real bots
+- benched bots
+- doctor-adjusted bot count
+
+==================================================
+PRIORITY 6 — EXECUTION QUALITY IMPROVEMENTS
+==================================================
+
+Improve real trade quality on Bybit and Binance:
+- validate symbol
+- validate tradable status
+- validate tick size
+- validate step size
+- validate min order value / min notional
+- validate supported order type
+- validate sufficient allocated capital
+- validate sellable quantity
+- avoid repeated invalid retries
+- avoid dust leftovers when closing positions
+- improve exit sizing
+- reduce noise trades
+- reduce reject count dramatically
+
+==================================================
+PRIORITY 7 — BOT DOCTOR UI
+==================================================
+
+Add a clean Bot Doctor panel with:
+1) current mode
+2) health summary
+3) suggested actions
+4) per-bot doctor status
+5) dust positions count
+6) cooldown-blocked symbols count
+7) adapter issues summary
+8) repeated reject sources
+
+==================================================
+FINAL IMPLEMENTATION RULES
+==================================================
+
+- Do not leave this as display-only logic
+- Wire Bot Doctor into the actual live execution engine
+- Keep the current UI style
+- Do not fake performance metrics
+- Do not mix score/ranking with actual realized profit
+- Improve real execution quality and real trade health
+- Return the updated working code and summarize:
+  - files changed
+  - root causes fixed
+  - how Bot Doctor now behaves in real mode
+  - how profit transparency now works
+  - how I can test it sa
