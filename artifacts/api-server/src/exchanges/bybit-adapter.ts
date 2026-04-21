@@ -484,17 +484,47 @@ export class BybitAdapter implements ExchangeAdapter {
   async placeOrder(creds: ExchangeCredentials, order: OrderRequest): Promise<OrderResult> {
     const base = order.testnet ? TESTNET_BASE : BASE;
     const sym  = this.normalizeSymbol(order.symbol);
+
     // Bybit Spot quirk: for Market orders, `qty` defaults to QUOTE currency
     // (USDT) for BUY and BASE currency (BTC) for SELL. We always pass BASE
     // currency in `order.quantity`, so force `marketUnit: 'baseCoin'` to make
     // Bybit interpret qty as BTC for both sides. Without this, a BUY of
     // 0.000133 BTC gets read as 0.000133 USDT and Bybit rejects it
     // (retCode=170140 "Order value exceeded lower limit").
+    //
+    // Anti-170140 hardening for market BUYs: between signal time and order
+    // submit, the spot price can drift up by 0.5–2%. Once we step-round qty
+    // DOWN, qty × livePrice can fall under minOrderAmt and Bybit rejects.
+    // Refetch the live price right before submit and, if needed, bump qty
+    // up to the next valid step that satisfies minOrderAmt × 1.02.
+    let qty = order.quantity;
+    if (order.type === 'market' && order.side === 'buy') {
+      try {
+        const [livePrice, rules] = await Promise.all([
+          this.getPrice(order.symbol),
+          this.getSymbolRules(creds, order.symbol),
+        ]);
+        if (livePrice > 0 && rules.minNotional > 0) {
+          const step    = rules.stepSize > 0 ? rules.stepSize : 0.00001;
+          const target  = (rules.minNotional * 1.02) / livePrice;
+          if (qty * livePrice < rules.minNotional * 1.02) {
+            const bumped = Math.ceil(target / step) * step;
+            // Round to step decimal places to avoid float garbage like 0.0001000000001
+            const decimals = Math.max(0, Math.ceil(-Math.log10(step)));
+            qty = parseFloat(bumped.toFixed(decimals));
+            console.log(`[bybit] BUY ${sym}: bumped qty ${order.quantity} → ${qty} to clear minOrderAmt $${rules.minNotional} @ live $${livePrice}`);
+          }
+        }
+      } catch (e) {
+        console.warn(`[bybit] live-price preflight failed for ${sym}: ${(e as Error).message}`);
+      }
+    }
+
     const body = JSON.stringify({
       category: 'spot', symbol: sym,
       side:      order.side.charAt(0).toUpperCase() + order.side.slice(1),
       orderType: order.type === 'limit' ? 'Limit' : 'Market',
-      qty:       String(order.quantity),
+      qty:       String(qty),
       ...(order.type === 'market' ? { marketUnit: 'baseCoin' } : {}),
       ...(order.type === 'limit' && order.price ? { price: String(order.price) } : {}),
       ...(order.clientId ? { orderLinkId: order.clientId } : {}),
@@ -516,7 +546,7 @@ export class BybitAdapter implements ExchangeAdapter {
     if (!orderId) {
       throw new Error(`Bybit order returned empty orderId: ${retMsg}`);
     }
-    return { orderId, clientId: String(d['orderLinkId'] ?? ''), symbol: sym, side: order.side, type: order.type, status: 'open', quantity: order.quantity, filledQty: 0, price: order.price ?? 0, avgPrice: 0, fee: 0, feeCurrency: 'USDT', timestamp: Date.now(), exchange: 'bybit', raw: d };
+    return { orderId, clientId: String(d['orderLinkId'] ?? ''), symbol: sym, side: order.side, type: order.type, status: 'open', quantity: qty, filledQty: 0, price: order.price ?? 0, avgPrice: 0, fee: 0, feeCurrency: 'USDT', timestamp: Date.now(), exchange: 'bybit', raw: d };
   }
 
   async getPrice(symbol: string): Promise<number> {

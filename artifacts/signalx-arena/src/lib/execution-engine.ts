@@ -13,8 +13,10 @@ import { executionLog, REJECT } from './execution-log.js';
 import { apiClient, isBackendReachable } from './api-client.js';
 import { validateRisk }    from './risk-manager.js';
 import type { SymbolRules as RiskSymbolRules } from './risk-manager.js';
-import { preflight, noteRejection, noteSuccess } from './rejection-shield.js';
+import { preflight, noteRejection, noteSuccess, clearShieldCooldownFor } from './rejection-shield.js';
 import type { ExchangeId } from './asset-compliance.js';
+import { recordBuy, recordSell, getOwned } from './internal-positions.js';
+import { baseTicker } from './risk-manager.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -243,11 +245,21 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
   }
 
   // 6b. Per-symbol cooldown (frontend circuit breaker)
-  const gateKey = feGateKey(exchange, signal.symbol, mode);
-  const gate    = feGateBlocked(gateKey);
-  if (gate.blocked) {
+  // SELL of a position we just opened bypasses cooldowns — closing trades
+  // must never be blocked by guards meant to throttle entry retries.
+  const gateKey  = feGateKey(exchange, signal.symbol, mode);
+  const baseTk   = baseTicker(signal.symbol);
+  const ownedHere = getOwned(exchange, baseTk);
+  const isClosingSell = signal.side === 'sell' && ownedHere > 0;
+  const gate     = feGateBlocked(gateKey);
+  if (gate.blocked && !isClosingSell) {
     return reject(signal, exchange, mode, REJECT.EXCHANGE_REJECTED,
       `Cooldown active for ${exchange}:${signal.symbol} after ${FE_FAILURE_THRESHOLD} consecutive failures (${Math.ceil(gate.remainingMs/1000)}s remaining).`);
+  }
+  if (isClosingSell) {
+    // Forgive any pending shield cooldown for this exact symbol so the
+    // close path is not blocked by an entry-side fail-count.
+    clearShieldCooldownFor(exchange, signal.symbol);
   }
 
   // 6c. Rejection-Prevention Shield — pre-flight gate (compliance + cache + cooldown)
@@ -312,6 +324,18 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       availableBase  = bs?.available ?? 0;
     }
   } catch { /* proceed with 0 — risk manager will catch */ }
+
+  // For SELL: trust the larger of (exchange-reported free base) and (local
+  // ledger of what we just bought this session). Bybit takes 1-3s to surface
+  // a fresh fill in /balances; without this the SELL after a successful BUY
+  // is rejected with INSUFFICIENT_BALANCE.
+  if (signal.side === 'sell') {
+    const ledgerOwned = getOwned(exchange, baseTk);
+    if (ledgerOwned > availableBase) {
+      console.log(`[engine] using ledger-owned ${ledgerOwned} for ${baseTk} (exchange reported ${availableBase})`);
+      availableBase = ledgerOwned;
+    }
+  }
 
   // 9. Risk check
   const risk = validateRisk({
@@ -441,6 +465,13 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     recentSignals = [signal.id, ...recentSignals].slice(0, 100);
     feNoteSuccess(gateKey);
     noteSuccess(exchange, signal.symbol);
+
+    // Update local position ledger so a follow-up SELL can find the freshly
+    // bought qty before /balances catches up. Mirror the inverse for SELLs.
+    try {
+      if (signal.side === 'buy')  recordBuy (exchange, baseTk, risk.quantity!, risk.price!);
+      if (signal.side === 'sell') recordSell(exchange, baseTk, risk.quantity!);
+    } catch (e) { console.warn('[engine] ledger update failed:', (e as Error).message); }
 
     console.log(`[engine][${mode}] Order placed: ${exchange} ${signal.side} ${risk.quantity} ${signal.symbol} @ ${risk.price} → orderId=${orderId} (${latency}ms)`);
     return { ok: true, orderId, logId: pending.id };

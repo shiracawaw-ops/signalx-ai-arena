@@ -13,6 +13,8 @@ import type { ExchangeCredentials } from './exchange-mode';
 import { resolveCompliance, type ExchangeId } from './asset-compliance';
 import { pipelineCache, TTL } from './pipeline-cache';
 import type { SymbolRules } from './risk-manager';
+import { baseTicker } from './risk-manager';
+import { getOwned } from './internal-positions';
 
 export type ShieldOutcome = 'pass' | 'block' | 'warn';
 
@@ -96,6 +98,15 @@ export function clearShieldMemory(): void {
   MEMORY.clear();
 }
 
+/** Clear cooldown for a single exchange:symbol — used by closing-sell path. */
+export function clearShieldCooldownFor(exchange: string, arenaOrExchangeSymbol: string): void {
+  const direct = memKey(exchange, arenaOrExchangeSymbol);
+  if (MEMORY.has(direct)) MEMORY.delete(direct);
+  // Also try the exchange-resolved variant (mapping is symmetric in practice).
+  const compl = resolveCompliance(arenaOrExchangeSymbol, exchange as ExchangeId);
+  if (compl.exchangeSymbol) MEMORY.delete(memKey(exchange, compl.exchangeSymbol));
+}
+
 async function fetchRules(exchange: string, exchangeSymbol: string, creds: ExchangeCredentials | null | undefined): Promise<SymbolRules | undefined> {
   if (!creds) return undefined;
   const key = `rules:${exchange}:${exchangeSymbol}`;
@@ -148,9 +159,17 @@ export async function preflight(input: ShieldInput): Promise<ShieldVerdict> {
     };
   }
 
+  // ── Closing-sell bypass ──────────────────────────────────────────────────
+  // If we already own the base asset (per local ledger), this is a CLOSE.
+  // Closes must never be blocked by entry-side guards: cooldown, min-notional
+  // for the requested USD amount, or balance pre-checks. The exchange and the
+  // risk manager will still cap the qty to what's actually owned.
+  const ownedBase   = getOwned(input.exchange, baseTicker(input.arenaSymbol));
+  const isClosingSell = input.side === 'sell' && ownedBase > 0;
+
   // Cooldown memory
   const mem = MEMORY.get(memKey(input.exchange, compliance.exchangeSymbol));
-  if (mem && mem.cooldownUntil > Date.now()) {
+  if (!isClosingSell && mem && mem.cooldownUntil > Date.now()) {
     const remain = mem.cooldownUntil - Date.now();
     checks.push({ id: 'cooldown', ok: false, detail: `Symbol on cooldown (${Math.ceil(remain/1000)}s left after ${mem.fails} fails).` });
     return {
@@ -178,7 +197,7 @@ export async function preflight(input: ShieldInput): Promise<ShieldVerdict> {
   const estQty = input.amountUSD / price;
   const notional = estQty * price;
 
-  if (rules) {
+  if (rules && !isClosingSell) {
     if (estQty < rules.minQty) {
       checks.push({ id: 'minQty', ok: false, detail: `Qty ${estQty.toFixed(6)} < minQty ${rules.minQty}` });
       return finalize('block', `Trade size below exchange minQty (${rules.minQty}).`, compliance, rules, estQty, notional, checks, 'invalid_order_size');
@@ -188,10 +207,14 @@ export async function preflight(input: ShieldInput): Promise<ShieldVerdict> {
       return finalize('block', `Trade size $${notional.toFixed(2)} below minNotional $${rules.minNotional}.`, compliance, rules, estQty, notional, checks, 'below_min_notional');
     }
     checks.push({ id: 'minNotional', ok: true, detail: `Notional $${notional.toFixed(2)} OK.` });
+  } else if (isClosingSell) {
+    checks.push({ id: 'closingSell', ok: true, detail: `Closing sell — bypassing entry-side size checks (owned ${ownedBase}).` });
   }
 
   // Side-aware balance peek (best-effort — do not hard-block on errors)
-  if (input.credentials && rules) {
+  // For closing-sells we trust the local ledger and let the engine's risk
+  // manager clamp qty to owned amount; skip exchange balance check here.
+  if (input.credentials && rules && !isClosingSell) {
     const needed  = input.side === 'buy' ? notional * 1.01 : estQty;
     const asset   = input.side === 'buy' ? (rules.quoteCurrency ?? 'USDT') : (rules.baseCurrency ?? compliance.base);
     const have    = await fetchAvailable(input.exchange, asset, input.credentials);

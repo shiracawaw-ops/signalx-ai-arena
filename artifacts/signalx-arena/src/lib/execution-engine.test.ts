@@ -177,7 +177,7 @@ export async function runAll(): Promise<void> {
       config: cfg,
     });
     assert(!risk.ok, 'Should reject sell in only-long mode');
-    assert(risk.reason === REJECT.SYMBOL_BLOCKED, `Expected SYMBOL_BLOCKED (only-long), got ${risk.reason}`);
+    assert(risk.reason === REJECT.ONLY_LONG_MODE_BLOCKS_SELL, `Expected ONLY_LONG_MODE_BLOCKS_SELL, got ${risk.reason}`);
   }));
 
   // T11: Emergency stop

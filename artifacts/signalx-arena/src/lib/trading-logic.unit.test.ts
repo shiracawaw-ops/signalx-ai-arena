@@ -101,7 +101,7 @@ describe('Risk Manager', () => {
     const result = validateRisk(makeRiskInput({ side: 'sell', config: cfg }));
 
     expect(result.ok).toBe(false);
-    expect(result.reason).toBe(REJECT.SYMBOL_BLOCKED);
+    expect(result.reason).toBe(REJECT.ONLY_LONG_MODE_BLOCKS_SELL);
   });
 
   it('rejects any order when emergency stop is active', () => {

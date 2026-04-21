@@ -117,13 +117,13 @@ export function validateRisk(input: RiskInput): RiskResult {
     const sigBase   = baseTicker(symbol);
     const allowed   = config.allowedSymbols.map(baseTicker);
     if (!allowed.includes(sigBase)) {
-      return { ok: false, reason: REJECT.SYMBOL_BLOCKED, detail: `Symbol ${symbol} is not in the allowed list: ${config.allowedSymbols.join(', ')}` };
+      return { ok: false, reason: REJECT.SYMBOL_NOT_IN_ALLOWLIST, detail: `Symbol ${symbol} is not in the allowed list: ${config.allowedSymbols.join(', ')}` };
     }
   }
 
   // Only-long mode
   if (config.onlyLong && side === 'sell') {
-    return { ok: false, reason: REJECT.SYMBOL_BLOCKED, detail: 'Only-long mode is active — sell orders are blocked.' };
+    return { ok: false, reason: REJECT.ONLY_LONG_MODE_BLOCKS_SELL, detail: 'Only-long mode is active — sell orders are blocked. Disable only-long in Trade Config to allow closes.' };
   }
 
   // Max open positions
@@ -136,11 +136,14 @@ export function validateRisk(input: RiskInput): RiskResult {
     return { ok: false, reason: REJECT.MAX_DAILY_TRADES, detail: `Max daily trades (${config.maxDailyTrades}) reached. Today: ${dailyTradeCount}` };
   }
 
-  // Cooldown check
+  // Cooldown check — only enforced for ENTRIES. A SELL of an already-owned
+  // base asset is a CLOSE: it must never be cooldown-blocked, otherwise the
+  // user can't get out of a position they just opened.
+  const isClosingSell = side === 'sell' && availableBase > 0;
   const elapsed = Date.now() - lastTradeTs;
-  if (lastTradeTs > 0 && elapsed < config.cooldownSeconds * 1000) {
+  if (!isClosingSell && lastTradeTs > 0 && elapsed < config.cooldownSeconds * 1000) {
     const remaining = Math.ceil((config.cooldownSeconds * 1000 - elapsed) / 1000);
-    return { ok: false, reason: REJECT.COOLDOWN_ACTIVE, detail: `Cooldown active — ${remaining}s remaining.` };
+    return { ok: false, reason: REJECT.COOLDOWN_ACTIVE, detail: `Cooldown active — ${remaining}s remaining. (Closing sells bypass cooldown.)` };
   }
 
   // Duplicate signal
@@ -156,8 +159,17 @@ export function validateRisk(input: RiskInput): RiskResult {
   // Compute raw quantity from USD amount
   const computedQty = amountUSD / price;
 
+  // For SELL: cap to what we actually own. Without this clamp the engine
+  // sends a SELL larger than our base balance and the exchange rejects it
+  // (Bybit retCode 170131 / Binance -2010 "insufficient balance"), or it
+  // fails risk with a confusing "need X have Y" message even though the
+  // user's intent is "sell what I have".
+  const sellCap = side === 'sell' && availableBase > 0
+    ? Math.min(computedQty, availableBase)
+    : computedQty;
+
   // Check step size — round DOWN to nearest valid step
-  const quantity = roundToStep(computedQty, symbolRules.stepSize);
+  const quantity = roundToStep(sellCap, symbolRules.stepSize);
   const notional = quantity * price;
   const baseAsset  = symbolRules.baseCurrency  ?? baseTicker(symbol);
   const quoteAsset = symbolRules.quoteCurrency ?? 'USDT';
@@ -171,6 +183,11 @@ export function validateRisk(input: RiskInput): RiskResult {
   };
 
   if (quantity <= 0) {
+    if (side === 'sell' && availableBase > 0) {
+      return { ok: false, reason: REJECT.OWNED_QTY_BELOW_MIN_NOTIONAL,
+        detail: `You own ${availableBase} ${baseAsset} ($${(availableBase * price).toFixed(2)}) but this rounds to ZERO at the exchange's stepSize ${symbolRules.stepSize}. The position is too small to close on this venue — keep, or transfer it to a venue with smaller minQty.`,
+        ...diag, freeBalance: availableBase, freeAsset: baseAsset };
+    }
     return { ok: false, reason: REJECT.INVALID_ORDER_SIZE,
       detail: `Computed quantity ${computedQty.toPrecision(6)} rounded to ZERO at stepSize ${symbolRules.stepSize}. Increase trade amount.`,
       ...diag, freeBalance: availableQuote, freeAsset: quoteAsset };
@@ -178,6 +195,11 @@ export function validateRisk(input: RiskInput): RiskResult {
 
   // Min / max quantity
   if (quantity < symbolRules.minQty) {
+    if (side === 'sell' && availableBase > 0) {
+      return { ok: false, reason: REJECT.OWNED_QTY_BELOW_MIN_NOTIONAL,
+        detail: `Owned ${baseAsset} qty (${quantity}) is below the exchange's minQty ${symbolRules.minQty} on ${symbol}. The position cannot be closed in a single market sell on this venue.`,
+        ...diag, freeBalance: availableBase, freeAsset: baseAsset };
+    }
     return { ok: false, reason: REJECT.INVALID_ORDER_SIZE,
       detail: `Quantity ${quantity} < minQty ${symbolRules.minQty} for ${symbol}. (Increase tradeAmountUSD or pick a higher-priced asset.)`,
       ...diag };
@@ -188,10 +210,20 @@ export function validateRisk(input: RiskInput): RiskResult {
       ...diag };
   }
 
-  // Min notional
-  if (symbolRules.minNotional > 0 && notional < symbolRules.minNotional) {
+  // Min notional — for BUY enforce a 5% buffer above minNotional so brief
+  // price drift between signal and submission cannot push us below
+  // (which is what triggers Bybit retCode 170140).
+  const minNotionalEffective = side === 'buy'
+    ? symbolRules.minNotional * 1.05
+    : symbolRules.minNotional;
+  if (symbolRules.minNotional > 0 && notional < minNotionalEffective) {
+    if (side === 'sell' && availableBase > 0) {
+      return { ok: false, reason: REJECT.OWNED_QTY_BELOW_MIN_NOTIONAL,
+        detail: `Owned ${baseAsset} value $${notional.toFixed(2)} is below the exchange's minNotional $${symbolRules.minNotional} on ${symbol}. Top up or close on a venue with a smaller min.`,
+        ...diag, freeBalance: availableBase, freeAsset: baseAsset };
+    }
     return { ok: false, reason: REJECT.BELOW_MIN_NOTIONAL,
-      detail: `Order value $${notional.toFixed(2)} < minNotional $${symbolRules.minNotional} for ${symbol}. Increase tradeAmountUSD to at least $${(symbolRules.minNotional * 1.05).toFixed(2)}.`,
+      detail: `Order value $${notional.toFixed(2)} < minNotional $${symbolRules.minNotional} for ${symbol} (5% buffer applied to absorb price drift). Increase tradeAmountUSD to at least $${(symbolRules.minNotional * 1.10).toFixed(2)}.`,
       ...diag };
   }
 
@@ -205,15 +237,19 @@ export function validateRisk(input: RiskInput): RiskResult {
         ...diag, freeBalance: availableQuote, freeAsset: quoteAsset };
     }
   } else {
-    // SELL — must own the base asset on the exchange.
+    // SELL — must own the base asset. We've already clamped `quantity` to
+    // `min(amountUSD/price, availableBase)` above, so the only failure here
+    // is "we own literally nothing of this asset on this venue".
     if (availableBase <= 0) {
       return { ok: false, reason: REJECT.INSUFFICIENT_BALANCE,
-        detail: `No ${baseAsset} balance to SELL on this exchange (free=${availableBase}). Buy ${baseAsset} first or transfer it to spot.`,
+        detail: `No ${baseAsset} balance to SELL on this exchange (free=${availableBase}). Buy ${baseAsset} first, or wait a few seconds for a recent fill to settle.`,
         ...diag, freeBalance: availableBase, freeAsset: baseAsset };
     }
-    if (availableBase < quantity) {
+    // The clamp may have over-rounded down; allow up to 0.1% slack for
+    // floating-point noise.
+    if (availableBase + 1e-9 < quantity * 0.999) {
       return { ok: false, reason: REJECT.INSUFFICIENT_BALANCE,
-        detail: `Insufficient ${baseAsset}: need ${quantity}, have ${availableBase}. Reduce tradeAmountUSD or top up.`,
+        detail: `Insufficient ${baseAsset}: clamped to ${quantity} but exchange free is ${availableBase}.`,
         ...diag, freeBalance: availableBase, freeAsset: baseAsset };
     }
   }

@@ -137,9 +137,9 @@ const STABLE_ASSETS = new Set([
   'USDT', 'USDC', 'USD', 'BUSD', 'DAI', 'FDUSD', 'TUSD', 'USDP', 'PYUSD', 'USDE',
 ]);
 
-export function withUsdtValue(b: {
+export function withUsdtValue<T extends {
   asset: string; available: number; hold: number; total: number;
-}): { asset: string; available: number; hold: number; total: number; usdtValue?: number } {
+}>(b: T): T & { usdtValue?: number } {
   if (STABLE_ASSETS.has(b.asset.toUpperCase())) {
     return { ...b, usdtValue: b.total };
   }

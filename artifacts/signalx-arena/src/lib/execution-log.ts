@@ -141,6 +141,11 @@ export const REJECT = {
   PRECISION_VALIDATION_FAILED:'precision_validation_failed',
   ACCOUNT_MODE_MISMATCH:      'account_mode_mismatch',
   PREFLIGHT_NOT_READY:        'preflight_not_ready',
+  // ── New, specific reasons (replace generic SYMBOL_BLOCKED) ────────────────
+  ONLY_LONG_MODE_BLOCKS_SELL: 'only_long_mode_blocks_sell',
+  SYMBOL_NOT_IN_ALLOWLIST:    'symbol_not_in_allowlist',
+  OWNED_QTY_BELOW_MIN_NOTIONAL:'owned_qty_below_min_notional',
+  PRICE_DRIFT_TOO_LARGE:      'price_drift_too_large',
 } as const;
 
 export type RejectReason = typeof REJECT[keyof typeof REJECT];
