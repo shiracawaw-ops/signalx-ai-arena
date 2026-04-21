@@ -16,6 +16,71 @@ import { credentialStore } from './credential-store.js';
 import { orderProgress } from './order-progress.js';
 import { baseTicker } from './risk-manager.js';
 import type { AutoPilotDecision } from './autopilot.js';
+import { botFleet, type RemainingMode } from './bot-fleet.js';
+
+// ── Fleet gate ───────────────────────────────────────────────────────────────
+// A bot is allowed to send REAL orders only when it appears in the fleet's
+// `realBotIds` allow-list. Bots outside the list are "benched" — the engine
+// must NOT submit anything live for them, regardless of the current trading
+// mode. The benched mode (paper / standby / disabled) determines the
+// rejection wording surfaced in the Execution Log.
+
+interface FleetGateBenched { allowed: false; mode: RemainingMode; message: string }
+interface FleetGateAllowed { allowed: true }
+type FleetGateResult = FleetGateAllowed | FleetGateBenched;
+
+function checkFleetGate(botId: string): FleetGateResult {
+  const cfg = botFleet.get();
+  // Empty allow-list (e.g. no bots created yet) is treated as "no gate" so
+  // the original behaviour is preserved on first run before the panel ever
+  // syncs IDs. Once the user touches the panel or the pipeline runs once,
+  // realBotIds will be populated and the gate becomes active.
+  if (cfg.realBotIds.length === 0) return { allowed: true };
+  if (cfg.realBotIds.includes(botId)) return { allowed: true };
+  const wording =
+    cfg.remainingMode === 'standby'  ? 'Bot is in fleet standby — real execution suppressed.' :
+    cfg.remainingMode === 'disabled' ? 'Bot is disabled by fleet config — no real orders.'   :
+                                       'Bot is paper-only by fleet config — real execution skipped.';
+  return { allowed: false, mode: cfg.remainingMode, message: wording };
+}
+
+// Dedupe key per (botId, mode, signalSource) so we log one fleet-gate
+// rejection per bot per source, not one per tick.
+const fleetGateLogged = new Set<string>();
+
+export function __resetFleetGateLog(): void {
+  fleetGateLogged.clear();
+}
+
+function maybeLogFleetGate(args: {
+  source:     'bot' | 'autopilot';
+  botId:      string;
+  symbol:     string;
+  side:       'buy' | 'sell';
+  price:      number;
+  signalId:   string;
+  gate:       FleetGateBenched;
+}) {
+  const modeState = exchangeMode.get();
+  const key = `${args.source}|${args.botId}|${modeState.exchange}|${modeState.mode}|${args.gate.mode}`;
+  if (fleetGateLogged.has(key)) return;
+  fleetGateLogged.add(key);
+  const cfg = tradeConfig.get(modeState.exchange);
+  executionLog.add({
+    mode:         modeState.mode,
+    exchange:     modeState.exchange,
+    symbol:       args.symbol,
+    side:         args.side,
+    orderType:    cfg.orderType,
+    quantity:     cfg.tradeAmountUSD / (args.price || 1),
+    price:        args.price,
+    amountUSD:    cfg.tradeAmountUSD,
+    status:       'rejected',
+    rejectReason: REJECT.FLEET_GATE_BENCHED,
+    errorMsg:     args.gate.message,
+    signalId:     args.signalId,
+  });
+}
 
 // ── Mode helpers ─────────────────────────────────────────────────────────────
 
@@ -91,6 +156,22 @@ export function bridgeBotTradeToExchange(trade: Trade): Promise<EngineResult> | 
         `[arena→engine][${mode}] ${trade.type} ${trade.symbol} skipped — ${category} not supported on ${exchange}.`,
       );
     }
+    return null;
+  }
+
+  // Fleet gate: bots not in the real-bot allow-list must NOT submit live
+  // orders even when the trade fully passes the live-mode + crypto filter.
+  const gate = checkFleetGate(trade.botId);
+  if (!gate.allowed) {
+    maybeLogFleetGate({
+      source:   'bot',
+      botId:    trade.botId,
+      symbol:   trade.symbol,
+      side:     trade.type === 'BUY' ? 'buy' : 'sell',
+      price:    trade.price,
+      signalId: `bot_${trade.id}`,
+      gate,
+    });
     return null;
   }
 
@@ -183,6 +264,26 @@ export async function dispatchAutoPilotLiveSignal(args: {
       result:     null,
       reason:     'not-crypto',
     };
+  }
+
+  // Fleet gate: AutoPilot may have selected a bot that is not in the real-bot
+  // allow-list. Refuse to dispatch and latch so we don't rejection-spam every
+  // 5-second decision cycle.
+  const gate = checkFleetGate(sig.botId);
+  if (!gate.allowed) {
+    if (transitioned) {
+      const price = getCurrentPrice(sym);
+      maybeLogFleetGate({
+        source:   'autopilot',
+        botId:    sig.botId,
+        symbol:   sym,
+        side:     sig.action === 'BUY' ? 'buy' : 'sell',
+        price,
+        signalId: `autopilot_${sig.botId}_${sig.action}`,
+        gate,
+      });
+    }
+    return { dispatched: false, signal: null, newLast: sig, result: null, reason: 'not-actionable' };
   }
 
   if (!transitioned) {

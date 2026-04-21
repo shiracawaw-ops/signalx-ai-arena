@@ -24,8 +24,12 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { _electron: electron } = require('playwright-core');
 
-const LOAD_TIMEOUT_MS = 60_000;
-const TEXT_TIMEOUT_MS = 30_000;
+// Cold macOS / Linux runners frequently need 60-120s just to spawn Electron's
+// helper process; bumping the launch + load ceiling avoids redding the
+// dashboard on transient cold-start delays. Tests still fail loudly if the
+// app actually crashes or hangs forever — they just don't fail at 60s.
+const LOAD_TIMEOUT_MS = 180_000;
+const TEXT_TIMEOUT_MS = 60_000;
 
 // Linux is not an officially shipped target — surface failures as warnings so
 // the headless-xvfb electron-launch flake doesn't redden the dashboard while

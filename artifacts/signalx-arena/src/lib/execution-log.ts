@@ -129,6 +129,7 @@ export const REJECT = {
   STALE_PRICE:             'stale_price',
   INVALID_SIDE:            'invalid_side',
   UNSUPPORTED_ASSET:       'unsupported_asset_class',
+  FLEET_GATE_BENCHED:      'fleet_gate_benched',
 } as const;
 
 export type RejectReason = typeof REJECT[keyof typeof REJECT];
