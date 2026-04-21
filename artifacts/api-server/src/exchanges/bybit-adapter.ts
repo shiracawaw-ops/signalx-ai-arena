@@ -202,6 +202,54 @@ export class BybitAdapter implements ExchangeAdapter {
       }
     }
 
+    // ── Funding wallet (FUND) ────────────────────────────────────────────
+    // Fresh deposits on Bybit land in the **Funding** account first; users
+    // must explicitly transfer to UNIFIED/SPOT/CONTRACT before they appear
+    // in the wallet-balance endpoint. We surface FUND coins here so a user
+    // who just deposited sees their balance immediately. Failures on this
+    // endpoint are non-fatal — we still return whatever we got from the
+    // trading accounts.
+    try {
+      const ts2 = Date.now();
+      const qs2 = `accountType=FUND`;
+      const sig2 = sign(creds.apiKey, creds.secretKey, ts2, qs2);
+      const rf  = await safeFetch(
+        `${base}/v5/asset/transfer/query-account-coins-balance?${qs2}`,
+        { headers: headers(creds, ts2, sig2) },
+        'bybit',
+      );
+      if (rf.ok) {
+        const retCode = (rf.data as Record<string, unknown>)?.['retCode'];
+        if (typeof retCode === 'number' && retCode === 0) {
+          const fundList = (rf.data as Record<string, Record<string, unknown>>)?.['result']?.['balance'];
+          const fundCoins = Array.isArray(fundList) ? fundList as Array<Record<string, unknown>> : [];
+          for (const c of fundCoins) {
+            const asset = String(c['coin'] ?? '');
+            if (!asset) continue;
+            const wallet   = parseFloat(String(c['walletBalance']    ?? '0'));
+            const transfer = parseFloat(String(c['transferBalance']  ?? '0'));
+            const total    = Number.isFinite(wallet) && wallet > 0 ? wallet : transfer;
+            if (!Number.isFinite(total) || total <= 0) continue;
+            const available = Number.isFinite(transfer) && transfer > 0 ? transfer : total;
+            const prev = merged.get(asset);
+            if (prev) {
+              merged.set(asset, {
+                asset,
+                available: prev.available + available,
+                hold:      prev.hold,
+                total:     prev.total + total,
+              });
+            } else {
+              merged.set(asset, { asset, available, hold: 0, total });
+            }
+          }
+        }
+      }
+    } catch {
+      // Funding wallet is best-effort; ignore failures so trading accounts
+      // still surface even if the asset endpoint is throttled or rejected.
+    }
+
     if (merged.size === 0 && lastError && lastError.code !== 'account_type') {
       // All account types failed for the same non-account-type reason.
       throw new ExchangeOperationError(lastError.code, lastError.message, lastError.status);
