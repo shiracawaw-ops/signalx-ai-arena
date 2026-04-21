@@ -19,6 +19,7 @@ import WalletPage         from "@/pages/wallet";
 import RiskPage           from "@/pages/risk";
 import ProfilePage        from "@/pages/profile";
 import StatusPage         from "@/pages/status";
+import PipelinePage       from "@/pages/pipeline";
 import LoginPage          from "@/pages/auth/login";
 import SignupPage         from "@/pages/auth/signup";
 import ForgotPasswordPage from "@/pages/auth/forgot-password";
@@ -107,6 +108,7 @@ function Router() {
           <Route path="/risk"     component={RiskPage}      />
           <Route path="/profile"  component={ProfilePage}   />
           <Route path="/status"   component={StatusPage}    />
+          <Route path="/pipeline" component={PipelinePage}  />
           {isAdmin && <Route path="/admin" component={AdminPage} />}
           <Route component={IS_ELECTRON ? NoRouteFallback : NotFound} />
         </Switch>

@@ -9,7 +9,7 @@ import { useOnlineStatus } from '@/hooks/use-online-status';
 import {
   Cpu, LayoutDashboard, Stethoscope, BarChart3, Shield,
   Wallet, ArrowLeftRight, Settings, ChevronLeft, ChevronRight,
-  Activity, LogOut, User, WifiOff,
+  Activity, LogOut, User, WifiOff, GitBranch,
 } from 'lucide-react';
 
 type NavItem = {
@@ -30,6 +30,7 @@ const NAV: NavItem[] = [
   { path: '/wallet',    label: 'Wallet',        icon: Wallet,         badge: null  },
   { path: '/risk',      label: 'Risk Engine',   icon: Shield,         badge: null  },
   { path: '/status',    label: 'System Status', icon: Activity,       badge: null  },
+  { path: '/pipeline',  label: 'Pipeline',      icon: GitBranch,      badge: 'NEW' },
   { path: '/admin',     label: 'Admin',         icon: Settings,       badge: null,  adminOnly: true },
 ];
 

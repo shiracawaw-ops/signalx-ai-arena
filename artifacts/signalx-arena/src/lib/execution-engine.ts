@@ -13,6 +13,8 @@ import { executionLog, REJECT } from './execution-log.js';
 import { apiClient, isBackendReachable } from './api-client.js';
 import { validateRisk }    from './risk-manager.js';
 import type { SymbolRules as RiskSymbolRules } from './risk-manager.js';
+import { preflight, noteRejection, noteSuccess } from './rejection-shield.js';
+import type { ExchangeId } from './asset-compliance.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -248,6 +250,24 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       `Cooldown active for ${exchange}:${signal.symbol} after ${FE_FAILURE_THRESHOLD} consecutive failures (${Math.ceil(gate.remainingMs/1000)}s remaining).`);
   }
 
+  // 6c. Rejection-Prevention Shield — pre-flight gate (compliance + cache + cooldown)
+  try {
+    const shield = await preflight({
+      exchange:    exchange as ExchangeId,
+      arenaSymbol: signal.symbol,
+      side:        signal.side,
+      amountUSD:   config.tradeAmountUSD,
+      refPrice:    signal.price,
+      credentials,
+    });
+    if (shield.outcome === 'block') {
+      return reject(signal, exchange, mode, REJECT.SYMBOL_BLOCKED,
+        `Pipeline shield: ${shield.reason}`);
+    }
+  } catch (e) {
+    console.warn('[engine] Pipeline shield preflight failed (non-fatal):', (e as Error).message);
+  }
+
   // 7. Fetch symbol rules from backend
   let symbolRules: RiskSymbolRules;
   try {
@@ -388,6 +408,7 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
         exchangeResponse: orderRes,
       });
       feNoteFailure(gateKey);
+      noteRejection(exchange, signal.symbol);
       console.error(`[engine][${mode}] Order failed: ${errMsg}`);
       return { ok: false, logId: pending.id, rejectReason: REJECT.EXCHANGE_REJECTED, detail: errMsg };
     }
@@ -406,6 +427,7 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     lastTradeTs = Date.now();
     recentSignals = [signal.id, ...recentSignals].slice(0, 100);
     feNoteSuccess(gateKey);
+    noteSuccess(exchange, signal.symbol);
 
     console.log(`[engine][${mode}] Order placed: ${exchange} ${signal.side} ${risk.quantity} ${signal.symbol} @ ${risk.price} → orderId=${orderId} (${latency}ms)`);
     return { ok: true, orderId, logId: pending.id };

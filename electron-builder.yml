@@ -8,6 +8,11 @@ appId:       ai.signalx.arena
 productName: SignalX AI Arena
 copyright:   Copyright © 2024 SignalX
 
+# Skip native module rebuild — we don't use any (better-sqlite3 is a transitive
+# dev-only dep that breaks rebuild in pnpm-hoisted layout on Linux→Win cross-build).
+npmRebuild: false
+buildDependenciesFromSource: false
+
 # ── Source (electron main process files) ───────────────────────────────────────
 directories:
   # Output to top-level dist-electron/ so the GitHub Actions upload-artifact
