@@ -36,6 +36,7 @@ import { executionLog, type ExecutionEntry } from '@/lib/execution-log';
 import { apiClient, type ExchangeErrorCode } from '@/lib/api-client';
 import { setCredentials, executeSignal } from '@/lib/execution-engine';
 import { classifyHolding, POSITION_CATEGORY_LABELS, POSITION_CATEGORY_ORDER, type PositionCategory, type ClassifyResult } from '@/lib/position-classifier';
+import { STABLE_ASSETS, isStable } from '@/lib/stable-assets';
 import { getOwned } from '@/lib/internal-positions';
 import { pipelineCache } from '@/lib/pipeline-cache';
 import { resolveCompliance, type ExchangeId } from '@/lib/asset-compliance';
@@ -615,7 +616,7 @@ export default function ExchangePage() {
           const equity = bals.reduce((sum, b) => {
             if (typeof b.usdtValue === 'number' && Number.isFinite(b.usdtValue)) return sum + b.usdtValue;
             const a = b.asset.toUpperCase();
-            if (a === 'USDT' || a === 'USDC' || a === 'BUSD' || a === 'DAI') return sum + b.total;
+            if (isStable(a)) return sum + b.total;
             return sum;
           }, 0);
           if (exMode.get().mode === 'real') {
@@ -891,7 +892,7 @@ export default function ExchangePage() {
       const row = liveBalances.find(b => b.asset === asset);
       if (row) {
         const upper   = row.asset.toUpperCase();
-        const isStable = STABLES.has(upper);
+        const isStableAsset = isStable(upper);
         const ledgerOwned = getOwned(selectedEx.id, upper);
         const compl  = resolveCompliance(asset, selectedEx.id as ExchangeId);
         const cachedRules = compl.ok
@@ -909,7 +910,7 @@ export default function ExchangePage() {
           ...(botDoctorStore.isDust(selectedEx.id, upper)
             ? { dustReason: botDoctorStore.dustList().find(d => d.exchange === selectedEx.id && d.baseAsset === upper)?.reason ?? '' }
             : {}),
-          isStable,
+          isStable: isStableAsset,
         });
         if (!verdict.canClose) {
           if (verdict.reason === 'unsellable_dust' || verdict.reason === 'below_min_notional' ||
@@ -1322,8 +1323,6 @@ export default function ExchangePage() {
   // Defensive sums — guard every numeric input against NaN / undefined so a
   // single malformed balance row can never crash the page.
   const totalUsdValue = balances.reduce((s, b) => s + num(b?.usdtValue), 0);
-  // Include all stablecoins, not just USDT
-  const STABLES       = new Set(['USDT', 'USD', 'USDC', 'BUSD', 'TUSD', 'USDP', 'DAI', 'FDUSD', 'USDD']);
   // Sum every asset's approximate USDT value (adapter-populated). Rows with
   // an undefined `usdtValue` (no USDT pair available) are explicitly excluded
   // from the total — counting them as 0 would silently understate the
@@ -1333,7 +1332,7 @@ export default function ExchangePage() {
   const liveTotalUSD  = livePricedRows.reduce((s, b) => s + num(b?.usdtValue), 0);
   const liveUnpricedCount = liveBalances.length - livePricedRows.length;
   const liveStableTotal = liveBalances
-    .filter(b => b && STABLES.has(b.asset))
+    .filter(b => b && isStable(b.asset))
     .reduce((s, b) => s + num(b?.total), 0);
   const ac = selectedEx.accent;
   const isLive = mode === 'real';  // true only in real mode — real exchange data & orders
@@ -1921,7 +1920,7 @@ export default function ExchangePage() {
             <ClassifiedBalances
               liveBalances={liveBalances}
               exchangeId={selectedEx.id}
-              stables={STABLES}
+              stables={STABLE_ASSETS}
               closingPositions={closingPositions}
               progressMap={progressMap}
               onClose={closePosition}
@@ -3321,7 +3320,7 @@ export default function ExchangePage() {
 interface ClassifiedBalancesProps {
   liveBalances: Array<{ asset: string; available: number; hold: number; total: number; usdtValue?: number; scope?: string }>;
   exchangeId:   string;
-  stables:      Set<string>;
+  stables:      ReadonlySet<string>;
   closingPositions: Set<string>;
   progressMap:  Record<string, OrderProgress | undefined>;
   onClose:           (asset: string) => void;

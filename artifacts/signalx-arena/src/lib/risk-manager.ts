@@ -62,17 +62,19 @@ export interface RiskResult {
   filterSource?:  string;
 }
 
+import { stripStableSuffix } from './stable-assets.js';
+
 /**
- * Strip any common USD-stable suffix (USDT/USDC/USD/BUSD/USDE) from a
- * symbol and return just the base ticker. Used by the allowed-symbols
+ * Strip any recognised stable-settlement suffix (USDT/USDC/USD/BUSD/USDE/…)
+ * from a symbol and return just the base ticker. Used by the allowed-symbols
  * gate so `BTC` in the user's whitelist matches a `BTCUSDT` (or `BTC-USD`,
  * `BTCUSDC`, …) signal coming from the connected exchange, regardless of
- * which platform's quote convention is in play.
+ * which platform's quote convention is in play. Backed by the shared
+ * `STABLE_ASSETS` registry so adding a new stablecoin there picks up here
+ * automatically.
  */
 export function baseTicker(symbol: string): string {
-  return String(symbol ?? '')
-    .toUpperCase()
-    .replace(/[-_/]?(USDT|USDC|USDE|BUSD|USD)$/u, '');
+  return stripStableSuffix(symbol);
 }
 
 /** Round a number to a given step size */

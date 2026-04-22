@@ -22,6 +22,7 @@ import { botActivityStore } from './bot-activity-store.js';
 import { botDoctorStore }   from './bot-doctor-store.js';
 import { pipelineCache }    from './pipeline-cache.js';
 import { resolveCompliance } from './asset-compliance.js';
+import { STABLE_ASSETS, stripStableSuffix } from './stable-assets.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -366,11 +367,18 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     if (balRes.ok) {
       const balances = (balRes.data as { balances: Array<{ asset: string; available: number }> }).balances;
       const quoteAsset = symbolRules.quoteCurrency ?? 'USDT';
-      const baseAsset  = symbolRules.baseCurrency  ?? signal.symbol.replace(/USDT$|USDC$|USD$/i, '');
-      const q = balances.find(b => b.asset === quoteAsset)
-             ?? balances.find(b => b.asset === 'USDT')
-             ?? balances.find(b => b.asset === 'USDC')
-             ?? balances.find(b => b.asset === 'USD');
+      const baseAsset  = symbolRules.baseCurrency  ?? stripStableSuffix(signal.symbol);
+      // Prefer the exact quote asset, otherwise fall back to a stable
+      // settlement asset using the shared registry's declaration order
+      // (USDT first, then USDC, USD, …) — keeps fallback selection
+      // deterministic regardless of how an adapter orders balance rows.
+      let q = balances.find(b => b.asset === quoteAsset);
+      if (!q) {
+        for (const sym of STABLE_ASSETS) {
+          const hit = balances.find(b => b.asset === sym);
+          if (hit) { q = hit; break; }
+        }
+      }
       const bs = balances.find(b => b.asset.toUpperCase() === baseAsset.toUpperCase());
       availableQuote = q?.available  ?? 0;
       availableBase  = bs?.available ?? 0;
