@@ -20,8 +20,9 @@ import {
   ArrowLeftRight, CheckCircle2, XCircle, RefreshCw, Shield,
   Eye, EyeOff, Zap, Wallet, Clock, Lock, ExternalLink, Globe,
   Activity, Settings, FileText, AlertTriangle, Crosshair, Send, X,
-  ChevronDown,
+  ChevronDown, Sparkles,
 } from 'lucide-react';
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent,
   DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator,
@@ -3363,7 +3364,7 @@ function ClassifiedBalances(p: ClassifiedBalancesProps) {
       ...(dustEntry?.reason ? { dustReason: dustEntry.reason } : {}),
       isStable,
     });
-    return { row: b, verdict };
+    return { row: b, verdict, dustEntry };
   });
 
   const buckets: Record<PositionCategory, typeof classified> = {
@@ -3414,13 +3415,39 @@ function ClassifiedBalances(p: ClassifiedBalancesProps) {
             </button>
             {isOpen && (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 p-3">
-                {items.map(({ row: b, verdict }) => {
+                {items.map(({ row: b, verdict, dustEntry }) => {
                   const closing = p.closingPositions.has(b.asset);
                   return (
                     <Card key={b.asset} className="border-zinc-800/60">
                       <CardContent className="p-4">
                         <div className="flex items-center justify-between mb-2">
-                          <div className="font-bold text-sm">{b.asset}</div>
+                          <div className="flex items-center gap-1.5">
+                            <div className="font-bold text-sm">{b.asset}</div>
+                            {dustEntry && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <button
+                                    type="button"
+                                    onClick={() => botDoctorStore.clearDust(p.exchangeId, b.asset)}
+                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 text-[9px] font-semibold uppercase tracking-wide hover:bg-amber-500/20 hover:text-amber-200 transition-colors"
+                                    data-testid={`badge-dust-${b.asset}`}
+                                    aria-label={`Clear dust mark for ${b.asset}`}
+                                  >
+                                    <Sparkles size={9} />
+                                    Dust
+                                  </button>
+                                </TooltipTrigger>
+                                <TooltipContent side="top" className="max-w-xs text-xs">
+                                  <div className="font-semibold mb-1">Marked as dust</div>
+                                  <div className="text-zinc-300 mb-1">{dustEntry.reason}</div>
+                                  <div className="text-[10px] text-zinc-400">
+                                    Marked {new Date(dustEntry.markedAt).toLocaleString()}
+                                  </div>
+                                  <div className="text-[10px] text-zinc-500 mt-1">Click to clear</div>
+                                </TooltipContent>
+                              </Tooltip>
+                            )}
+                          </div>
                           <Badge variant="outline" className={`text-[9px] ${chipClass[cat]}`}
                                  data-testid={`chip-status-${b.asset}`}>
                             {POSITION_CATEGORY_LABELS[cat]}
