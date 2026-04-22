@@ -58,6 +58,7 @@ import {
 } from '@/lib/close-position-dialog';
 import { ClosePositionConfirmDialog } from '@/components/close-position-confirm-dialog';
 import { botDoctorStore, useBotDoctor } from '@/lib/bot-doctor-store';
+import { consumeDustFocus, subscribeDustFocus, type DustFocusRequest } from '@/lib/dust-focus';
 import type { SymbolRules } from '@/lib/risk-manager';
 import { submitManualOrder }      from '@/lib/live-execution-bridge';
 import { credentialStore }          from '@/lib/credential-store';
@@ -371,6 +372,9 @@ export default function ExchangePage() {
   const initialEx: ExchangeMeta =
     KNOWN_EXCHANGES.find(e => e.id === exMode.get().exchange) ?? KNOWN_EXCHANGES[0];
   const [selectedEx,  setSelectedEx]  = useState<ExchangeMeta>(initialEx);
+  // Asset to highlight in the Holdings/Dust panel after navigating from a Dust
+  // badge elsewhere in the app. Cleared once the panel handles it.
+  const [focusAsset,  setFocusAsset]  = useState<string | null>(null);
   const [mode,        setMode]        = useState<'demo' | 'paper' | 'testnet' | 'real'>(() => exMode.get().mode);
   // Credentials live in the singleton credentialStore so they survive
   // page navigation. Local state mirrors them only for the controlled inputs.
@@ -499,6 +503,28 @@ export default function ExchangePage() {
 
   const { toast } = useToast();
   const adapter = getExchangeAdapter(selectedEx.id);
+
+  // ── Dust focus from elsewhere in the app ─────────────────────────────────
+  // Dust badges in Arena/Wallet/Leaderboard navigate here with a request to
+  // jump to the relevant asset. We:
+  //   1. switch the selected exchange (and the mode singleton) to match,
+  //   2. open the Holdings ("balances") tab,
+  //   3. hand the asset symbol off to <ClassifiedBalances/> so it can open
+  //      the Dust section and scroll/focus the matching row.
+  const handleDustFocus = useCallback((req: DustFocusRequest) => {
+    const meta = KNOWN_EXCHANGES.find(e => e.id === req.exchange);
+    if (meta) {
+      setSelectedEx(meta);
+      if (exMode.get().exchange !== meta.id) exMode.setExchange(meta.id);
+    }
+    setTab('balances');
+    setFocusAsset(req.asset);
+  }, []);
+  useEffect(() => {
+    const pending = consumeDustFocus();
+    if (pending) handleDustFocus(pending);
+    return subscribeDustFocus(handleDustFocus);
+  }, [handleDustFocus]);
 
   // Track the latest active tab via a ref so async pollers (which capture
   // `tab` at submit time) can read the *current* tab when a terminal
@@ -2098,6 +2124,8 @@ export default function ExchangePage() {
               onSweep={sweepDust}
               onDismissProgress={dismissProgress}
               onResumeProgress={resumeProgress}
+              focusAsset={focusAsset}
+              onFocusHandled={() => setFocusAsset(null)}
             />
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -3613,6 +3641,10 @@ interface ClassifiedBalancesProps {
   onSweep:           (assets: string[]) => void;
   onDismissProgress: (key: string) => void;
   onResumeProgress:  (key: string) => void;
+  /** Asset symbol (uppercase) to scroll to + focus after navigating from a Dust badge. */
+  focusAsset?:       string | null;
+  /** Called once the focus request has been handled so the parent can clear it. */
+  onFocusHandled?:   () => void;
 }
 
 function ClassifiedBalances(p: ClassifiedBalancesProps) {
@@ -3639,6 +3671,43 @@ function ClassifiedBalances(p: ClassifiedBalancesProps) {
       // ignore storage failures (private mode, quota, etc.)
     }
   }, [dustOnly]);
+
+  // ── Honor a focus request from a Dust badge click elsewhere ─────────────
+  // Open the Dust section so the row is mounted, then on the next tick scroll
+  // it into view and focus the badge so keyboard users land in the right
+  // place. We poll briefly because the row may not be in the DOM yet on the
+  // very first paint after navigation.
+  const onFocusHandled = p.onFocusHandled;
+  useEffect(() => {
+    const asset = p.focusAsset;
+    if (!asset) return;
+    setOpen(s => (s.dust_balance ? s : { ...s, dust_balance: true }));
+    let cancelled = false;
+    const tryFocus = (attempts: number) => {
+      if (cancelled) return;
+      const el = document.querySelector<HTMLElement>(`[data-testid="badge-dust-${asset}"]`);
+      if (el) {
+        try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch { /* not critical */ }
+        try { el.focus({ preventScroll: true }); } catch { /* focus optional */ }
+        // Brief highlight ring to make the row obvious after the jump.
+        el.classList.add('ring-2', 'ring-amber-400/80');
+        window.setTimeout(() => {
+          el.classList.remove('ring-2', 'ring-amber-400/80');
+        }, 1600);
+        onFocusHandled?.();
+        return;
+      }
+      if (attempts < 10) {
+        window.setTimeout(() => tryFocus(attempts + 1), 50);
+      } else {
+        // Asset not present (wrong exchange, balance still loading, etc.) —
+        // clear the request so future clicks still trigger this effect.
+        onFocusHandled?.();
+      }
+    };
+    const t = window.setTimeout(() => tryFocus(0), 30);
+    return () => { cancelled = true; window.clearTimeout(t); };
+  }, [p.focusAsset, onFocusHandled]);
 
   const classified = p.liveBalances.map(b => {
     const upper = b.asset.toUpperCase();
@@ -3797,8 +3866,8 @@ function ClassifiedBalances(p: ClassifiedBalancesProps) {
                                     type="button"
                                     onClick={() => botDoctorStore.clearDust(p.exchangeId, b.asset)}
                                     className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 text-[9px] font-semibold uppercase tracking-wide hover:bg-amber-500/20 hover:text-amber-200 transition-colors"
-                                    data-testid={`badge-dust-${b.asset}`}
-                                    aria-label={`Clear dust mark for ${b.asset}`}
+                                    data-testid={`badge-dust-${b.asset.toUpperCase()}`}
+                                    aria-label={`Clear dust mark for ${b.asset.toUpperCase()}`}
                                   >
                                     <Sparkles size={9} />
                                     Dust

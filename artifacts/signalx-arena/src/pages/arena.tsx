@@ -7,6 +7,8 @@ import { SYMBOLS, STRATEGIES, CATEGORIES, ASSETS, ASSET_MAP } from '@/lib/storag
 import { useBotDoctor, type DustMark } from '@/lib/bot-doctor-store';
 import { exchangeMode, type ExchangeModeState } from '@/lib/exchange-mode';
 import { baseTicker } from '@/lib/risk-manager';
+import { requestDustFocus } from '@/lib/dust-focus';
+import { useLocation } from 'wouter';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -143,11 +145,17 @@ const BotCard = memo(function BotCard({
   toggleBot, resetBot, removeBot,
 }: BotCardProps) {
   const [showInd, setShowInd] = useState(false);
+  const [, setLocation] = useLocation();
   const isUp = candles.length >= 2 && candles[candles.length - 1].close >= candles[candles.length - 20]?.close;
   // Stable per-bot handlers — botId and context callbacks never change
   const onToggle = useCallback(() => toggleBot(bot.id), [toggleBot, bot.id]);
   const onReset  = useCallback(() => resetBot(bot.id),  [resetBot,  bot.id]);
   const onRemove = useCallback(() => removeBot(bot.id), [removeBot, bot.id]);
+  const onDustClick = useCallback(() => {
+    if (!dust) return;
+    requestDustFocus({ exchange: dust.exchange, asset: baseTicker(bot.symbol) });
+    setLocation('/exchange');
+  }, [dust, bot.symbol, setLocation]);
 
   return (
     <Card className="overflow-hidden border-border/60 hover:border-border transition-colors">
@@ -206,14 +214,16 @@ const BotCard = memo(function BotCard({
               {dust && (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <span
-                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 text-[9px] font-semibold uppercase tracking-wide"
+                    <button
+                      type="button"
+                      onClick={onDustClick}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 text-[9px] font-semibold uppercase tracking-wide hover:bg-amber-500/20 hover:text-amber-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60 transition-colors cursor-pointer"
                       data-testid={`badge-bot-dust-${bot.id}`}
-                      aria-label={`${bot.symbol} marked as dust on ${dust.exchange}`}
+                      aria-label={`${bot.symbol} marked as dust on ${dust.exchange} — open cleanup tool`}
                     >
                       <Sparkles size={9} />
                       Dust
-                    </span>
+                    </button>
                   </TooltipTrigger>
                   <TooltipContent side="top" className="max-w-xs text-xs">
                     <div className="font-semibold mb-1">Marked as dust on {dust.exchange}</div>
@@ -221,6 +231,7 @@ const BotCard = memo(function BotCard({
                     <div className="text-[10px] text-zinc-400">
                       Marked {new Date(dust.markedAt).toLocaleString()}
                     </div>
+                    <div className="text-[10px] text-zinc-500 mt-1">Click to open the cleanup tool</div>
                   </TooltipContent>
                 </Tooltip>
               )}
@@ -278,6 +289,12 @@ export default function ArenaPage() {
   const doctor = useBotDoctor();
   const [exState, setExState] = useState<ExchangeModeState>(() => exchangeMode.get());
   useEffect(() => exchangeMode.subscribe(setExState), []);
+
+  const [, setLocation] = useLocation();
+  const focusDust = useCallback((exchange: string, symbol: string) => {
+    requestDustFocus({ exchange, asset: baseTicker(symbol) });
+    setLocation('/exchange');
+  }, [setLocation]);
 
   const sorted = useMemo(() => {
     return [...bots].sort((a, b) =>
@@ -532,14 +549,16 @@ export default function ArenaPage() {
                                 {dust && (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
-                                      <span
-                                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 text-[9px] font-semibold uppercase tracking-wide flex-shrink-0"
+                                      <button
+                                        type="button"
+                                        onClick={() => focusDust(dust.exchange, bot.symbol)}
+                                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 text-[9px] font-semibold uppercase tracking-wide flex-shrink-0 hover:bg-amber-500/20 hover:text-amber-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60 transition-colors cursor-pointer"
                                         data-testid={`badge-leaderboard-dust-${bot.id}`}
-                                        aria-label={`${bot.symbol} marked as dust on ${dust.exchange}`}
+                                        aria-label={`${bot.symbol} marked as dust on ${dust.exchange} — open cleanup tool`}
                                       >
                                         <Sparkles size={9} />
                                         Dust
-                                      </span>
+                                      </button>
                                     </TooltipTrigger>
                                     <TooltipContent side="top" className="max-w-xs text-xs">
                                       <div className="font-semibold mb-1">Marked as dust on {dust.exchange}</div>
@@ -547,6 +566,7 @@ export default function ArenaPage() {
                                       <div className="text-[10px] text-zinc-400">
                                         Marked {new Date(dust.markedAt).toLocaleString()}
                                       </div>
+                                      <div className="text-[10px] text-zinc-500 mt-1">Click to open the cleanup tool</div>
                                     </TooltipContent>
                                   </Tooltip>
                                 )}

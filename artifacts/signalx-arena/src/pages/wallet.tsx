@@ -1,6 +1,7 @@
 
-import { useState, useMemo, useEffect } from 'react';
-import { Link } from 'wouter';
+import { useState, useMemo, useEffect, useCallback } from 'react';
+import { Link, useLocation } from 'wouter';
+import { requestDustFocus } from '@/lib/dust-focus';
 import { useArena } from '@/hooks/use-arena';
 import { getBotTotalValue, getBotPnL } from '@/lib/engine';
 import { loadWallet, requestDeposit, requestWithdrawal, type WalletState } from '@/lib/wallet';
@@ -62,6 +63,11 @@ export default function WalletPage() {
   const [depositAmt, setDepositAmt] = useState('1000');
   const [withdrawAmt, setWithdrawAmt] = useState('');
   const { toast } = useToast();
+  const [, setLocation] = useLocation();
+  const focusDust = useCallback((exchange: string, symbol: string) => {
+    requestDustFocus({ exchange, asset: baseTicker(symbol) });
+    setLocation('/exchange');
+  }, [setLocation]);
 
   // ── Live exchange wiring (mode-aware secondary balance source) ──────────
   const [exState, setExState] = useState<ExchangeModeState>(() => exchangeMode.get());
@@ -312,14 +318,16 @@ export default function WalletPage() {
                                   return (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
-                                        <span
-                                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 text-[9px] font-semibold uppercase tracking-wide"
+                                        <button
+                                          type="button"
+                                          onClick={() => focusDust(dust.exchange, b.symbol)}
+                                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 text-[9px] font-semibold uppercase tracking-wide hover:bg-amber-500/20 hover:text-amber-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60 transition-colors cursor-pointer"
                                           data-testid={`badge-bot-dust-${b.id}`}
-                                          aria-label={`${b.symbol} marked as dust on ${dust.exchange}`}
+                                          aria-label={`${b.symbol} marked as dust on ${dust.exchange} — open cleanup tool`}
                                         >
                                           <Sparkles size={9} />
                                           Dust
-                                        </span>
+                                        </button>
                                       </TooltipTrigger>
                                       <TooltipContent side="top" className="max-w-xs text-xs">
                                         <div className="font-semibold mb-1">Marked as dust on {dust.exchange}</div>
@@ -327,6 +335,7 @@ export default function WalletPage() {
                                         <div className="text-[10px] text-zinc-400">
                                           Marked {new Date(dust.markedAt).toLocaleString()}
                                         </div>
+                                        <div className="text-[10px] text-zinc-500 mt-1">Click to open the cleanup tool</div>
                                       </TooltipContent>
                                     </Tooltip>
                                   );
