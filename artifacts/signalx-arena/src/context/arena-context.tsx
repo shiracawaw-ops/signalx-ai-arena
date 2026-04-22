@@ -5,6 +5,7 @@ import { perfMonitor } from '@/lib/perf-monitor';
 import { MarketData, initMarket, tickMarket, executeBotTick } from '@/lib/engine';
 import { generateBots, makeFreshStandbyBot } from '@/lib/seed';
 import { exchangeMode } from '@/lib/exchange-mode';
+import { tradeConfig } from '@/lib/trade-config';
 import { bridgeBotTradeToExchange } from '@/lib/live-execution-bridge';
 
 // ── Real-trade bridge ─────────────────────────────────────────────────────────
@@ -306,11 +307,20 @@ export function ArenaProvider({ children }: { children: React.ReactNode }) {
 
     const newMarket = tickMarket(mkt);
 
+    // Pull TP/SL from the active exchange's Trade Config so the user's UI
+    // sliders actually drive bot exits (was hardcoded before this fix).
+    const activeExchange = exchangeMode.get().exchange;
+    const cfg = tradeConfig.get(activeExchange);
+    const tickOverrides = {
+      takeProfit: cfg.takeProfitPct > 0 ?  cfg.takeProfitPct / 100 : undefined,
+      stopLoss:   cfg.stopLossPct   > 0 ? -cfg.stopLossPct   / 100 : undefined,
+    };
+
     const newTrades: Trade[] = [];
     let updatedBots = cur.map(bot => {
       if (!bot.isRunning) return bot;
       const candles = newMarket[bot.symbol] || [];
-      const { bot: updatedBot, trade } = executeBotTick(bot, candles, trds, pct);
+      const { bot: updatedBot, trade } = executeBotTick(bot, candles, trds, pct, tickOverrides);
       if (trade) {
         newTrades.push(trade);
         // Mirror to the live Execution Engine in REAL / TESTNET mode.

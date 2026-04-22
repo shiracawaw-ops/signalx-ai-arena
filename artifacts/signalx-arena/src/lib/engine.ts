@@ -28,21 +28,39 @@ function generateTradeId(): string {
   return `t_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
-// ── Exit thresholds ────────────────────────────────────────────────────────────
+// ── Default exit thresholds ──────────────────────────────────────────────────
+// Used when the caller does not pass an explicit override. The arena context
+// passes the user's Trade Config TP/SL so the UI sliders actually take effect.
 // High TP asymmetry: TP = 4% vs SL = 1.5% → gross gain per win >> gross loss per loss
 // With bullish drift 0.0675%/tick: TP fires in ~59 ticks, SL needs 10+ consecutive big drops
 // This gives very high win rate (80-95%) so gross P&L clearly > fees per round trip
-const TAKE_PROFIT_PCT  =  0.040; // +4.0% → large profit capture per winning trade
-const STOP_LOSS_PCT    = -0.015; // -1.5% → small loss that rarely fires in bullish market
+export const DEFAULT_TAKE_PROFIT_PCT =  0.040; // +4.0% → large profit capture per winning trade
+export const DEFAULT_STOP_LOSS_PCT   = -0.015; // -1.5% → small loss that rarely fires in bullish market
 // One position per bot — no DCA stacking
 const MAX_INVEST_RATIO =  0.38;  // max 38%: one 30% buy, blocks second
+
+export interface BotTickOverrides {
+  /** Take profit fraction, e.g. 0.04 for +4%. Must be > 0. */
+  takeProfit?: number;
+  /** Stop loss fraction, e.g. -0.015 for -1.5%. Must be < 0. */
+  stopLoss?:   number;
+}
 
 export function executeBotTick(
   bot: Bot,
   candles: Candle[],
   _allTrades: Trade[],
   spendPct = 0.3,
+  overrides: BotTickOverrides = {},
 ): { bot: Bot; trade: Trade | null } {
+  // Resolve effective thresholds, clamping to safe ranges so a UI typo
+  // (e.g. negative TP or positive SL) cannot corrupt the exit logic.
+  const TAKE_PROFIT_PCT = (overrides.takeProfit !== undefined && overrides.takeProfit > 0)
+    ? overrides.takeProfit
+    : DEFAULT_TAKE_PROFIT_PCT;
+  const STOP_LOSS_PCT   = (overrides.stopLoss   !== undefined && overrides.stopLoss   < 0)
+    ? overrides.stopLoss
+    : DEFAULT_STOP_LOSS_PCT;
   if (!bot.isRunning || candles.length < 52) return { bot, trade: null };
 
   const price = candles[candles.length - 1].close;
