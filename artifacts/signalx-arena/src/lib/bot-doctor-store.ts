@@ -68,7 +68,12 @@ const MAX_DECISIONS        = 50;
 
 function emptyState(): DoctorState {
   return {
-    mode: 'MONITOR',
+    // Default to AUTO_FIX so brand-new installs are protected against the
+    // common Bybit/Binance failure modes (dust, cooldown spam, adapter
+    // flakiness) without requiring the user to flip a switch first. The
+    // stricter FULL_ACTIVE mode (which also benches under-performers) stays
+    // opt-in.
+    mode: 'AUTO_FIX',
     bench: {},
     dust: {},
     decisions: [],
@@ -266,16 +271,21 @@ class BotDoctorStore {
     }
 
     // Cooldown spam — too many attempts hitting the cooldown shield.
+    // Tightened thresholds (was 5/0.6 → now 3/0.5) so the user does not see
+    // the long "cooldown_active" reject streaks shown in v1.4.x screenshots
+    // before the Doctor steps in.
     if (rejectReason && /cooldown|stale_price|duplicate_signal/i.test(rejectReason)) {
-      if (submittedRecent >= 5 && rejectionRate >= 0.6) {
+      if (submittedRecent >= 3 && rejectionRate >= 0.5) {
         this.bench(botId, 'cooldown_spam', 'Repeated cooldown / duplicate / stale signals');
         return 'cooldown_spam';
       }
       return null;
     }
 
-    // Generic high reject rate (any cause) — only after a meaningful sample.
-    if (submittedRecent >= 8 && rejectionRate >= 0.7) {
+    // Generic high reject rate (any cause). Lowered the sample requirement
+    // from 8 → 5 so we react quickly when an exchange path is misbehaving
+    // and the bot keeps producing unusable orders.
+    if (submittedRecent >= 5 && rejectionRate >= 0.6) {
       this.bench(botId, 'high_reject_rate',
         `${Math.round(rejectionRate * 100)}% of recent attempts rejected`);
       return 'high_reject_rate';

@@ -7,9 +7,9 @@ beforeEach(() => {
 });
 
 describe('botDoctorStore — modes', () => {
-  it('defaults to MONITOR', () => {
-    expect(botDoctorStore.getMode()).toBe('MONITOR');
-    expect(botDoctorStore.canAutoAct()).toBe(false);
+  it('defaults to AUTO_FIX so new installs are protected out-of-the-box', () => {
+    expect(botDoctorStore.getMode()).toBe('AUTO_FIX');
+    expect(botDoctorStore.canAutoAct()).toBe(true);
     expect(botDoctorStore.canDeepAct()).toBe(false);
   });
 
