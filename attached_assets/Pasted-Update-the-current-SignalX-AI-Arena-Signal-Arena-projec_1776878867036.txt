@@ -1,0 +1,422 @@
+Update the current SignalX AI Arena / Signal Arena project directly.
+
+Do not create a new project.
+Do not redesign the whole UI.
+Do not replace the whole architecture unnecessarily.
+Keep the current interface style as much as possible.
+Modify the actual live app, actual trading engine, actual position logic, actual bot logic, and actual profit accounting.
+
+PRIMARY OBJECTIVE:
+Optimize the system for REAL NET PROFITABILITY, not cosmetic activity.
+
+This means:
+- fewer but better trades
+- cleaner entries
+- cleaner exits
+- lower rejection rate
+- lower churn
+- no fake green metrics
+- no misleading profit numbers
+- real net profit after fees
+- better bot selection for real capital
+- no unsellable leftovers when avoidable
+
+Do NOT optimize for:
+- number of trades only
+- visual dashboard excitement
+- score inflation
+- ranking inflation
+- projected return inflation
+- paper-like behavior in real mode
+
+Do NOT promise guaranteed profit.
+The objective is:
+- maximize the probability of real net profitability
+- improve trade quality
+- improve realized PnL after fees
+- reduce low-quality execution
+
+==================================================
+PHASE 1 — REAL PROFIT ACCOUNTING MUST BECOME THE SOURCE OF TRUTH
+==================================================
+
+Implement strict real-profit accounting.
+
+The dashboard and bot panels must clearly separate:
+1) realized PnL from closed trades only
+2) unrealized PnL from open positions only
+3) gross PnL before fees
+4) total fees paid
+5) net realized PnL after fees
+6) starting balance
+7) current account equity
+8) actual balance growth
+9) daily realized PnL
+10) weekly realized PnL
+11) lifetime realized PnL
+
+For every bot, show:
+- realized PnL
+- unrealized PnL
+- gross PnL before fees
+- net PnL after fees
+- today’s bot PnL
+- lifetime bot PnL
+- last trade PnL
+- average win
+- average loss
+- total fees generated
+- slippage impact average
+- reject rate
+- execution quality score
+
+For every closed trade, store and display:
+- symbol
+- bot responsible
+- entry price
+- exit price
+- quantity
+- entry time
+- exit time
+- fees
+- slippage estimate/impact
+- gross result
+- net realized result after fees
+
+STRICT RULE:
+Do not mix score, rank, projected return, unrealized movement, paper metrics, confidence, or “top performer” badges with actual realized profit.
+
+Add a “Real Profit Proof” section that lists only actual closed real trades and their net result after fees.
+
+==================================================
+PHASE 2 — STRICT TRADE QUALITY FILTERING
+==================================================
+
+The engine must stop taking noisy, low-quality, low-edge trades.
+
+Before any trade is allowed, require a stricter quality gate:
+- valid exchange symbol
+- valid live price
+- valid tradable status
+- sufficient liquidity
+- acceptable spread
+- acceptable slippage estimate
+- reward/risk threshold met
+- confidence threshold met
+- quality threshold met
+- sufficient capital after fee buffer
+- valid sellability path for eventual exit
+- no known exchange rule violation
+
+Add a composite trade quality score that determines if a setup is good enough for real capital.
+
+Only higher-quality setups should reach order submission.
+Do not let weak signals trade just to increase activity.
+
+==================================================
+PHASE 3 — ENTRY / EXIT ENGINE MUST BE PROFIT-FIRST
+==================================================
+
+Refine the entry and exit logic for actual net profitability.
+
+ENTRY REQUIREMENTS:
+- avoid entering trades where expected edge is too small to beat fees and spread
+- avoid entering trades that will likely produce tiny unusable leftovers
+- avoid entries where the planned exit path is not clean
+- avoid rapid repeated entries on the same symbol without a strong reason
+
+EXIT REQUIREMENTS:
+- exit logic must support real profit-taking and not just random churn
+- do not force premature exits that produce micro-profit or net loss after fees
+- do not leave unsellable remainders if avoidable
+- before partial exit, simulate the leftover quantity
+- if a partial exit would create unsellable dust, avoid that path when possible
+- classify true dust correctly and stop repeated useless sell attempts
+
+The system must prioritize:
+- clean full exits
+- profitable exits after fees
+- minimal leftover balances
+- reduced churn
+
+==================================================
+PHASE 4 — EXCHANGE COMPLIANCE MUST BE STRICT AND PREVENTIVE
+==================================================
+
+Strengthen Bybit and Binance compliance before order submission.
+
+Before every BUY or SELL, validate live exchange constraints:
+- symbol exists
+- symbol is tradable
+- price tick size
+- quantity step size
+- min quantity
+- min notional / minimum order value
+- supported order type
+- sufficient balance
+- sufficient allocated capital
+- sellable quantity exists
+- adapter is ready
+- account mode compatibility
+- permission validity
+
+Prevent these known failures before submission:
+- exchange_rejected_request
+- retCode=170140
+- insufficient_balance
+- owned_qty_below_min_notional
+- invalid tiny orders
+- invalid partial exits
+- invalid dust-generating exits
+
+STRICT RULE:
+If the trade will violate exchange rules, do not submit it.
+Reject internally with a precise reason instead of sending a bad order.
+
+==================================================
+PHASE 5 — DUST / LEFTOVER ELIMINATION
+==================================================
+
+Dust and unsellable leftovers are damaging real profitability and must be controlled strictly.
+
+Implement:
+- pre-exit dust simulation
+- leftover notional validation
+- dust classification
+- dust tracking
+- dust suppression logic
+
+Rules:
+- do not create dust if avoidable
+- do not keep retrying SELL on unsellable dust
+- do not show dust as a normal active position
+- move dust to a dedicated dust / residual section
+- show exact sellability reason and exchange minimum required
+
+This is critical because dust destroys clean PnL and creates fake open positions.
+
+==================================================
+PHASE 6 — BOT SELECTION FOR REAL MONEY MUST BE STRICT
+==================================================
+
+Only the best bots should receive real capital.
+
+Create a strict real-capital eligibility system using weighted real criteria:
+- realized PnL after fees
+- recent realized performance
+- rejection rate
+- execution stability
+- slippage quality
+- drawdown behavior
+- trade quality consistency
+- market regime fit
+- adapter health / execution health
+
+Demote or bench bots that:
+- generate noisy invalid attempts
+- produce poor net results
+- create too many rejections
+- churn without edge
+- create dust repeatedly
+- underperform after fees
+
+Promote bots that:
+- show strong realized results
+- show clean executions
+- show lower reject rates
+- fit the current market regime
+
+Do not let cosmetic score alone decide real-capital access.
+
+==================================================
+PHASE 7 — REAL CAPITAL DEPLOYMENT MUST FAVOR NET PROFIT
+==================================================
+
+Improve capital deployment to maximize trade validity and profit quality.
+
+Rules:
+- allocate real capital only to healthy and eligible bots
+- avoid microscopic allocations
+- ensure per-bot allocations are actually tradable on the selected exchange
+- keep fee reserve
+- keep safety reserve
+- reallocate capital away from weak or benched bots
+- do not increase bot count if it lowers per-bot trade quality
+- prefer fewer stronger real bots over many weak low-capital bots
+
+Show clearly:
+- total balance
+- usable real capital
+- reserved capital
+- allocated capital
+- unallocated capital
+- active real bots
+- benched bots
+- blocked bots
+- doctor-adjusted real bot count
+- average per-bot allocation
+
+==================================================
+PHASE 8 — BOT DOCTOR MUST BECOME A STRICT REAL-MODE QUALITY CONTROLLER
+==================================================
+
+Enable Bot Doctor as a strict real-mode execution quality controller.
+
+Bot Doctor modes:
+- OFF
+- Monitor Only
+- Auto-Fix Safe Issues
+- Full Active Real Monitoring
+
+Bot Doctor must monitor in real mode:
+- adapter readiness
+- balance fetch health
+- symbol normalization health
+- exchange minimum failures
+- dust creation risk
+- cooldown spam
+- repeated reject sources
+- bot underperformance
+- execution instability
+- profit-accounting discrepancies
+- blocked / benched bots
+- unhealthy churn
+
+Bot Doctor safe actions:
+- retry adapter initialization safely
+- retry balance/instrument refresh safely
+- stop repeated invalid attempts
+- suppress dust sell spam
+- downgrade noisy bots
+- bench unstable bots temporarily
+- restore healthy bots after recovery
+- clear stale states when safe
+- recommend lower bot count if allocations become too small
+- recommend stronger bot selection if real net profitability weakens
+
+==================================================
+PHASE 9 — ADAPTER STABILITY AND TRADE SUBMISSION DISCIPLINE
+==================================================
+
+The engine must not attempt real trading unless the adapter is truly ready.
+
+Ready state must require:
+- auth ok
+- permissions ok
+- balance fetch ok
+- symbol metadata ok
+- tradable context ok
+- exchange connection healthy
+
+Use one central readiness source of truth.
+Do not let bots submit while adapter is unhealthy.
+
+If exchange or network fails temporarily:
+- pause bot submissions cleanly
+- retry with backoff
+- restore safely only after readiness returns
+- do not spam rejected attempts
+
+==================================================
+PHASE 10 — CLEAN OPEN POSITIONS / HOLDINGS PAGE
+==================================================
+
+Fix the positions page so it helps real profitability and clarity.
+
+Classify every asset into exactly one of:
+- active_position
+- partial_position
+- dust_balance
+- wallet_holding
+- fully_closed
+
+Only show “Close Position” when closing is legally and practically possible.
+Do not show close actions for:
+- dust
+- fully flattened positions
+- unsellable leftovers
+- wallet-only balances
+
+For active positions show:
+- current qty
+- current notional
+- entry price
+- current price
+- unrealized PnL
+- bot responsible
+- close eligibility
+
+For dust show:
+- exact qty
+- USD value
+- why unsellable
+- exchange minimum required
+
+==================================================
+PHASE 11 — REJECTION RATE MUST DROP SHARPLY
+==================================================
+
+The engine must aim for a much stronger executed-to-rejected ratio.
+
+Reduce:
+- invalid exchange requests
+- cooldown spam
+- repeated same-symbol retries
+- dust-related sell attempts
+- insufficient balance attempts
+- tiny unprofitable churn
+- invalid partial exits
+
+Add strict internal skip reasons so bad candidates are filtered before submission.
+
+==================================================
+PHASE 12 — HONEST OPERATIONAL DASHBOARD
+==================================================
+
+Make the dashboard answer these questions clearly:
+- how much real money was actually made
+- which bots actually made it
+- which bots are actually trading now
+- which bots are benched and why
+- how much profit is realized vs unrealized
+- how much was paid in fees
+- how much capital is really deployed
+- how much dust exists
+- whether the current activity is profitable after fees
+
+Do not inflate appearance.
+Do not display cosmetic success as real success.
+
+==================================================
+PHASE 13 — VALIDATION AND SAFE TESTING
+==================================================
+
+After implementing:
+- verify buy → fill → tracked position → clean sell → net realized PnL booking
+- verify Bybit execution path
+- verify Binance execution path if configured
+- verify adapter readiness gating
+- verify dust handling
+- verify min order validation
+- verify insufficient balance prevention
+- verify profit accounting after fees
+- verify that the dashboard matches actual closed-trade results
+
+Return a strict implementation summary with:
+- files changed
+- root causes fixed
+- behavior changes
+- remaining limitations
+- exact safe testing procedure
+
+==================================================
+FINAL INSTRUCTIONS
+==================================================
+
+- Do not create mock UI only
+- Do not fake profit metrics
+- Do not optimize for cosmetic activity
+- Do not inflate scores
+- Focus on real net profitability, execution quality, and trustworthiness
+- Keep the current UI style
+- Improve the app as a serious real-trading system, not just a visually active one
