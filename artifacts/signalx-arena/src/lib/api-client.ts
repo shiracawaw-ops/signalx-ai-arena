@@ -431,6 +431,7 @@ export const apiClient = {
       exchange:      string;
       swept:         string[];
       failed:        Array<{ asset: string; reason: string }>;
+      pending?:      Array<{ asset: string; reason: string; quoteTxId?: string }>;
       totalReceived?: number;
       receivedAsset?: string;
       note?:         string;

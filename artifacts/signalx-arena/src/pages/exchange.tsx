@@ -1155,25 +1155,55 @@ export default function ExchangePage() {
       // Auto-clear Doctor dust marks for every asset the venue actually
       // converted so the card disappears on the next refresh.
       for (const a of sweep.swept) botDoctorStore.clearDust(selectedEx.id, a);
-      const okCount   = sweep.swept.length;
-      const failCount = sweep.failed.length;
+      const okCount      = sweep.swept.length;
+      const failCount    = sweep.failed.length;
+      const pendingList  = sweep.pending ?? [];
+      const pendingCount = pendingList.length;
       const payout    = sweep.totalReceived && sweep.receivedAsset
         ? ` Received ≈ ${sweep.totalReceived} ${sweep.receivedAsset}.`
         : '';
-      const noteSuffix = sweep.note ? ` ${sweep.note}` : '';
-      if (okCount > 0 && failCount === 0) {
-        toast({ title: `Swept ${okCount} dust asset${okCount === 1 ? '' : 's'}`, description: `${sweep.swept.join(', ')}.${payout}${noteSuffix}` });
-      } else if (okCount > 0 && failCount > 0) {
-        toast({
-          title: `Swept ${okCount}, ${failCount} skipped`,
-          description: `Converted: ${sweep.swept.join(', ')}.${payout} Skipped: ${sweep.failed.map(f => `${f.asset} (${f.reason})`).join('; ')}.${noteSuffix}`,
-        });
+      const description = (
+        <div className="space-y-1.5 text-xs" data-testid="sweep-dust-toast-body">
+          {okCount > 0 && (
+            <div className="text-emerald-400" data-testid="sweep-dust-toast-swept">
+              <span className="font-semibold">Swept ({okCount}):</span> {sweep.swept.join(', ')}.{payout}
+            </div>
+          )}
+          {pendingCount > 0 && (
+            <div className="text-amber-400" data-testid="sweep-dust-toast-pending">
+              <div className="font-semibold">Still settling ({pendingCount}) — your USDT will land shortly:</div>
+              <ul className="list-disc pl-4">
+                {pendingList.map(p => (
+                  <li key={p.asset}>
+                    <span className="font-mono">{p.asset}</span> — {p.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {failCount > 0 && (
+            <div className="text-red-400" data-testid="sweep-dust-toast-failed">
+              <div className="font-semibold">Skipped ({failCount}):</div>
+              <ul className="list-disc pl-4">
+                {sweep.failed.map(f => (
+                  <li key={f.asset}>
+                    <span className="font-mono">{f.asset}</span> — {f.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {sweep.note && <div className="text-zinc-400">{sweep.note}</div>}
+        </div>
+      );
+      if (okCount === 0 && pendingCount === 0 && failCount > 0) {
+        toast({ title: 'No assets converted', description, variant: 'destructive' });
       } else {
-        toast({
-          title: 'No assets converted',
-          description: sweep.failed.map(f => `${f.asset}: ${f.reason}`).join('; ') || 'The exchange rejected the request.' + noteSuffix,
-          variant: 'destructive',
-        });
+        const parts: string[] = [];
+        if (okCount > 0)      parts.push(`Swept ${okCount}`);
+        if (pendingCount > 0) parts.push(`${pendingCount} still settling`);
+        if (failCount > 0)    parts.push(`${failCount} skipped`);
+        toast({ title: parts.join(', ') || 'Sweep complete', description });
       }
     } catch (e) {
       toast({ title: 'Sweep failed', description: (e as Error).message ?? 'Unexpected error', variant: 'destructive' });
