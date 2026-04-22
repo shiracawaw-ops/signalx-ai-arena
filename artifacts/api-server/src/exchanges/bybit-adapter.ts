@@ -717,8 +717,61 @@ export class BybitAdapter implements ExchangeAdapter {
 
     const swept:  string[] = [];
     const failed: Array<{ asset: string; reason: string }> = [];
+    const pending: Array<{ asset: string; reason: string; quoteTxId?: string }> = [];
     let totalReceived = 0;
     const rawDetails: Array<Record<string, unknown>> = [];
+
+    // Coin Exchange settlement is asynchronous: convert-execute returns 200
+    // long before the USDT balance lands. Poll convert-result-query until the
+    // venue reports SUCCESS / FAILURE, or until this short budget elapses
+    // (settlements normally complete in <2s; we cap at ~6s so the HTTP
+    // request doesn't stall the UI for sweeps that genuinely got stuck).
+    const POLL_TIMEOUT_MS  = 6000;
+    const POLL_INTERVAL_MS = 500;
+    const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+    const pollConvertResult = async (
+      quoteTxId: string,
+      accountType: string,
+    ): Promise<{ status: 'success' | 'failure' | 'pending'; reason?: string; toAmount?: number; raw?: unknown }> => {
+      const deadline = Date.now() + POLL_TIMEOUT_MS;
+      let lastRaw: unknown = undefined;
+      let lastReason = 'still pending after polling timeout';
+      while (Date.now() < deadline) {
+        const tsP  = Date.now();
+        const qsP  = `quoteTxId=${encodeURIComponent(quoteTxId)}&accountType=${encodeURIComponent(accountType)}`;
+        const sigP = sign(creds.apiKey, creds.secretKey, tsP, qsP);
+        const rP   = await safeFetch(
+          `${BASE}/v5/asset/exchange/convert-result-query?${qsP}`,
+          { headers: headers(creds, tsP, sigP) }, 'bybit',
+        );
+        if (!rP.ok) {
+          lastReason = rP.error?.message ?? 'convert-result-query failed';
+          await sleep(POLL_INTERVAL_MS);
+          continue;
+        }
+        const pData    = (rP.data as Record<string, unknown>) ?? {};
+        const pRetCode = Number(pData['retCode'] ?? -1);
+        const pRetMsg  = String(pData['retMsg'] ?? '');
+        if (pRetCode !== 0) {
+          lastReason = `convert-result-query retCode ${pRetCode}: ${pRetMsg}`;
+          await sleep(POLL_INTERVAL_MS);
+          continue;
+        }
+        const pResult = (pData['result'] as Record<string, unknown>) ?? {};
+        lastRaw = pResult;
+        const status = String(pResult['exchangeStatus'] ?? pResult['status'] ?? '').toLowerCase();
+        if (status === 'success') {
+          const toAmt = parseFloat(String(pResult['toAmount'] ?? '0'));
+          return { status: 'success', toAmount: Number.isFinite(toAmt) ? toAmt : 0, raw: pResult };
+        }
+        if (status === 'failure' || status === 'failed') {
+          return { status: 'failure', reason: `Bybit reported FAILURE for quoteTxId ${quoteTxId}`, raw: pResult };
+        }
+        // PENDING / PROCESSING / INIT — keep polling
+        await sleep(POLL_INTERVAL_MS);
+      }
+      return { status: 'pending', reason: lastReason, raw: lastRaw };
+    };
 
     for (const asset of cleaned) {
       if (asset === 'USDT') {
@@ -733,6 +786,8 @@ export class BybitAdapter implements ExchangeAdapter {
 
       let lastReason  = 'Conversion failed';
       let anySucceeded = false;
+      let anyPending   = false;
+      let anyHardFailure = false;
       let assetReceived = 0;
 
       // Convert each wallet slice independently — Coin Exchange operates on
@@ -757,6 +812,7 @@ export class BybitAdapter implements ExchangeAdapter {
 
         if (!rQ.ok) {
           lastReason = `[${slice.accountType}] ${rQ.error?.message ?? 'Quote request failed'}`;
+          anyHardFailure = true;
           continue;
         }
         const qData    = (rQ.data as Record<string, unknown>) ?? {};
@@ -764,6 +820,7 @@ export class BybitAdapter implements ExchangeAdapter {
         const qRetMsg  = String(qData['retMsg'] ?? '');
         if (qRetCode !== 0) {
           lastReason = `[${slice.accountType}] quote-apply retCode ${qRetCode}: ${qRetMsg}`;
+          anyHardFailure = true;
           continue;
         }
         const qResult   = (qData['result'] as Record<string, unknown>) ?? {};
@@ -771,6 +828,7 @@ export class BybitAdapter implements ExchangeAdapter {
         const toAmount  = parseFloat(String(qResult['toAmount'] ?? '0')) || 0;
         if (!quoteTxId) {
           lastReason = `[${slice.accountType}] quote-apply returned no quoteTxId (retMsg: ${qRetMsg || 'n/a'})`;
+          anyHardFailure = true;
           continue;
         }
 
@@ -784,6 +842,7 @@ export class BybitAdapter implements ExchangeAdapter {
 
         if (!rE.ok) {
           lastReason = `[${slice.accountType}] ${rE.error?.message ?? 'Convert execute failed'}`;
+          anyHardFailure = true;
           continue;
         }
         const eData    = (rE.data as Record<string, unknown>) ?? {};
@@ -791,31 +850,72 @@ export class BybitAdapter implements ExchangeAdapter {
         const eRetMsg  = String(eData['retMsg'] ?? '');
         if (eRetCode !== 0) {
           lastReason = `[${slice.accountType}] convert-execute retCode ${eRetCode}: ${eRetMsg}`;
+          anyHardFailure = true;
           continue;
         }
 
-        anySucceeded = true;
-        assetReceived += toAmount;
-        rawDetails.push({ asset, accountType: slice.accountType, quoteTxId, toAmount, exec: eData['result'] });
+        // ── Step 3: poll convert-result-query until SUCCESS / FAILURE / timeout ─
+        // Settlement outcome is tracked PER SLICE so a partially-settled asset
+        // (e.g. UNIFIED settled, FUND still pending) shows up in BOTH `swept`
+        // and `pending` — the user sees "1 conversion landed, 1 still
+        // settling" instead of a misleading all-clear.
+        const settled = await pollConvertResult(quoteTxId, slice.accountType);
+        if (settled.status === 'success') {
+          anySucceeded = true;
+          // Prefer the settled toAmount when the venue reports it; fall back
+          // to the quote estimate so we still credit something to the toast.
+          const credited = settled.toAmount && settled.toAmount > 0 ? settled.toAmount : toAmount;
+          assetReceived += credited;
+          rawDetails.push({ asset, accountType: slice.accountType, quoteTxId, toAmount: credited, exec: eData['result'], settled: settled.raw });
+        } else if (settled.status === 'failure') {
+          lastReason = `[${slice.accountType}] ${settled.reason ?? 'Bybit reported FAILURE'}`;
+          anyHardFailure = true;
+          rawDetails.push({ asset, accountType: slice.accountType, quoteTxId, exec: eData['result'], settled: settled.raw });
+        } else {
+          // Still pending after timeout — record this slice so the UI can
+          // show "still settling" even if a sibling slice already settled.
+          anyPending = true;
+          pending.push({
+            asset,
+            reason: `[${slice.accountType}] ${settled.reason ?? 'still settling on Bybit'}`,
+            quoteTxId,
+          });
+          rawDetails.push({ asset, accountType: slice.accountType, quoteTxId, exec: eData['result'], settled: settled.raw, pending: true });
+        }
       }
 
+      // Asset-level rollup: `swept` and `pending` are independent — an asset
+      // with mixed outcomes appears in both. `failed` only fires when no
+      // slice settled and none is still pending (i.e. every slice hit a hard
+      // failure, so there's no chance the funds will land later).
       if (anySucceeded) {
         swept.push(asset);
         totalReceived += assetReceived;
-      } else {
+      }
+      if (!anySucceeded && !anyPending && anyHardFailure) {
         failed.push({ asset, reason: lastReason });
       }
+    }
+
+    const noteParts: string[] = [];
+    if (swept.length > 0) {
+      noteParts.push('Converted via Bybit Coin Exchange — funds land in the same wallet the source asset was held in.');
+    }
+    if (pending.length > 0) {
+      noteParts.push(
+        `${pending.length} conversion${pending.length === 1 ? '' : 's'} accepted but still settling on Bybit — ` +
+        `the USDT will appear in your wallet shortly.`,
+      );
     }
 
     return {
       exchange:      'bybit',
       swept,
       failed,
+      ...(pending.length > 0 ? { pending } : {}),
       ...(totalReceived > 0 ? { totalReceived } : {}),
       receivedAsset: 'USDT',
-      ...(swept.length > 0
-        ? { note: 'Converted via Bybit Coin Exchange — funds land in the same wallet the source asset was held in.' }
-        : {}),
+      ...(noteParts.length > 0 ? { note: noteParts.join(' ') } : {}),
       raw: rawDetails,
     };
   }

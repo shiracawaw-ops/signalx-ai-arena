@@ -254,5 +254,11 @@ export interface DustSweepResult {
   receivedAsset?:  string;
   /** Free-form note shown verbatim under the toast (e.g. fee disclosures). */
   note?:           string;
+  /**
+   * Conversions that the venue accepted but were still settling when we gave
+   * up polling. The UI should show these as "still settling" rather than as
+   * failures — the funds will land in the wallet shortly.
+   */
+  pending?:        Array<{ asset: string; reason: string; quoteTxId?: string }>;
   raw?:            unknown;
 }
