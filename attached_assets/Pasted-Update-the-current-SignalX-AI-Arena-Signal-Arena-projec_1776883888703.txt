@@ -1,0 +1,332 @@
+Update the current SignalX AI Arena / Signal Arena project directly.
+
+Do not create a new project.
+Do not redesign the whole UI.
+Keep the current interface style and structure as much as possible.
+Modify the actual live trading engine, actual bot selection logic, actual capital logic, and actual real-mode execution path.
+
+MAIN OBJECTIVE:
+Stop losing bots from using real money.
+Allow REAL MODE only for bots that produce real NET PROFIT after fees.
+Make the system stricter, smarter, and more selective so it trades fewer bad setups and more valid profitable ones.
+
+Important:
+Do not optimize for cosmetic activity, bot count, or dashboard appearance.
+Optimize for:
+- real net profitability after fees
+- lower rejection rate
+- better bot selection
+- better trade quality
+- safer real capital deployment
+- cleaner exchange-compliant execution
+
+Do not promise guaranteed profit.
+The correct goal is:
+- stop weak bots from trading real money
+- let only profitable and healthy bots use real balance
+- improve trade quality
+- reduce low-quality and invalid trades
+- improve realized results after fees
+
+==================================================
+PHASE 1 — REAL MODE MUST BE RESTRICTED TO PROFITABLE BOTS ONLY
+==================================================
+
+Implement a strict real-mode eligibility system.
+
+A bot may use REAL MODE only if it passes all of the following:
+- positive net realized PnL after fees
+- acceptable rejection rate
+- acceptable execution quality
+- acceptable recent performance
+- acceptable drawdown
+- no repeated unstable behavior
+- no noisy invalid order behavior
+
+If a bot becomes net losing after fees, it must automatically:
+- lose real-mode eligibility
+- be demoted to standby or paper mode
+- stop receiving real capital
+- be clearly marked as not eligible for real balance
+
+Create a real eligibility gate based on:
+- net realized PnL after fees
+- recent closed-trade performance
+- rejection rate
+- stability score
+- execution quality score
+- recent drawdown
+- doctor health status
+
+Add bot real-mode states:
+- real_eligible
+- real_ineligible
+- standby
+- paper_only
+- benched
+- degraded
+- blocked
+
+==================================================
+PHASE 2 — STOP LOSING BOTS AUTOMATICALLY
+==================================================
+
+Implement strict bot shutdown / demotion rules for weak bots.
+
+A bot must be automatically removed from real trading if any of these occur:
+- net realized PnL after fees turns negative beyond configured threshold
+- reject rate becomes too high
+- repeated invalid attempts occur
+- it creates excessive dust / unsellable leftovers
+- execution quality becomes poor
+- it underperforms against stronger available bots
+
+Add configurable rules such as:
+- remove from real mode after X losing closed trades in a row
+- remove from real mode if net PnL after fees over recent window is below threshold
+- remove from real mode if reject % exceeds threshold
+- remove from real mode if too many exchange-invalid attempts occur
+
+Important:
+Do not let weak bots keep trading real money just because they have a high cosmetic score.
+
+==================================================
+PHASE 3 — APPLY THE PROFITABLE STRATEGY RULES WE DISCUSSED
+==================================================
+
+Implement the stricter profitable strategy behavior:
+
+1) Fewer but higher-quality trades
+- do not trade every weak signal
+- prefer fewer cleaner setups over many noisy entries
+- reject low-edge trades before submission
+
+2) Trend-following first
+Prioritize profitable trend-style entries with confirmation:
+- trend direction confirmed
+- momentum confirmed
+- liquidity acceptable
+- spread acceptable
+- slippage acceptable
+- expected edge large enough to beat fees
+
+3) Profit-after-fees filter
+Before any trade, estimate whether the setup still has sufficient edge after:
+- entry fee
+- exit fee
+- spread
+- slippage buffer
+
+If the expected edge is too small after costs, skip the trade.
+
+4) Exit quality
+- avoid poor exits that create dust
+- avoid rapid churn exits with no net edge
+- prefer clean full exits or safe partial exits only when the remainder is still valid and sellable
+
+5) Low-quality trade suppression
+Skip trades when:
+- market is too noisy
+- edge is too small
+- slippage risk too high
+- spread too wide
+- expected profit does not justify costs
+
+==================================================
+PHASE 4 — REAL AVAILABLE BALANCE MUST BE CALCULATED CORRECTLY
+==================================================
+
+Before any order, calculate the real available balance correctly.
+
+Do not rely on one ambiguous number.
+
+Distinguish clearly between:
+- total account value
+- current equity
+- free available balance
+- reserved balance
+- capital already allocated to open positions
+- capital reserved for fees
+- capital reserved for safety buffer
+- per-bot available allocation
+
+Required behavior:
+- use true free tradable balance for sizing
+- do not size orders from total wallet value if part of it is already committed
+- do not allow bots to overspend balance
+- do not allow repeated insufficient_balance situations
+- reflect real available balance consistently in the execution engine and UI
+
+==================================================
+PHASE 5 — MINIMUM ORDER VALIDATION BEFORE SUBMISSION
+==================================================
+
+Before any BUY or SELL order:
+- fetch and validate live exchange requirements
+- verify min notional / minimum order value
+- verify min quantity
+- verify qty step size
+- verify price precision
+- verify sellable quantity exists
+- verify order remains valid after rounding
+
+Strict rule:
+If the order would violate exchange minimums, do not submit it.
+
+Prevent these failures before submission:
+- below_min_notional
+- retCode=170140
+- invalid tiny orders
+- unsellable partial exits
+- dust-generating exits when avoidable
+
+For sells:
+- verify the real owned quantity
+- verify the owned quantity is actually sellable
+- do not try to sell unsellable dust repeatedly
+
+==================================================
+PHASE 6 — SMARTER AND CLEARER BOT SELECTION GATE
+==================================================
+
+Make the bot-selection gate smarter and clearer.
+
+Current issue to solve:
+The fleet gate should not reject good opportunities unnecessarily, and should not allow bad or non-executable trades through.
+
+Improve the fleet gate so it considers:
+- net realized PnL after fees
+- recent real performance
+- execution quality
+- rejection rate
+- market regime fit
+- available capital quality
+- trade edge quality
+- exchange compliance probability
+- doctor health status
+
+The gate must:
+- promote better bots
+- demote weak bots
+- prefer bots that actually make money after fees
+- avoid sending trades that are likely to fail
+- avoid excluding strong profitable bots without explanation
+
+Add clear gate outcomes such as:
+- approved_for_real_trade
+- rejected_low_edge
+- rejected_low_profit_after_fees
+- rejected_insufficient_real_balance
+- rejected_below_min_notional
+- rejected_unhealthy_bot
+- rejected_lower_rank_than_active_bots
+- rejected_market_regime_mismatch
+
+==================================================
+PHASE 7 — REAL NET PROFIT MUST BECOME THE PRIMARY METRIC
+==================================================
+
+Rank and manage bots by real net profitability after fees.
+
+For each bot, show clearly:
+- net realized PnL after fees
+- gross realized PnL
+- unrealized PnL
+- total fees paid
+- recent performance
+- reject rate
+- execution quality
+- real capital eligibility
+- current real-mode status
+
+Use net realized PnL after fees as the primary metric for real-capital access.
+
+Do not use:
+- score only
+- cosmetic ranking
+- projected return
+- unrealized movement only
+as the main basis for real-mode eligibility.
+
+==================================================
+PHASE 8 — REDUCE BAD REAL TRADES AND INVALID ATTEMPTS
+==================================================
+
+Reduce:
+- invalid exchange requests
+- insufficient balance attempts
+- below minimum order attempts
+- noisy low-edge entries
+- repeated cooldown spam
+- repeated reject loops
+- dust-related sell attempts
+- weak-bot real trades
+
+Target behavior:
+- fewer trades, higher quality
+- more executed valid trades
+- lower reject count
+- stronger realized results
+- cleaner logs
+
+==================================================
+PHASE 9 — BOT DOCTOR SHOULD ENFORCE REAL PROFIT DISCIPLINE
+==================================================
+
+If Bot Doctor is enabled in real mode, it must support this stricter profitability discipline.
+
+Bot Doctor should:
+- downgrade losing bots
+- bench unhealthy bots
+- remove real-mode eligibility from weak bots
+- recommend lower real bot count if capital becomes too thin
+- suppress invalid retries
+- identify bots that churn fees without edge
+- promote healthier profitable standby bots
+
+Bot Doctor must help enforce:
+- only profitable bots get real capital
+- only valid trades reach the exchange
+- only exchange-compliant trades are submitted
+
+==================================================
+PHASE 10 — UI / DASHBOARD CLARITY
+==================================================
+
+Add or refine UI panels so I can clearly see:
+- which bots are real-eligible
+- which bots are removed from real mode
+- why they were removed
+- which bots are currently trading real money
+- net realized PnL after fees per bot
+- total fees per bot
+- current real balance available
+- rejected trades by reason
+- fleet gate decision reason
+
+The UI must make it obvious:
+- which bots are actually profitable
+- which bots are losing money
+- which bots are allowed to touch real capital
+- which trades were skipped because they were not worth taking
+
+==================================================
+FINAL IMPLEMENTATION RULES
+==================================================
+
+- Do not leave this as display-only logic
+- Modify the actual live decision engine and real-mode gating
+- Stop losing bots from trading real money
+- Let only profitable and healthy bots use real balance
+- Use real available balance correctly before execution
+- Enforce minimum order validation before submission
+- Make bot selection stricter, smarter, and clearer
+- Keep the current UI style
+- Return the updated working code and summarize:
+  - files changed
+  - real-mode eligibility rules added
+  - losing-bot stop logic added
+  - real available balance logic
+  - minimum order validation logic
+  - fleet gate improvements
+  - how to test safely
