@@ -1,9 +1,12 @@
 
-import { useState, useMemo, useCallback, memo } from 'react';
+import { useState, useMemo, useCallback, memo, useEffect } from 'react';
 import { useArena } from '@/hooks/use-arena';
 import { getBotTotalValue, getBotPnL, getBotPnLPercent } from '@/lib/engine';
 import { computeAllIndicators } from '@/lib/indicators';
 import { SYMBOLS, STRATEGIES, CATEGORIES, ASSETS, ASSET_MAP } from '@/lib/storage';
+import { useBotDoctor, type DustMark } from '@/lib/bot-doctor-store';
+import { exchangeMode, type ExchangeModeState } from '@/lib/exchange-mode';
+import { baseTicker } from '@/lib/risk-manager';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -14,8 +17,10 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { ResponsiveContainer, LineChart, Line } from 'recharts';
+import { Sparkles } from 'lucide-react';
 
 function fmt(n: number, dec = 2) {
   return n.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
@@ -128,12 +133,13 @@ function AddBotDialog({ onAdd }: { onAdd: (name: string, symbol: string, strateg
 interface BotCardProps {
   bot: any; price: number; priceChange: number; pnl: number; pnlPct: number; totalValue: number;
   tradeCount: number; candles: any[];
+  dust: DustMark | null;
   toggleBot: (id: string) => void;
   resetBot:  (id: string) => void;
   removeBot: (id: string) => void;
 }
 const BotCard = memo(function BotCard({
-  bot, price, priceChange: _priceChange, pnl, pnlPct, totalValue, tradeCount, candles,
+  bot, price, priceChange: _priceChange, pnl, pnlPct, totalValue, tradeCount, candles, dust,
   toggleBot, resetBot, removeBot,
 }: BotCardProps) {
   const [showInd, setShowInd] = useState(false);
@@ -195,8 +201,29 @@ const BotCard = memo(function BotCard({
             <span className="font-mono">${fmt(bot.balance)}</span>
           </div>
           {bot.position > 0 && (
-            <div className="col-span-2 text-[10px] text-muted-foreground">
-              Pos: {fmt(bot.position, 3)} @ ${fmt(bot.avgEntryPrice)}
+            <div className="col-span-2 text-[10px] text-muted-foreground flex items-center gap-1.5 flex-wrap">
+              <span>Pos: {fmt(bot.position, 3)} @ ${fmt(bot.avgEntryPrice)}</span>
+              {dust && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 text-[9px] font-semibold uppercase tracking-wide"
+                      data-testid={`badge-bot-dust-${bot.id}`}
+                      aria-label={`${bot.symbol} marked as dust on ${dust.exchange}`}
+                    >
+                      <Sparkles size={9} />
+                      Dust
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" className="max-w-xs text-xs">
+                    <div className="font-semibold mb-1">Marked as dust on {dust.exchange}</div>
+                    <div className="text-zinc-300 mb-1">{dust.reason}</div>
+                    <div className="text-[10px] text-zinc-400">
+                      Marked {new Date(dust.markedAt).toLocaleString()}
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
+              )}
             </div>
           )}
         </div>
@@ -230,6 +257,8 @@ const BotCard = memo(function BotCard({
   if (Math.abs(prev.pnl - next.pnl) > 0.005) return false;
   if (Math.abs(prev.price - next.price) > 0.0001) return false;
   if (Math.abs(prev.totalValue - next.totalValue) > 0.005) return false;
+  if ((prev.dust?.markedAt ?? 0) !== (next.dust?.markedAt ?? 0)) return false;
+  if ((prev.dust?.reason ?? '') !== (next.dust?.reason ?? '')) return false;
   return true; // same — skip re-render
 });
 
@@ -244,6 +273,11 @@ export default function ArenaPage() {
   const [categoryFilter, setCategoryFilter] = useState<string>('ALL');
   const [symbolFilter, setSymbolFilter] = useState<string>('ALL');
   const [strategyFilter, setStrategyFilter] = useState<string>('ALL');
+
+  // Dust warnings — match Wallet/Holdings: scoped to the active exchange.
+  const doctor = useBotDoctor();
+  const [exState, setExState] = useState<ExchangeModeState>(() => exchangeMode.get());
+  useEffect(() => exchangeMode.subscribe(setExState), []);
 
   const sorted = useMemo(() => {
     return [...bots].sort((a, b) =>
@@ -400,6 +434,9 @@ export default function ArenaPage() {
                 const pnl = getBotPnL(bot, price);
                 const pnlPct = getBotPnLPercent(bot, price);
                 const tradeCount = tradeCountMap.get(bot.id) ?? 0;
+                const dust = exState.exchange
+                  ? doctor.dust[`${exState.exchange}:${baseTicker(bot.symbol)}`] ?? null
+                  : null;
 
                 return (
                   <BotCard
@@ -412,6 +449,7 @@ export default function ArenaPage() {
                     totalValue={totalValue}
                     tradeCount={tradeCount}
                     candles={candles}
+                    dust={dust}
                     toggleBot={toggleBot}
                     resetBot={resetBot}
                     removeBot={removeBot}
