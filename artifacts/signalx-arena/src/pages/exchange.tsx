@@ -48,6 +48,14 @@ import {
   openSweepDustDialog,
   type SweepDustDialogState,
 } from '@/lib/sweep-dust-dialog';
+import {
+  buildClosePositionPlan,
+  cancelClosePositionDialog,
+  confirmClosePositionDialog,
+  initialClosePositionDialogState,
+  openClosePositionDialog,
+  type ClosePositionDialogState,
+} from '@/lib/close-position-dialog';
 import { botDoctorStore, useBotDoctor } from '@/lib/bot-doctor-store';
 import type { SymbolRules } from '@/lib/risk-manager';
 import { submitManualOrder }      from '@/lib/live-execution-bridge';
@@ -437,6 +445,13 @@ export default function ExchangePage() {
   // and the venue's expected payout token before signing off.
   const [sweepDustDialog, setSweepDustDialog] =
     useState<SweepDustDialogState>(initialSweepDustDialogState);
+
+  // Real-mode confirmation dialog for "Close position". Mirrors the styling
+  // of the sweep-dust and cancel-all dialogs and replaces the legacy
+  // window.confirm prompt so the user can review the asset, available qty,
+  // and approximate USDT value being flattened before signing off.
+  const [closePositionDialog, setClosePositionDialog] =
+    useState<ClosePositionDialogState>(initialClosePositionDialogState);
 
   // ── Cancel-all-open-orders state ───────────────────────────────────────────
   // `cancelAllOpen` toggles the Real-mode "type CANCEL ALL" confirmation dialog.
@@ -896,63 +911,17 @@ export default function ExchangePage() {
   // perms, dedupe, retry, risk-manager). The amount sized by the engine is
   // governed by trade-config (same as any other signal) — this is intentional
   // so users can't bypass risk caps via close-position.
-  const closePosition = useCallback(async (asset: string) => {
+  //
+  // Split into two callbacks so the Real-mode confirmation dialog can defer
+  // the actual order submission until the user confirms (mirrors the
+  // sweepDust → executeSweepDust split):
+  //   * `executeClosePosition` — does the actual order work.
+  //   * `closePosition`        — runs the preflight, then either opens the
+  //                              styled per-asset confirmation dialog (Real
+  //                              mode) or calls `executeClosePosition`
+  //                              directly (Testnet).
+  const executeClosePosition = useCallback(async (asset: string) => {
     if (!asset) return;
-    if (mode !== 'real' && mode !== 'testnet') {
-      toast({ title: 'Close unavailable', description: 'Switch to Real or Testnet mode to close live positions.', variant: 'destructive' });
-      return;
-    }
-
-    // Preflight: classify the holding using cached symbol rules. If the
-    // classifier says it's not closable (dust, rules unknown, wallet-only),
-    // surface the exact reason and bail BEFORE we hit the network. This is
-    // the same gate the engine applies upfront — keeping it here means the
-    // user gets an instant, descriptive toast instead of a delayed reject.
-    try {
-      const row = liveBalances.find(b => b.asset === asset);
-      if (row) {
-        const upper   = row.asset.toUpperCase();
-        const isStableAsset = isStable(upper);
-        const ledgerOwned = getOwned(selectedEx.id, upper);
-        const compl  = resolveCompliance(asset, selectedEx.id as ExchangeId);
-        const cachedRules = compl.ok
-          ? pipelineCache.get<SymbolRules>(`rules:${selectedEx.id}:${compl.exchangeSymbol}`)
-          : undefined;
-        const verdict = classifyHolding({
-          asset:        upper,
-          available:    row.available,
-          hold:         row.hold,
-          ...(typeof row.usdtValue === 'number' ? { usdtValue: row.usdtValue } : {}),
-          exchange:     selectedEx.id,
-          ...(cachedRules ? { symbolRules: cachedRules } : {}),
-          trackedQty:   ledgerOwned,
-          isDustMarked: botDoctorStore.isDust(selectedEx.id, upper),
-          ...(botDoctorStore.isDust(selectedEx.id, upper)
-            ? { dustReason: botDoctorStore.dustList().find(d => d.exchange === selectedEx.id && d.baseAsset === upper)?.reason ?? '' }
-            : {}),
-          isStable: isStableAsset,
-        });
-        if (!verdict.canClose) {
-          if (verdict.reason === 'unsellable_dust' || verdict.reason === 'below_min_notional' ||
-              verdict.reason === 'below_min_sell_qty' || verdict.reason === 'residual_unsellable') {
-            botDoctorStore.markDustWithReason(selectedEx.id, upper, verdict.reason, verdict.detail);
-          }
-          toast({ title: 'Close blocked', description: verdict.detail, variant: 'destructive' });
-          return;
-        }
-      }
-    } catch (e) { console.warn('[closePosition] preflight skipped:', (e as Error).message); }
-
-    if (mode === 'real') {
-      const ok = window.confirm(
-        `Close ${asset} position on ${selectedEx.name}?\n\n` +
-        `This submits a MARKET SELL through the trading engine. The size is ` +
-        `governed by your Trade Config (not the full balance) so risk caps still apply.\n\n` +
-        `Continue?`
-      );
-      if (!ok) return;
-    }
-
     setClosingPositions(prev => { const n = new Set(prev); n.add(asset); return n; });
     const key = closeKey(asset);
     orderProgress.start({
@@ -1067,6 +1036,64 @@ export default function ExchangePage() {
       refreshLiveData();
     }
   }, [mode, selectedEx.id, selectedEx.name, apiKey, secretKey, passphrase, toast, refreshLiveData]);
+
+  const closePosition = useCallback(async (asset: string) => {
+    if (!asset) return;
+    if (mode !== 'real' && mode !== 'testnet') {
+      toast({ title: 'Close unavailable', description: 'Switch to Real or Testnet mode to close live positions.', variant: 'destructive' });
+      return;
+    }
+
+    // Preflight: classify the holding using cached symbol rules. If the
+    // classifier says it's not closable (dust, rules unknown, wallet-only),
+    // surface the exact reason and bail BEFORE we hit the network. This is
+    // the same gate the engine applies upfront — keeping it here means the
+    // user gets an instant, descriptive toast instead of a delayed reject.
+    try {
+      const row = liveBalances.find(b => b.asset === asset);
+      if (row) {
+        const upper   = row.asset.toUpperCase();
+        const isStableAsset = isStable(upper);
+        const ledgerOwned = getOwned(selectedEx.id, upper);
+        const compl  = resolveCompliance(asset, selectedEx.id as ExchangeId);
+        const cachedRules = compl.ok
+          ? pipelineCache.get<SymbolRules>(`rules:${selectedEx.id}:${compl.exchangeSymbol}`)
+          : undefined;
+        const verdict = classifyHolding({
+          asset:        upper,
+          available:    row.available,
+          hold:         row.hold,
+          ...(typeof row.usdtValue === 'number' ? { usdtValue: row.usdtValue } : {}),
+          exchange:     selectedEx.id,
+          ...(cachedRules ? { symbolRules: cachedRules } : {}),
+          trackedQty:   ledgerOwned,
+          isDustMarked: botDoctorStore.isDust(selectedEx.id, upper),
+          ...(botDoctorStore.isDust(selectedEx.id, upper)
+            ? { dustReason: botDoctorStore.dustList().find(d => d.exchange === selectedEx.id && d.baseAsset === upper)?.reason ?? '' }
+            : {}),
+          isStable: isStableAsset,
+        });
+        if (!verdict.canClose) {
+          if (verdict.reason === 'unsellable_dust' || verdict.reason === 'below_min_notional' ||
+              verdict.reason === 'below_min_sell_qty' || verdict.reason === 'residual_unsellable') {
+            botDoctorStore.markDustWithReason(selectedEx.id, upper, verdict.reason, verdict.detail);
+          }
+          toast({ title: 'Close blocked', description: verdict.detail, variant: 'destructive' });
+          return;
+        }
+      }
+    } catch (e) { console.warn('[closePosition] preflight skipped:', (e as Error).message); }
+
+    if (mode === 'real') {
+      // Defer the actual order submission until the user confirms via the
+      // styled per-asset dialog below. Mirrors how `sweepDust` defers to
+      // `executeSweepDust` after the sweep-dust confirmation dialog.
+      setClosePositionDialog(openClosePositionDialog(asset));
+      return;
+    }
+
+    await executeClosePosition(asset);
+  }, [mode, selectedEx.id, liveBalances, toast, executeClosePosition]);
 
   // Dismiss an inline progress panel and stop any active poller.
   const dismissProgress = useCallback((key: string) => {
@@ -2467,6 +2494,81 @@ export default function ExchangePage() {
                   data-testid="button-sweep-dust-confirm"
                 >
                   Sweep {plan.rows.length} asset{plan.rows.length === 1 ? '' : 's'}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        );
+      })()}
+
+      {/* Real-mode close-position confirmation. Mirrors the styling of the
+          sweep-dust and cancel-all dialogs and shows the asset, available
+          qty, and approximate USDT value being flattened. Replaces the
+          legacy window.confirm prompt. */}
+      {(() => {
+        const plan = buildClosePositionPlan({
+          exchangeId:   selectedEx.id,
+          exchangeName: selectedEx.name,
+          asset:        closePositionDialog.asset,
+          balances:     liveBalances,
+        });
+        return (
+          <Dialog
+            open={closePositionDialog.open}
+            onOpenChange={(o) => { if (!o) setClosePositionDialog(cancelClosePositionDialog()); }}
+          >
+            <DialogContent className="border-amber-500/40" data-testid="dialog-close-position">
+              <DialogHeader>
+                <DialogTitle className="text-amber-300 flex items-center gap-2">
+                  <Wallet size={16} />
+                  Close {plan.asset} position on {plan.exchangeName}?
+                </DialogTitle>
+                <DialogDescription className="text-zinc-300">
+                  This submits a <span className="font-semibold text-amber-300">MARKET SELL</span>{' '}
+                  through the trading engine. The size is governed by your
+                  Trade Config (not the full balance) so risk caps still
+                  apply. This action cannot be undone.
+                </DialogDescription>
+              </DialogHeader>
+              <div
+                className="rounded-md border border-zinc-800/60 bg-zinc-950/40 divide-y divide-zinc-800/60"
+                data-testid="list-close-position-asset"
+              >
+                <div
+                  className="flex items-center justify-between px-3 py-2 text-xs"
+                  data-testid={`row-close-position-${plan.asset}`}
+                >
+                  <span className="font-mono font-semibold text-zinc-100">{plan.asset}</span>
+                  <span className="text-zinc-400">
+                    <span data-testid="text-close-position-available">{fmt(plan.available, 6)}</span>
+                    <span className="text-zinc-600 mx-1">{'\u2192'}</span>
+                    <span className="text-amber-300 font-semibold">
+                      {typeof plan.usdValue === 'number' ? `\u2248 $${fmt(plan.usdValue)}` : '\u2248 $—'}
+                    </span>
+                    <span className="text-zinc-500"> on {plan.exchangeName}</span>
+                  </span>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => setClosePositionDialog(cancelClosePositionDialog())}
+                  data-testid="button-close-position-cancel"
+                >
+                  Keep position
+                </Button>
+                <Button
+                  variant="default"
+                  className="bg-amber-500 text-zinc-950 hover:bg-amber-400"
+                  disabled={!closePositionDialog.asset}
+                  onClick={() => {
+                    const { asset, next } = confirmClosePositionDialog(closePositionDialog);
+                    setClosePositionDialog(next);
+                    void executeClosePosition(asset);
+                  }}
+                  data-testid="button-close-position-confirm"
+                >
+                  Close {plan.asset}
                 </Button>
               </DialogFooter>
             </DialogContent>
