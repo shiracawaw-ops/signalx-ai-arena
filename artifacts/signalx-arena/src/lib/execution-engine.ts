@@ -630,8 +630,17 @@ export const _tests = {
     lastTradeTs     = 0;
     recentSignals   = [];
     openPositionCount = 0;
+    feGates.clear();
   },
   getState() {
     return { dailyTradeCount, lastTradeTs, recentSignals: [...recentSignals], openPositionCount, credentials: !!credentials };
+  },
+  /** Read-only peek at the per-(exchange,symbol) cooldown counter. Used by tests
+   *  that assert the upfront SELL gate does NOT bump cooldown for dust rejects. */
+  getFeFails(exchange: string, symbol: string, mode: 'real' | 'demo' = 'real'): number {
+    return feGates.get(feGateKey(exchange, symbol, mode))?.fails ?? 0;
+  },
+  feNoteFailure(exchange: string, symbol: string, mode: 'real' | 'demo' = 'real') {
+    feNoteFailure(feGateKey(exchange, symbol, mode));
   },
 };

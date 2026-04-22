@@ -217,6 +217,65 @@ export async function runAll(): Promise<void> {
     assert(Math.abs((risk.quantity ?? 0) - expectedQty) < 0.001, `Quantity mismatch: ${risk.quantity} vs ~${expectedQty}`);
   }));
 
+  // T13 + T14 — Task #77 upfront SELL gate (browser-side counterpart of
+  // execution-engine.upfront-sell.unit.test.ts; full coverage lives in vitest).
+  results.push(await test('upfront SELL gate rejects dust SELL before network', async () => {
+    const { recordBuy, _resetInternalPositions } = await import('./internal-positions.js');
+    const { pipelineCache } = await import('./pipeline-cache.js');
+    const { botDoctorStore } = await import('./bot-doctor-store.js');
+    _tests.resetCounters();
+    _resetInternalPositions();
+    pipelineCache.clearAll();
+    botDoctorStore.reset();
+    setCredentials({ apiKey: 'k', apiSecret: 's' } as never);
+    exchangeMode.update({
+      mode: 'real', exchange: 'binance',
+      networkUp: true, apiValidated: true, balanceFetched: true, armed: true,
+      permissions: { read: true, trade: true, withdraw: false },
+    });
+    recordBuy('binance', 'XRP', 5, 0.5);
+    pipelineCache.set('rules:binance:XRPUSDT', {
+      symbol: 'XRPUSDT', minQty: 0.0001, maxQty: 1e9, stepSize: 0.0001,
+      minNotional: 10, tickSize: 0.0001,
+    }, 600_000);
+    const res = await executeSignal(makeSignal({ symbol: 'XRP', side: 'sell', price: 0.5 }));
+    assert(!res.ok, 'Dust SELL must be rejected by upfront gate');
+    assert(res.rejectReason === REJECT.OWNED_QTY_BELOW_MIN_NOTIONAL,
+      `Reject reason should be OWNED_QTY_BELOW_MIN_NOTIONAL, got: ${res.rejectReason}`);
+    assert(botDoctorStore.isDust('binance', 'XRP'), 'Dust mark must be applied');
+  }));
+
+  results.push(await test('upfront SELL gate does NOT bump per-symbol cooldown counter', async () => {
+    const { recordBuy, _resetInternalPositions } = await import('./internal-positions.js');
+    const { pipelineCache } = await import('./pipeline-cache.js');
+    const { botDoctorStore } = await import('./bot-doctor-store.js');
+    _tests.resetCounters();
+    _resetInternalPositions();
+    pipelineCache.clearAll();
+    botDoctorStore.reset();
+    setCredentials({ apiKey: 'k', apiSecret: 's' } as never);
+    exchangeMode.update({
+      mode: 'real', exchange: 'binance',
+      networkUp: true, apiValidated: true, balanceFetched: true, armed: true,
+      permissions: { read: true, trade: true, withdraw: false },
+    });
+    recordBuy('binance', 'XRP', 5, 0.5);
+    pipelineCache.set('rules:binance:XRPUSDT', {
+      symbol: 'XRPUSDT', minQty: 0.0001, maxQty: 1e9, stepSize: 0.0001,
+      minNotional: 10, tickSize: 0.0001,
+    }, 600_000);
+    // Iter 1: upfront gate (OWNED_QTY_BELOW_MIN_NOTIONAL). Iter 2+: doctor
+    // dust gate (BELOW_MIN_NOTIONAL). Both must skip feNoteFailure.
+    for (let i = 0; i < 5; i++) {
+      const r = await executeSignal(makeSignal({ symbol: 'XRP', side: 'sell', price: 0.5 }));
+      const isDustReject = !r.ok && (r.rejectReason === REJECT.OWNED_QTY_BELOW_MIN_NOTIONAL ||
+                                     r.rejectReason === REJECT.BELOW_MIN_NOTIONAL);
+      assert(isDustReject, `Iteration ${i} should be a dust reject, got: ${r.rejectReason}`);
+    }
+    const fails = _tests.getFeFails('binance', 'XRP', 'real');
+    assert(fails === 0, `feFails for binance:XRP must remain 0, got ${fails}`);
+  }));
+
   // Summary
   const passed = results.filter(r => r.ok).length;
   const failed = results.filter(r => !r.ok).length;

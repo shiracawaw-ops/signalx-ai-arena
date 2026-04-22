@@ -905,6 +905,9 @@ export default function ExchangePage() {
           ...(cachedRules ? { symbolRules: cachedRules } : {}),
           trackedQty:   ledgerOwned,
           isDustMarked: botDoctorStore.isDust(selectedEx.id, upper),
+          ...(botDoctorStore.isDust(selectedEx.id, upper)
+            ? { dustReason: botDoctorStore.dustList().find(d => d.exchange === selectedEx.id && d.baseAsset === upper)?.reason ?? '' }
+            : {}),
           isStable,
         });
         if (!verdict.canClose) {
@@ -3344,6 +3347,10 @@ function ClassifiedBalances(p: ClassifiedBalancesProps) {
     const cachedRules = compl.ok
       ? pipelineCache.get<SymbolRules>(`rules:${p.exchangeId}:${compl.exchangeSymbol}`)
       : undefined;
+    const dustMarked = botDoctorStore.isDust(p.exchangeId, upper);
+    const dustEntry  = dustMarked
+      ? botDoctorStore.dustList().find(d => d.exchange === p.exchangeId && d.baseAsset === upper)
+      : undefined;
     const verdict: ClassifyResult = classifyHolding({
       asset:     upper,
       available: b.available,
@@ -3352,7 +3359,8 @@ function ClassifiedBalances(p: ClassifiedBalancesProps) {
       exchange:  p.exchangeId,
       ...(cachedRules ? { symbolRules: cachedRules } : {}),
       trackedQty: tracked,
-      isDustMarked: botDoctorStore.isDust(p.exchangeId, upper),
+      isDustMarked: dustMarked,
+      ...(dustEntry?.reason ? { dustReason: dustEntry.reason } : {}),
       isStable,
     });
     return { row: b, verdict };

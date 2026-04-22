@@ -150,4 +150,16 @@ describe('classifyHolding', () => {
     expect(r.canClose).toBe(false);
     expect(r.reason).toBe('unsellable_dust');
   });
+
+  it('uses the doctor-provided dust reason text when available', () => {
+    const r = classifyHolding({
+      asset: 'XRP', available: 5, usdtValue: 3.21, exchange: 'binance',
+      symbolRules: RULES({ minNotional: 10 }),
+      isDustMarked: true,
+      dustReason: 'below_min_notional: Owned XRP value $3.21 below binance minNotional $10.',
+    });
+    expect(r.detail).toContain('$3.21');
+    expect(r.detail).toContain('$10');
+    expect(r.detail.toLowerCase()).toContain('marked dust');
+  });
 });

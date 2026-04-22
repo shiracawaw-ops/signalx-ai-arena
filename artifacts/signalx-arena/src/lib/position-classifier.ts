@@ -51,6 +51,8 @@ export interface ClassifyInput {
   trackedQty?:     number;             // qty the bot opened this session (optional)
   trackedEntry?:   number;             // entry price for residual % computation
   isDustMarked?:   boolean;            // doctor already marked this asset as dust
+  /** Optional human-readable reason from the doctor (preferred when present). */
+  dustReason?:     string;
   isStable?:       boolean;            // caller already knows USDT/USDC/etc.
   /** Residual considered "partial" when 0 < available/trackedQty <= this. Default 0.95. */
   partialThreshold?: number;
@@ -117,18 +119,24 @@ export function classifyHolding(input: ClassifyInput): ClassifyResult {
   }
 
   // ── Doctor already marked this asset as dust ──
-  // Treat as authoritative even if we have no rules cached yet.
+  // Treat as authoritative even if we have no rules cached yet. Prefer the
+  // doctor's recorded reason text (which carries the precise minNotional /
+  // minQty math from when the dust was first observed) so the UI chip and
+  // the engine reject use the same wording.
   if (isDustMarked && available > EPSILON) {
     const valueText = typeof usdtValue === 'number' ? `≈ $${fmt(usdtValue)}` : `${fmt(available, 6)} ${asset}`;
-    const baseDetail = trackedQty > 0
+    const fallback  = trackedQty > 0
       ? `Residual ${valueText} of ${asset} is below the exchange minimum and was marked dust.`
       : `${valueText} of ${asset} is below the exchange minimum and was marked dust.`;
+    const detailText = (input.dustReason && input.dustReason.trim().length > 0)
+      ? `Marked dust: ${input.dustReason}`
+      : fallback;
     return {
       category: trackedQty > 0 ? 'partial_position' : 'dust_balance',
       reason:   trackedQty > 0 ? 'residual_unsellable' : 'unsellable_dust',
       sellable: false,
       canClose: false,
-      detail:   baseDetail,
+      detail:   detailText,
       ...(minNotional > 0 ? { minNotionalUSD: minNotional } : {}),
       ...(minQty > 0      ? { minQty }                     : {}),
       ...(typeof usdtValue === 'number' ? { notionalUSD: usdtValue } : {}),
