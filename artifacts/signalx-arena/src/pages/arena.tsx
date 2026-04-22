@@ -517,6 +517,9 @@ export default function ArenaPage() {
                         const bl = ts?.losses ?? 0;
                         const wr = (bw + bl) > 0 ? (bw / (bw + bl)) * 100 : 0;
                         const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `${idx + 1}`;
+                        const dust = exState.exchange
+                          ? doctor.dust[`${exState.exchange}:${baseTicker(bot.symbol)}`] ?? null
+                          : null;
 
                         return (
                           <div key={bot.id} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-muted/20 hover:bg-muted/40 transition-colors">
@@ -524,7 +527,30 @@ export default function ArenaPage() {
                             <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: bot.color }} />
                             <div className="flex-1 min-w-0">
                               <div className="font-medium text-xs truncate">{bot.name}</div>
-                              <div className="text-[10px] text-muted-foreground">{bot.symbol} · {bot.strategy}</div>
+                              <div className="text-[10px] text-muted-foreground flex items-center gap-1.5 flex-wrap">
+                                <span>{bot.symbol} · {bot.strategy}</span>
+                                {dust && (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <span
+                                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 text-[9px] font-semibold uppercase tracking-wide flex-shrink-0"
+                                        data-testid={`badge-leaderboard-dust-${bot.id}`}
+                                        aria-label={`${bot.symbol} marked as dust on ${dust.exchange}`}
+                                      >
+                                        <Sparkles size={9} />
+                                        Dust
+                                      </span>
+                                    </TooltipTrigger>
+                                    <TooltipContent side="top" className="max-w-xs text-xs">
+                                      <div className="font-semibold mb-1">Marked as dust on {dust.exchange}</div>
+                                      <div className="text-zinc-300 mb-1">{dust.reason}</div>
+                                      <div className="text-[10px] text-zinc-400">
+                                        Marked {new Date(dust.markedAt).toLocaleString()}
+                                      </div>
+                                    </TooltipContent>
+                                  </Tooltip>
+                                )}
+                              </div>
                             </div>
                             <div className="text-right flex-shrink-0 w-24">
                               <div className="font-mono text-sm font-bold">${fmt(totalValue)}</div>
