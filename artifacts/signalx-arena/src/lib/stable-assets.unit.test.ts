@@ -21,6 +21,8 @@ describe('STABLE_ASSETS', () => {
   it('stripStableSuffix handles every quote convention and prefers longest match', () => {
     expect(stripStableSuffix('BTCUSDT')).toBe('BTC');
     expect(stripStableSuffix('BTC-USD')).toBe('BTC');
+    expect(stripStableSuffix('BTCFDUSD')).toBe('BTC');
+    expect(stripStableSuffix('BTCDAI')).toBe('BTC');
     expect(stripStableSuffix('BTC_USDC')).toBe('BTC');
     expect(stripStableSuffix('ETH/FDUSD')).toBe('ETH');
     expect(stripStableSuffix('SOLDAI')).toBe('SOL');
