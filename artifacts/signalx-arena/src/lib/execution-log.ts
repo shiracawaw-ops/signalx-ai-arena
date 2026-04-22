@@ -146,6 +146,9 @@ export const REJECT = {
   SYMBOL_NOT_IN_ALLOWLIST:    'symbol_not_in_allowlist',
   OWNED_QTY_BELOW_MIN_NOTIONAL:'owned_qty_below_min_notional',
   PRICE_DRIFT_TOO_LARGE:      'price_drift_too_large',
+  // ── Phase 2/3 quality gate ────────────────────────────────────────────────
+  LOW_TRADE_QUALITY:          'low_trade_quality',
+  EDGE_BELOW_FEES:            'edge_below_fees',
 } as const;
 
 export type RejectReason = typeof REJECT[keyof typeof REJECT];

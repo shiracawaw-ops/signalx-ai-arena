@@ -6,3 +6,9 @@ id = "ZWpaDRviUZi1NavL452D5"
 uri = "file://attached_assets/builds/SignalX-AI-Arena-Windows-61dd83d.zip"
 type = "unspecified"
 title = "SignalX AI Arena — Windows EXE (build 61dd83d)"
+
+[[outputs]]
+id = "XR8hYbK5AbY4AdDXu7A0z"
+uri = "file://dist-electron/SignalX-AI-Arena-1.5.1-Windows-Portable.zip"
+type = "unspecified"
+title = "SignalX AI Arena 1.5.1 — Windows (Portable)"

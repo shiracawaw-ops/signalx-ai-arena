@@ -15,6 +15,7 @@ import { pipelineCache, TTL } from './pipeline-cache';
 import type { SymbolRules } from './risk-manager';
 import { baseTicker } from './risk-manager';
 import { getOwned } from './internal-positions';
+import { scoreTradeQuality, type TradeQualityVerdict } from './trade-quality';
 
 export type ShieldOutcome = 'pass' | 'block' | 'warn';
 
@@ -26,6 +27,14 @@ export interface ShieldInput {
   refPrice:    number;
   credentials?: ExchangeCredentials | null;
   forceRefresh?: boolean;
+  /** ms since the originating signal was generated. Used by the trade-quality
+   *  gate to penalise stale prices. Defaults to 0 (treated as fresh). */
+  signalAgeMs?: number;
+  /** Optional caller-supplied confidence 0..100 for the quality gate. */
+  confidence?: number;
+  /** Optional caller-supplied expected edge in bps for the quality gate.
+   *  When supplied and below the round-trip fee cost the gate vetoes. */
+  expectedEdgeBps?: number;
 }
 
 /**
@@ -43,7 +52,9 @@ export type ShieldBlockCode =
   | 'below_min_notional'
   | 'invalid_order_size'
   | 'insufficient_balance'
-  | 'cooldown_active';
+  | 'cooldown_active'
+  | 'low_trade_quality'
+  | 'edge_below_fees';
 
 export interface ShieldVerdict {
   outcome:        ShieldOutcome;
@@ -57,6 +68,9 @@ export interface ShieldVerdict {
   cooldownMs:     number;
   checks:         Array<{ id: string; ok: boolean; detail: string }>;
   checkedAt:      number;
+  /** Composite trade-quality verdict, populated for buy-side preflights
+   *  whenever symbol rules are available. Closing-sells skip the gate. */
+  quality?:       TradeQualityVerdict;
 }
 
 interface RejectMemory { fails: number; lastFailAt: number; cooldownUntil: number }
@@ -211,6 +225,44 @@ export async function preflight(input: ShieldInput): Promise<ShieldVerdict> {
     checks.push({ id: 'closingSell', ok: true, detail: `Closing sell — bypassing entry-side size checks (owned ${ownedBase}).` });
   }
 
+  // ── Composite trade-quality gate (entries only) ──────────────────────────
+  // Phase 2/3 of the profitability brief: stop low-edge entries that either
+  //   • cannot exit cleanly after fees (veto), or
+  //   • score below the composite quality floor.
+  // Closing-sells must never be gated by entry-side quality — they have a
+  // dedicated upfront SELL min-notional gate in the execution engine.
+  let qualityVerdict: TradeQualityVerdict | undefined;
+  if (!isClosingSell && input.side === 'buy') {
+    const memEntry = MEMORY.get(memKey(input.exchange, compliance.exchangeSymbol));
+    qualityVerdict = scoreTradeQuality({
+      notional,
+      refPrice:        price,
+      signalAgeMs:     input.signalAgeMs ?? 0,
+      rules,
+      recentFails:     memEntry?.fails ?? 0,
+      expectedEdgeBps: input.expectedEdgeBps,
+      confidence:      input.confidence,
+      exchange:        input.exchange,
+    });
+    checks.push({
+      id:     'tradeQuality',
+      ok:     qualityVerdict.pass,
+      detail: `score ${qualityVerdict.score.toFixed(2)} / floor ${qualityVerdict.floor} — ${qualityVerdict.reason}`,
+    });
+    if (!qualityVerdict.pass) {
+      // An "edge_below_fees" or "exit notional won't clear minNotional"
+      // veto is a stronger signal than just a low composite — surface a
+      // dedicated block code so the operator/UI can show the right copy.
+      const isFeeVeto = qualityVerdict.vetoes.some(v =>
+        /round-trip cost|exit notional|after fees/i.test(v));
+      const code: ShieldBlockCode = isFeeVeto ? 'edge_below_fees' : 'low_trade_quality';
+      const verdict = finalize('block', `Trade quality: ${qualityVerdict.reason}`,
+        compliance, rules, estQty, notional, checks, code);
+      verdict.quality = qualityVerdict;
+      return verdict;
+    }
+  }
+
   // Side-aware balance peek (best-effort — do not hard-block on errors)
   // For closing-sells we trust the local ledger and let the engine's risk
   // manager clamp qty to owned amount; skip exchange balance check here.
@@ -227,7 +279,9 @@ export async function preflight(input: ShieldInput): Promise<ShieldVerdict> {
     }
   }
 
-  return finalize('pass', 'All pre-flight checks passed.', compliance, rules, estQty, notional, checks);
+  const passVerdict = finalize('pass', 'All pre-flight checks passed.', compliance, rules, estQty, notional, checks);
+  if (qualityVerdict) passVerdict.quality = qualityVerdict;
+  return passVerdict;
 }
 
 function finalize(

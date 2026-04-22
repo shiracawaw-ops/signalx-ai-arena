@@ -35,6 +35,11 @@ export interface Signal {
   source?:  string;         // e.g. "autopilot", "manual"
   botId?:   string;         // origin bot — used for transparency + realized-PnL attribution
   botName?: string;
+  /** Optional signal confidence 0..100; consumed by the trade-quality gate. */
+  confidence?: number;
+  /** Optional expected edge in bps; consumed by the trade-quality gate.
+   *  When supplied and below the round-trip cost, the gate vetoes the trade. */
+  expectedEdgeBps?: number;
 }
 
 export interface EngineResult {
@@ -324,6 +329,9 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       amountUSD:   config.tradeAmountUSD,
       refPrice:    signal.price,
       credentials,
+      signalAgeMs: Math.max(0, Date.now() - signal.ts),
+      ...(signal.confidence !== undefined ? { confidence: signal.confidence } : {}),
+      ...(signal.expectedEdgeBps !== undefined ? { expectedEdgeBps: signal.expectedEdgeBps } : {}),
     });
     if (shield.outcome === 'block') {
       // Translate the shield's categorized blockCode into a specific REJECT
@@ -339,6 +347,8 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
         shield.blockCode === 'insufficient_balance'      ? REJECT.INSUFFICIENT_BALANCE      :
         shield.blockCode === 'cooldown_active'           ? REJECT.COOLDOWN_ACTIVE           :
         shield.blockCode === 'stale_cache_conflict'      ? REJECT.STALE_CACHE_CONFLICT      :
+        shield.blockCode === 'low_trade_quality'         ? REJECT.LOW_TRADE_QUALITY         :
+        shield.blockCode === 'edge_below_fees'           ? REJECT.EDGE_BELOW_FEES           :
                                                            REJECT.PREFLIGHT_NOT_READY;
       return reject(signal, exchange, mode, code, `Pre-flight: ${shield.reason}`);
     }
