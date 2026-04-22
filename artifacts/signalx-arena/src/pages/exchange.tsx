@@ -3426,6 +3426,7 @@ function ClassifiedBalances(p: ClassifiedBalancesProps) {
     wallet_holding:   false,
     fully_closed:     false,
   });
+  const [dustOnly, setDustOnly] = useState(false);
 
   const classified = p.liveBalances.map(b => {
     const upper = b.asset.toUpperCase();
@@ -3454,10 +3455,23 @@ function ClassifiedBalances(p: ClassifiedBalancesProps) {
     return { row: b, verdict, dustEntry };
   });
 
+  const filtered = dustOnly ? classified.filter(c => !!c.dustEntry) : classified;
+
   const buckets: Record<PositionCategory, typeof classified> = {
     active_position: [], partial_position: [], dust_balance: [], wallet_holding: [], fully_closed: [],
   };
-  for (const c of classified) buckets[c.verdict.category].push(c);
+  for (const c of filtered) buckets[c.verdict.category].push(c);
+  // Sort dust-marked rows to the top within each bucket so problem assets are easy to spot.
+  for (const cat of Object.keys(buckets) as PositionCategory[]) {
+    buckets[cat].sort((a, b) => Number(!!b.dustEntry) - Number(!!a.dustEntry));
+  }
+  const dustCount = classified.filter(c => !!c.dustEntry).length;
+
+  // Auto-reset the filter if the last dust mark gets cleared while it's active,
+  // so users aren't trapped looking at an empty filtered view.
+  useEffect(() => {
+    if (dustOnly && dustCount === 0) setDustOnly(false);
+  }, [dustOnly, dustCount]);
 
   const chipClass: Record<PositionCategory, string> = {
     active_position:  'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
@@ -3469,6 +3483,37 @@ function ClassifiedBalances(p: ClassifiedBalancesProps) {
 
   return (
     <div className="space-y-4">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[10px] text-zinc-500">
+          {dustCount > 0
+            ? `${dustCount} asset${dustCount === 1 ? '' : 's'} marked as dust`
+            : 'No assets marked as dust'}
+        </div>
+        <button
+          type="button"
+          onClick={() => setDustOnly(v => !v)}
+          disabled={dustCount === 0 && !dustOnly}
+          className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-[10px] font-semibold uppercase tracking-wide transition-colors ${
+            dustOnly
+              ? 'border-amber-500/60 bg-amber-500/20 text-amber-200 hover:bg-amber-500/30'
+              : 'border-zinc-700 bg-zinc-900/60 text-zinc-300 hover:bg-zinc-800/60'
+          } ${dustCount === 0 && !dustOnly ? 'opacity-40 cursor-not-allowed' : ''}`}
+          aria-pressed={dustOnly}
+          data-testid="filter-dust-only"
+          title={dustCount === 0 ? 'No dust-marked assets to filter' : 'Show only dust-marked assets'}
+        >
+          <Sparkles size={10} />
+          {dustOnly ? 'Showing dust only' : 'Dust only'}
+          {dustCount > 0 && (
+            <span className="ml-1 px-1 rounded bg-zinc-950/40 text-[9px]">{dustCount}</span>
+          )}
+        </button>
+      </div>
+      {dustOnly && dustCount === 0 && (
+        <div className="text-xs text-zinc-500 border border-dashed border-zinc-800 rounded p-3 text-center">
+          No assets currently marked as dust.
+        </div>
+      )}
       {POSITION_CATEGORY_ORDER.map(cat => {
         const items = buckets[cat];
         if (items.length === 0) return null;
