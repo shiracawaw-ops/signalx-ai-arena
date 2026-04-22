@@ -149,6 +149,8 @@ export const REJECT = {
   // ── Phase 2/3 quality gate ────────────────────────────────────────────────
   LOW_TRADE_QUALITY:          'low_trade_quality',
   EDGE_BELOW_FEES:            'edge_below_fees',
+  // ── Phase 4 per-bot allocation gate ───────────────────────────────────────
+  BOT_ALLOCATION_EXCEEDED:    'bot_allocation_exceeded',
 } as const;
 
 export type RejectReason = typeof REJECT[keyof typeof REJECT];

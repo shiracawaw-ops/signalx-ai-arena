@@ -16,6 +16,12 @@ import type { SymbolRules as RiskSymbolRules } from './risk-manager.js';
 import { preflight, noteRejection, noteSuccess, clearShieldCooldownFor } from './rejection-shield.js';
 import type { ExchangeId } from './asset-compliance.js';
 import { recordBuy, recordSell, getOwned } from './internal-positions.js';
+import {
+  checkBotAllocation,
+  commitBotAllocation,
+  releaseBotAllocation,
+  resetBotAllocation,
+} from './bot-allocation.js';
 import { baseTicker } from './risk-manager.js';
 import { realProfitStore }  from './real-profit-store.js';
 import { botActivityStore } from './bot-activity-store.js';
@@ -407,6 +413,25 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     }
   }
 
+  // 8b. Per-bot capital allocation check (Phase 4 — Option 3 fixed cap).
+  // Cap = tradeAmountUSD × maxOpenPositions; closing-SELLs are not gated
+  // because they REDUCE commitment, not add to it.
+  const isClosingSellForAlloc = signal.side === 'sell' && availableBase > 0;
+  if (!isClosingSellForAlloc) {
+    const alloc = checkBotAllocation({
+      botId:     signal.botId,
+      symbol:    signal.symbol,
+      amountUSD: config.tradeAmountUSD,
+      config:    {
+        tradeAmountUSD:   config.tradeAmountUSD,
+        maxOpenPositions: config.maxOpenPositions,
+      },
+    });
+    if (!alloc.ok) {
+      return reject(signal, exchange, mode, REJECT.BOT_ALLOCATION_EXCEEDED, alloc.reason);
+    }
+  }
+
   // 9. Risk check
   const risk = validateRisk({
     exchange,
@@ -543,6 +568,26 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       if (signal.side === 'sell') recordSell(exchange, baseTk, risk.quantity!);
     } catch (e) { console.warn('[engine] ledger update failed:', (e as Error).message); }
 
+    // Per-bot allocation accounting: BUY commits, closing-SELL releases.
+    // Only tracked for real/testnet — paper/demo trades do not consume real cap.
+    try {
+      if (signal.botId && (mode === 'real' || mode === 'testnet')) {
+        if (signal.side === 'buy') {
+          commitBotAllocation(signal.botId, signal.symbol, config.tradeAmountUSD);
+        } else if (signal.side === 'sell') {
+          // Partial-exit detection: ratio = sold qty / committed qty proxy.
+          // If we committed N positions for this symbol and this sell drains
+          // the local ledger, treat as full close (ratio=1). Otherwise pro-rate
+          // by sold-qty fraction of pre-sell owned base.
+          const ownedBefore = availableBase;
+          const ratio = ownedBefore > 0
+            ? Math.max(0, Math.min(1, risk.quantity! / ownedBefore))
+            : 1;
+          releaseBotAllocation(signal.botId, signal.symbol, ratio);
+        }
+      }
+    } catch (e) { console.warn('[engine] allocation update failed:', (e as Error).message); }
+
     // Real-mode telemetry — feeds the Real Profit panel + Bot Activity panel.
     // Only emit for `real` to keep simulator stats out of the realized-PnL
     // store. Testnet fills are NOT real money.
@@ -649,6 +694,7 @@ export const _tests = {
     recentSignals   = [];
     openPositionCount = 0;
     feGates.clear();
+    resetBotAllocation();
   },
   getState() {
     return { dailyTradeCount, lastTradeTs, recentSignals: [...recentSignals], openPositionCount, credentials: !!credentials };
