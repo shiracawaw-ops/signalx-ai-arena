@@ -40,6 +40,14 @@ import { STABLE_ASSETS, isStable } from '@/lib/stable-assets';
 import { getOwned } from '@/lib/internal-positions';
 import { pipelineCache } from '@/lib/pipeline-cache';
 import { resolveCompliance, type ExchangeId } from '@/lib/asset-compliance';
+import {
+  buildSweepDustPlan,
+  cancelSweepDustDialog,
+  confirmSweepDustDialog,
+  initialSweepDustDialogState,
+  openSweepDustDialog,
+  type SweepDustDialogState,
+} from '@/lib/sweep-dust-dialog';
 import { botDoctorStore, useBotDoctor } from '@/lib/bot-doctor-store';
 import type { SymbolRules } from '@/lib/risk-manager';
 import { submitManualOrder }      from '@/lib/live-execution-bridge';
@@ -422,6 +430,13 @@ export default function ExchangePage() {
   // dust-conversion endpoint so the button can disable + spin without
   // double-fires from rapid clicks.
   const [sweepingAssets, setSweepingAssets] = useState<Set<string>>(new Set());
+
+  // Real-mode confirmation dialog for "Sweep dust". Mirrors the styling of
+  // the cancel-all dialog (see further down) and replaces the legacy
+  // window.confirm prompt so the user can review every asset + USDT value
+  // and the venue's expected payout token before signing off.
+  const [sweepDustDialog, setSweepDustDialog] =
+    useState<SweepDustDialogState>(initialSweepDustDialogState);
 
   // ── Cancel-all-open-orders state ───────────────────────────────────────────
   // `cancelAllOpen` toggles the Real-mode "type CANCEL ALL" confirmation dialog.
@@ -1077,27 +1092,17 @@ export default function ExchangePage() {
   // matching Doctor dust marks so the cards disappear on the next refresh.
   // Adapters without a native dust API return `notSupported: true` plus a
   // helpUrl — we open that in a new tab so the user can clean up manually.
-  const sweepDust = useCallback(async (assets: string[]) => {
-    const targets = Array.from(new Set(assets.map(a => a.toUpperCase()).filter(Boolean)));
+  //
+  // Split into two functions:
+  //   • sweepDust(assets)        — entry point: validates mode/creds and,
+  //                                in Real mode, opens the per-asset
+  //                                confirmation dialog instead of a raw
+  //                                window.confirm.
+  //   • executeSweepDust(targets) — runs the actual API call once the
+  //                                user confirms (or in Testnet, where no
+  //                                confirmation is needed).
+  const executeSweepDust = useCallback(async (targets: string[]) => {
     if (targets.length === 0) return;
-    if (mode !== 'real' && mode !== 'testnet') {
-      toast({ title: 'Sweep unavailable', description: 'Switch to Real or Testnet mode to sweep dust on the live account.', variant: 'destructive' });
-      return;
-    }
-    if (!apiKey || !secretKey) {
-      toast({ title: 'Not connected', description: 'Connect with API credentials before sweeping dust.', variant: 'destructive' });
-      return;
-    }
-    if (mode === 'real') {
-      const ok = window.confirm(
-        `Sweep ${targets.length} dust asset${targets.length === 1 ? '' : 's'} on ${selectedEx.name}?\n\n` +
-        `This calls the exchange's native dust-conversion endpoint. The exchange ` +
-        `decides which assets are eligible and pays out in its dust-payout token ` +
-        `(e.g. BNB on Binance) — usually with a small service charge.\n\n` +
-        `Assets: ${targets.join(', ')}\n\nContinue?`
-      );
-      if (!ok) return;
-    }
     setSweepingAssets(prev => { const n = new Set(prev); for (const a of targets) n.add(a); return n; });
     try {
       const creds = { apiKey, secretKey, ...(passphrase ? { passphrase } : {}) };
@@ -1148,7 +1153,30 @@ export default function ExchangePage() {
       setSweepingAssets(prev => { const n = new Set(prev); for (const a of targets) n.delete(a); return n; });
       refreshLiveData();
     }
-  }, [mode, apiKey, secretKey, passphrase, selectedEx.id, selectedEx.name, toast, refreshLiveData]);
+  }, [apiKey, secretKey, passphrase, selectedEx.id, selectedEx.name, toast, refreshLiveData]);
+
+  // Entry point invoked by the per-row "Sweep" button and the section-bulk
+  // "Sweep all dust" button. In Real mode this opens the styled
+  // confirmation dialog (see `sweepDustDialog` JSX further down). In
+  // Testnet it skips straight to the executor since the venue's testnet
+  // endpoint is sandboxed (no real funds).
+  const sweepDust = useCallback((assets: string[]) => {
+    const targets = Array.from(new Set(assets.map(a => a.toUpperCase()).filter(Boolean)));
+    if (targets.length === 0) return;
+    if (mode !== 'real' && mode !== 'testnet') {
+      toast({ title: 'Sweep unavailable', description: 'Switch to Real or Testnet mode to sweep dust on the live account.', variant: 'destructive' });
+      return;
+    }
+    if (!apiKey || !secretKey) {
+      toast({ title: 'Not connected', description: 'Connect with API credentials before sweeping dust.', variant: 'destructive' });
+      return;
+    }
+    if (mode === 'real') {
+      setSweepDustDialog(openSweepDustDialog(targets));
+      return;
+    }
+    void executeSweepDust(targets);
+  }, [mode, apiKey, secretKey, toast, executeSweepDust]);
 
   // ── Connect ───────────────────────────────────────────────────────────────
   const handleConnect = async () => {
@@ -2357,6 +2385,94 @@ export default function ExchangePage() {
           );
         })()}
       </ErrorBoundary>)}
+
+      {/* Real-mode dust-sweep confirmation. Mirrors the styling of the
+          cancel-all dialog above and lists every asset we are about to send
+          to the venue's native dust-conversion endpoint, with each asset's
+          current USDT value and the expected payout token (e.g. "≈ $0.34
+          → BNB on Binance"). Replaces the legacy window.confirm prompt. */}
+      {(() => {
+        const plan = buildSweepDustPlan({
+          exchangeId:   selectedEx.id,
+          exchangeName: selectedEx.name,
+          targets:      sweepDustDialog.targets,
+          balances:     liveBalances,
+        });
+        return (
+          <Dialog
+            open={sweepDustDialog.open}
+            onOpenChange={(o) => { if (!o) setSweepDustDialog(cancelSweepDustDialog()); }}
+          >
+            <DialogContent className="border-amber-500/40" data-testid="dialog-sweep-dust">
+              <DialogHeader>
+                <DialogTitle className="text-amber-300 flex items-center gap-2">
+                  <Wallet size={16} />
+                  Sweep {plan.rows.length} dust asset{plan.rows.length === 1 ? '' : 's'} on {plan.exchangeName}?
+                </DialogTitle>
+                <DialogDescription className="text-zinc-300">
+                  This calls the exchange&apos;s native dust-conversion endpoint. The
+                  exchange decides which assets are eligible and pays out in
+                  {' '}<span className="font-semibold text-amber-300">{plan.payoutToken}</span> — usually
+                  with a small service charge. This action cannot be undone.
+                </DialogDescription>
+              </DialogHeader>
+              <div
+                className="rounded-md border border-zinc-800/60 bg-zinc-950/40 divide-y divide-zinc-800/60 max-h-64 overflow-y-auto"
+                data-testid="list-sweep-dust-assets"
+              >
+                {plan.rows.map(r => (
+                  <div
+                    key={r.asset}
+                    className="flex items-center justify-between px-3 py-2 text-xs"
+                    data-testid={`row-sweep-dust-${r.asset}`}
+                  >
+                    <span className="font-mono font-semibold text-zinc-100">{r.asset}</span>
+                    <span className="text-zinc-400">
+                      {typeof r.usdValue === 'number' ? `\u2248 $${fmt(r.usdValue)}` : '\u2248 $—'}
+                      <span className="text-zinc-600 mx-1">{'\u2192'}</span>
+                      <span className="text-amber-300 font-semibold">{plan.payoutToken}</span>
+                      <span className="text-zinc-500"> on {plan.exchangeName}</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {plan.rows.length > 0 && (
+                <div className="flex items-center justify-between text-[11px] text-zinc-400 px-1">
+                  <span>{plan.rows.length} asset{plan.rows.length === 1 ? '' : 's'}</span>
+                  <span>
+                    Estimated total{' '}
+                    <span className="font-mono text-zinc-200" data-testid="text-sweep-dust-total">
+                      {`\u2248 $${fmt(plan.totalUsd)}`}
+                    </span>
+                  </span>
+                </div>
+              )}
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => setSweepDustDialog(cancelSweepDustDialog())}
+                  data-testid="button-sweep-dust-cancel"
+                >
+                  Keep dust
+                </Button>
+                <Button
+                  variant="default"
+                  className="bg-amber-500 text-zinc-950 hover:bg-amber-400"
+                  disabled={plan.rows.length === 0}
+                  onClick={() => {
+                    const { targets, next } = confirmSweepDustDialog(sweepDustDialog);
+                    setSweepDustDialog(next);
+                    void executeSweepDust(targets);
+                  }}
+                  data-testid="button-sweep-dust-confirm"
+                >
+                  Sweep {plan.rows.length} asset{plan.rows.length === 1 ? '' : 's'}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        );
+      })()}
 
       {/* ── Permissions ── */}
       {tab === 'permissions' && (<ErrorBoundary label="exchange:tab:permissions">
