@@ -1,7 +1,7 @@
 // ─── Bybit REST Adapter (Unified v5) ─────────────────────────────────────────
 import { hmacSHA256, safeFetch, stubSymbolRules, toUsdtPair } from './base-adapter.js';
 import { ExchangeOperationError, withUsdtValue, enrichBalancesWithUsdtValue } from './exchange-error.js';
-import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, BalanceScope, BalanceSummary, SymbolRules, OrderRequest, OrderResult } from './types.js';
+import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, BalanceScope, BalanceSummary, SymbolRules, OrderRequest, OrderResult, DustSweepResult } from './types.js';
 
 const BASE         = 'https://api.bybit.com';
 const TESTNET_BASE = 'https://api-testnet.bybit.com';
@@ -625,6 +625,199 @@ export class BybitAdapter implements ExchangeAdapter {
     const r   = await safeFetch(`${base}/v5/order/history?${qs}`, { headers: headers(creds, ts, sig) }, 'bybit');
     if (!r.ok) return [];
     return (((r.data as Record<string, Record<string, unknown[]>>)?.['result']?.['list']) ?? []).map(o => parseOrder(o as Record<string, unknown>));
+  }
+
+  /**
+   * Convert tiny "dust" leftovers into USDT via Bybit's native Coin Exchange
+   * (quote-apply + convert-execute) endpoints. Bybit doesn't expose a single
+   * batch dust call like Binance, so we iterate per-asset:
+   *   1. POST /v5/asset/exchange/quote-apply  → returns a quoteTxId
+   *   2. POST /v5/asset/exchange/convert-execute  → finalises the conversion
+   * Per-asset failures (ineligible coin, below min, expired quote) come back
+   * with the venue's own retMsg so the user sees an actionable reason.
+   */
+  async sweepDust(creds: ExchangeCredentials, assets: string[]): Promise<DustSweepResult> {
+    if (creds.testnet) {
+      return {
+        exchange: 'bybit', swept: [],
+        failed: assets.map(a => ({ asset: String(a ?? '').toUpperCase(), reason: 'TESTNET_UNSUPPORTED' })),
+        note: 'Bybit testnet does not expose the Coin Exchange convert endpoints. Switch to Real mode to sweep dust on the live account.',
+      };
+    }
+    const cleaned = Array.from(new Set(
+      assets.map(a => String(a ?? '').trim().toUpperCase()).filter(Boolean),
+    ));
+    if (cleaned.length === 0) {
+      return { exchange: 'bybit', swept: [], failed: [], note: 'No assets supplied' };
+    }
+
+    // Bybit Coin Exchange operates on a single wallet per call, so we need
+    // per-scope amounts (not the merged total). The merged getBalanceBreakdown
+    // sums UNIFIED+FUND for the same coin, which would cause false "insufficient
+    // balance" rejections when we ask one wallet to convert the combined amount.
+    // Build a per-(asset, accountType) map by querying each wallet directly.
+    const slicesByAsset = new Map<string, Array<{ accountType: string; available: number }>>();
+    const addSlice = (asset: string, accountType: string, available: number) => {
+      if (!asset || !(available > 0)) return;
+      const key = asset.toUpperCase();
+      const arr = slicesByAsset.get(key) ?? [];
+      arr.push({ accountType, available });
+      slicesByAsset.set(key, arr);
+    };
+
+    // ── UNIFIED / SPOT (wallet-balance) ────────────────────────────────────
+    const walletProbes: Array<{ accountType: string; convertType: string }> = [
+      { accountType: 'UNIFIED', convertType: 'eb_convert_uta' },
+      { accountType: 'SPOT',    convertType: 'eb_convert_spot' },
+    ];
+    for (const probe of walletProbes) {
+      const ts  = Date.now();
+      const qs  = `accountType=${probe.accountType}`;
+      const sig = sign(creds.apiKey, creds.secretKey, ts, qs);
+      const r   = await safeFetch(`${BASE}/v5/account/wallet-balance?${qs}`, {
+        headers: headers(creds, ts, sig),
+      }, 'bybit');
+      if (!r.ok) continue;
+      const retCode = Number((r.data as Record<string, unknown>)?.['retCode'] ?? -1);
+      if (retCode !== 0) continue;
+      const list  = (r.data as Record<string, Record<string, unknown[]>>)?.['result']?.['list'] ?? [];
+      const first = (list[0] ?? {}) as Record<string, unknown>;
+      const coins = Array.isArray(first['coin']) ? first['coin'] as Array<Record<string, unknown>> : [];
+      for (const c of coins) {
+        const asset = String(c['coin'] ?? '');
+        const available = parseFloat(String(c['availableToWithdraw'] ?? c['free'] ?? c['walletBalance'] ?? '0'));
+        if (Number.isFinite(available) && available > 0) addSlice(asset, probe.convertType, available);
+      }
+    }
+
+    // ── FUND (transfer balance) ────────────────────────────────────────────
+    {
+      const ts  = Date.now();
+      const qs  = `accountType=FUND`;
+      const sig = sign(creds.apiKey, creds.secretKey, ts, qs);
+      const r   = await safeFetch(
+        `${BASE}/v5/asset/transfer/query-account-coins-balance?${qs}`,
+        { headers: headers(creds, ts, sig) }, 'bybit',
+      );
+      if (r.ok) {
+        const retCode = Number((r.data as Record<string, unknown>)?.['retCode'] ?? -1);
+        if (retCode === 0) {
+          const arr = (r.data as Record<string, Record<string, unknown[]>>)?.['result']?.['balance'] ?? [];
+          for (const c of arr) {
+            const c2 = c as Record<string, unknown>;
+            const asset = String(c2['coin'] ?? '');
+            const transfer = parseFloat(String(c2['transferBalance'] ?? '0'));
+            const wallet   = parseFloat(String(c2['walletBalance']   ?? '0'));
+            const available = Number.isFinite(transfer) && transfer > 0 ? transfer : wallet;
+            if (Number.isFinite(available) && available > 0) addSlice(asset, 'eb_convert_funding', available);
+          }
+        }
+      }
+    }
+
+    const swept:  string[] = [];
+    const failed: Array<{ asset: string; reason: string }> = [];
+    let totalReceived = 0;
+    const rawDetails: Array<Record<string, unknown>> = [];
+
+    for (const asset of cleaned) {
+      if (asset === 'USDT') {
+        failed.push({ asset, reason: 'Already USDT — no conversion needed' });
+        continue;
+      }
+      const slices = slicesByAsset.get(asset) ?? [];
+      if (slices.length === 0) {
+        failed.push({ asset, reason: 'No available balance to convert in any Bybit wallet' });
+        continue;
+      }
+
+      let lastReason  = 'Conversion failed';
+      let anySucceeded = false;
+      let assetReceived = 0;
+
+      // Convert each wallet slice independently — Coin Exchange operates on
+      // one wallet per call, so UNIFIED + FUND for the same coin are two
+      // separate quote-apply/convert-execute round-trips.
+      for (const slice of slices) {
+        // ── Step 1: quote-apply ────────────────────────────────────────────
+        const quoteBody = JSON.stringify({
+          fromCoin:     asset,
+          fromCoinType: 'crypto',
+          toCoin:       'USDT',
+          toCoinType:   'crypto',
+          requestCoin:  asset,
+          requestAmount: String(slice.available),
+          accountType:   slice.accountType,
+        });
+        const tsQ  = Date.now();
+        const sigQ = sign(creds.apiKey, creds.secretKey, tsQ, quoteBody);
+        const rQ   = await safeFetch(`${BASE}/v5/asset/exchange/quote-apply`, {
+          method: 'POST', headers: headers(creds, tsQ, sigQ), body: quoteBody,
+        }, 'bybit');
+
+        if (!rQ.ok) {
+          lastReason = `[${slice.accountType}] ${rQ.error?.message ?? 'Quote request failed'}`;
+          continue;
+        }
+        const qData    = (rQ.data as Record<string, unknown>) ?? {};
+        const qRetCode = Number(qData['retCode'] ?? -1);
+        const qRetMsg  = String(qData['retMsg'] ?? '');
+        if (qRetCode !== 0) {
+          lastReason = `[${slice.accountType}] quote-apply retCode ${qRetCode}: ${qRetMsg}`;
+          continue;
+        }
+        const qResult   = (qData['result'] as Record<string, unknown>) ?? {};
+        const quoteTxId = String(qResult['quoteTxId'] ?? '');
+        const toAmount  = parseFloat(String(qResult['toAmount'] ?? '0')) || 0;
+        if (!quoteTxId) {
+          lastReason = `[${slice.accountType}] quote-apply returned no quoteTxId (retMsg: ${qRetMsg || 'n/a'})`;
+          continue;
+        }
+
+        // ── Step 2: convert-execute ────────────────────────────────────────
+        const execBody = JSON.stringify({ quoteTxId });
+        const tsE  = Date.now();
+        const sigE = sign(creds.apiKey, creds.secretKey, tsE, execBody);
+        const rE   = await safeFetch(`${BASE}/v5/asset/exchange/convert-execute`, {
+          method: 'POST', headers: headers(creds, tsE, sigE), body: execBody,
+        }, 'bybit');
+
+        if (!rE.ok) {
+          lastReason = `[${slice.accountType}] ${rE.error?.message ?? 'Convert execute failed'}`;
+          continue;
+        }
+        const eData    = (rE.data as Record<string, unknown>) ?? {};
+        const eRetCode = Number(eData['retCode'] ?? -1);
+        const eRetMsg  = String(eData['retMsg'] ?? '');
+        if (eRetCode !== 0) {
+          lastReason = `[${slice.accountType}] convert-execute retCode ${eRetCode}: ${eRetMsg}`;
+          continue;
+        }
+
+        anySucceeded = true;
+        assetReceived += toAmount;
+        rawDetails.push({ asset, accountType: slice.accountType, quoteTxId, toAmount, exec: eData['result'] });
+      }
+
+      if (anySucceeded) {
+        swept.push(asset);
+        totalReceived += assetReceived;
+      } else {
+        failed.push({ asset, reason: lastReason });
+      }
+    }
+
+    return {
+      exchange:      'bybit',
+      swept,
+      failed,
+      ...(totalReceived > 0 ? { totalReceived } : {}),
+      receivedAsset: 'USDT',
+      ...(swept.length > 0
+        ? { note: 'Converted via Bybit Coin Exchange — funds land in the same wallet the source asset was held in.' }
+        : {}),
+      raw: rawDetails,
+    };
   }
 
   async getOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<OrderResult | null> {
