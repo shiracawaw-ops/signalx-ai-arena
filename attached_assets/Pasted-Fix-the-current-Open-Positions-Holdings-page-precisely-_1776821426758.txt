@@ -1,0 +1,289 @@
+Fix the current Open Positions / Holdings page precisely.
+
+Do not redesign the whole app.
+Keep the current UI style and layout as much as possible.
+Modify the real working page and the real position-state logic.
+
+Goal:
+Make the page distinguish correctly between:
+1) true active open positions
+2) partially closed but still valid positions
+3) tiny leftover balances / dust
+4) normal wallet holdings that are not active trading positions
+
+Critical additional problem:
+The application is still not executing SELL trades correctly and reliably.
+This must be fixed as part of the same task.
+The app should not just show positions — it must also correctly determine which positions are truly sellable and allow valid sell execution.
+Currently the app often fails, rejects, or mishandles SELL attempts, especially around leftovers, dust, partial positions, and exchange minimums.
+
+Current problem:
+The page is showing many assets with “Close Position” buttons even when some of them are:
+- fully flattened already
+- tiny residual balances
+- dust below exchange minimum sellable size
+- wallet leftovers rather than true active positions
+
+This causes confusion, fake position count, invalid close attempts, and unclear profit tracking.
+
+==================================================
+REQUIRED POSITION CLASSIFICATION
+==================================================
+
+Implement a strict classification layer for every asset shown on this page.
+
+Each asset must be classified into exactly one of these categories:
+
+1) Active Position
+Definition:
+- there is a real tracked open trading position
+- quantity is meaningfully open
+- quantity is above exchange sellable minimum
+- position is still part of the live trade lifecycle
+
+2) Residual Position
+Definition:
+- a trade was closed or mostly closed
+- a meaningful remainder still exists
+- it may still be sellable depending on exchange minimums
+- it should be shown separately from fully active positions
+
+3) Dust / Unsellable Remainder
+Definition:
+- owned quantity exists
+- but its current notional value is below exchange minimum sellable amount
+- or quantity is too small to close legally
+- this must not be treated like a normal active position
+
+4) Wallet Holding Only
+Definition:
+- asset exists in the wallet
+- but is not tied to an active tracked trading position
+- do not present it as an active open position
+
+==================================================
+UI BEHAVIOR REQUIREMENTS
+==================================================
+
+1) Active Positions section
+Show only real active positions here.
+
+For each active position show:
+- symbol
+- current quantity
+- current notional value
+- average entry price
+- current market price
+- unrealized PnL
+- realized PnL if partially closed
+- position status
+- bot responsible
+- a valid Close Position button only if closing is actually possible
+
+2) Residual / Partial Positions section
+Show positions that are partially closed but still valid and sellable.
+
+For each one show:
+- remaining quantity
+- remaining value
+- average entry price
+- position lifecycle state
+- whether it is still sellable
+- close action only if valid
+
+3) Dust / Leftover Balances section
+Show all tiny unsellable remainders here.
+
+For each dust asset show:
+- symbol
+- remaining quantity
+- estimated USD value
+- exact reason it is classified as dust
+- exchange minimum required value / min notional for selling
+- label such as:
+  - below_min_notional
+  - below_min_sell_qty
+  - unsellable_dust
+
+Important:
+Do NOT show a normal red “Close Position” button for dust.
+Instead show a disabled action or a message like:
+- cannot close: below exchange minimum
+- dust balance only
+
+4) Wallet Holdings section
+Show wallet assets that are not part of active tracked positions.
+Do not present them as live trade positions.
+
+==================================================
+SELL EXECUTION FIXES
+==================================================
+
+The application is not executing SELL trades correctly enough.
+Fix the SELL path together with this positions page.
+
+Required SELL behavior:
+- SELL must be allowed and executed when there is a true active sellable position
+- SELL must not be attempted for dust or unsellable leftovers
+- SELL must not fail because the page or position logic misclassifies the asset
+- SELL must use the correct real tracked owned quantity
+- SELL must respect live exchange rules before submission
+
+Investigate and fix:
+- why valid SELL attempts are rejected or mishandled
+- why some positions still appear closable even when they are not legally sellable
+- why the app leaves leftover balances that later cause failed SELL attempts
+- why some SELL attempts result in:
+  - owned_qty_below_min_notional
+  - exchange_rejected_request
+  - retCode=170140
+  - false close eligibility
+
+Required SELL checks before submission:
+- real owned quantity exists
+- quantity is above min sell quantity
+- current notional is above exchange minimum order value
+- position is not fully flattened already
+- adapter is ready
+- symbol is tradable
+- qty rounding follows exchange step size
+- remaining balance after sell is not turned into invalid dust if avoidable
+
+Required SELL improvements:
+- if full close is valid, allow it cleanly
+- if partial close would create unsellable dust, avoid that outcome when possible
+- if only dust remains, classify it as dust and stop repeated sell attempts
+- use correct exchange-aware sellability logic for Bybit and Binance
+
+Add explicit SELL state labels where useful:
+- sellable_position
+- unsellable_dust
+- fully_flattened
+- residual_sellable
+- residual_unsellable
+- wallet_only_not_trade_position
+
+==================================================
+CLOSE BUTTON RULES
+==================================================
+
+A “Close Position” action must appear only when ALL of these are true:
+- the position is a real active or valid residual tracked position
+- the quantity is sellable
+- the current notional is above exchange minimum
+- the adapter is ready
+- no hard execution block exists
+
+Do NOT show “Close Position” for:
+- fully flattened positions
+- dust balances
+- unsellable leftovers
+- wallet-only assets with no active trade lifecycle
+- positions already marked as closed
+
+==================================================
+FULLY FLATTENED HANDLING
+==================================================
+
+If a trade is already fully closed:
+- do not keep showing it like an active open position
+- do not show a “Close Position” action
+- move it to trade history / closed state
+- if a tiny balance remains after full close, classify it as dust or residual, not as active
+
+==================================================
+EXCHANGE-AWARE SELLABILITY LOGIC
+==================================================
+
+For each asset, compute sellability using live exchange rules.
+
+Support Bybit and Binance correctly.
+
+For each symbol check:
+- current quantity
+- current notional value
+- min qty
+- step size
+- min notional / minimum order value
+- whether the remaining quantity is actually sellable
+
+Use live exchange metadata where possible.
+Do not rely on rough guessing.
+
+==================================================
+POSITION STATE SOURCE OF TRUTH
+==================================================
+
+Audit and fix the data source used by this page.
+
+Make sure the page does not blindly show all wallet balances as open positions.
+
+Use a correct single source of truth that distinguishes:
+- tracked trade positions
+- current wallet balances
+- closed trades
+- dust leftovers
+
+If needed, combine:
+- trade lifecycle state
+- execution history
+- wallet balances
+- exchange sellability checks
+to classify assets correctly.
+
+==================================================
+REQUIRED FIELDS PER CARD / ROW
+==================================================
+
+For each displayed item, add a clear status label from this controlled set:
+- active_position
+- partial_position
+- dust_balance
+- wallet_holding
+- fully_closed
+
+For dust and residuals, show:
+- exact quantity
+- USD value
+- exact sellability reason
+- exchange minimum requirement
+
+For active positions, show:
+- entry price
+- current price
+- unrealized PnL
+- position source bot
+- close eligibility
+
+==================================================
+REDUCE USER CONFUSION
+==================================================
+
+The page must answer clearly:
+- which assets are truly open positions
+- which ones are just leftovers
+- which ones are dust
+- which ones are wallet balances only
+- which positions can actually be closed right now
+- which ones cannot be sold because they are below exchange minimum
+- which positions are truly sellable and should execute SELL successfully
+
+==================================================
+IMPLEMENTATION RULES
+==================================================
+
+- do not leave this as display-only logic
+- fix the actual classification and action rules
+- fix the actual SELL execution path related to positions
+- do not fake sellability
+- do not show misleading “Close Position” buttons
+- keep the current UI style
+- improve trustworthiness and clarity of the page
+
+After implementation, summarize:
+- files changed
+- classification logic added
+- how dust is detected
+- how active positions are now distinguished from wallet leftovers
+- how the Close Position rules now work
+- how SELL execution was fixed and when SELL is now allowed or blocked
