@@ -10,7 +10,7 @@ import {
   Stethoscope, AlertTriangle, CheckCircle2, XCircle,
   RefreshCw, TrendingDown, Activity, Zap, ChevronDown, ChevronUp,
   AlertCircle, ShieldAlert, SkipForward, RotateCcw, Volume2,
-  Trophy, Copy, Undo2, Radio,
+  Trophy, Copy, Undo2, Radio, Trash2,
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import {
@@ -510,6 +510,28 @@ function RealModeSection() {
     [doctor.bench],
   );
 
+  const dustList = useMemo(
+    () => Object.values(doctor.dust).sort((a, b) => b.markedAt - a.markedAt),
+    [doctor.dust],
+  );
+
+  const handleClearDust = (exchange: string, baseAsset: string) => {
+    botDoctorStore.clearDust(exchange, baseAsset);
+    toast({
+      title: `Dust mark cleared: ${exchange}:${baseAsset}`,
+      description: 'SELLs for this asset will be retried on the next signal.',
+    });
+  };
+
+  const handleClearAllDust = () => {
+    const n = dustList.length;
+    dustList.forEach(d => botDoctorStore.clearDust(d.exchange, d.baseAsset));
+    toast({
+      title: `Cleared ${n} dust mark${n === 1 ? '' : 's'}`,
+      description: 'All marked assets are eligible for SELL again.',
+    });
+  };
+
   const handleClone = () => {
     if (!champBot || !cloneTarget) return;
     const ok = cloneStrategy(champBot.id, cloneTarget);
@@ -686,6 +708,52 @@ function RealModeSection() {
                   </div>
                 );
               })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Marked dust list */}
+      {dustList.length > 0 && (
+        <Card className="border-zinc-700/40">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <Trash2 size={14} className="text-zinc-300" />
+              <h3 className="text-sm font-semibold text-zinc-200">Marked Dust ({dustList.length})</h3>
+              <span className="text-[10px] text-zinc-500">
+                Assets the Doctor flagged as too small to sell. SELLs are blocked until cleared.
+              </span>
+              <button
+                onClick={handleClearAllDust}
+                className="ml-auto flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border border-zinc-600 text-zinc-300 hover:bg-zinc-800 transition-colors font-medium"
+              >
+                <Trash2 size={10} /> Clear all
+              </button>
+            </div>
+            <div className="space-y-1.5">
+              {dustList.map(entry => (
+                <div
+                  key={`${entry.exchange}:${entry.baseAsset}`}
+                  className="flex items-center gap-3 text-[11px] py-1.5 px-3 rounded bg-zinc-900/50 border border-zinc-800/60"
+                >
+                  <Badge variant="outline" className="text-[9px] border-zinc-600 text-zinc-300">
+                    {entry.exchange}
+                  </Badge>
+                  <span className="text-zinc-200 font-mono font-semibold w-20 flex-shrink-0">
+                    {entry.baseAsset}
+                  </span>
+                  <span className="text-zinc-400 truncate flex-1">{entry.reason}</span>
+                  <span className="text-zinc-500 font-mono w-28 text-right flex-shrink-0">
+                    {new Date(entry.markedAt).toLocaleString()}
+                  </span>
+                  <button
+                    onClick={() => handleClearDust(entry.exchange, entry.baseAsset)}
+                    className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border border-emerald-600/40 bg-emerald-600/10 text-emerald-300 hover:bg-emerald-600/20 transition-colors font-medium"
+                  >
+                    <Undo2 size={10} /> Clear mark
+                  </button>
+                </div>
+              ))}
             </div>
           </CardContent>
         </Card>
