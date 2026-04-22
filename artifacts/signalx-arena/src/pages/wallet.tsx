@@ -7,15 +7,18 @@ import { loadWallet, requestDeposit, requestWithdrawal, type WalletState } from 
 import { exchangeMode, type ExchangeModeState } from '@/lib/exchange-mode';
 import { credentialStore } from '@/lib/credential-store';
 import { KNOWN_EXCHANGES } from '@/lib/exchange';
+import { useBotDoctor } from '@/lib/bot-doctor-store';
+import { baseTicker } from '@/lib/risk-manager';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/use-toast';
 import {
   Wallet, ArrowDownCircle, ArrowUpCircle,
   RefreshCw, TrendingUp, DollarSign, AlertTriangle, FileText, Bot,
-  Activity, ExternalLink,
+  Activity, ExternalLink, Sparkles,
 } from 'lucide-react';
 
 function fmt(n: number, dec = 2) {
@@ -53,6 +56,7 @@ const STATUS_BADGE: Record<string, string> = {
 
 export default function WalletPage() {
   const { bots, demoBalance, botCount, getCurrentPrice, resetAll } = useArena();
+  const doctor = useBotDoctor();
   const [wallet, setWallet] = useState<WalletState>(() => loadWallet());
   const [tab, setTab] = useState<'overview' | 'arena' | 'deposit' | 'withdraw' | 'history'>('overview');
   const [depositAmt, setDepositAmt] = useState('1000');
@@ -295,7 +299,41 @@ export default function WalletPage() {
                           <td className={`px-2 py-1.5 font-mono ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                             {pnl >= 0 ? '+' : ''}${fmt(pnl)}
                           </td>
-                          <td className="px-2 py-1.5 text-zinc-400">{b.position > 0 ? `${b.position.toFixed(4)} ${b.symbol}` : '—'}</td>
+                          <td className="px-2 py-1.5 text-zinc-400">
+                            {b.position > 0 ? (
+                              <div className="flex items-center gap-1.5">
+                                <span>{b.position.toFixed(4)} {b.symbol}</span>
+                                {(() => {
+                                  const ex = exState.exchange;
+                                  if (!ex) return null;
+                                  const key = `${ex}:${baseTicker(b.symbol)}`;
+                                  const dust = doctor.dust[key];
+                                  if (!dust) return null;
+                                  return (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <span
+                                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 text-[9px] font-semibold uppercase tracking-wide"
+                                          data-testid={`badge-bot-dust-${b.id}`}
+                                          aria-label={`${b.symbol} marked as dust on ${dust.exchange}`}
+                                        >
+                                          <Sparkles size={9} />
+                                          Dust
+                                        </span>
+                                      </TooltipTrigger>
+                                      <TooltipContent side="top" className="max-w-xs text-xs">
+                                        <div className="font-semibold mb-1">Marked as dust on {dust.exchange}</div>
+                                        <div className="text-zinc-300 mb-1">{dust.reason}</div>
+                                        <div className="text-[10px] text-zinc-400">
+                                          Marked {new Date(dust.markedAt).toLocaleString()}
+                                        </div>
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  );
+                                })()}
+                              </div>
+                            ) : '—'}
+                          </td>
                         </tr>
                       );
                     })}
