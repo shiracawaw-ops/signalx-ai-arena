@@ -125,4 +125,23 @@ describe('botDoctorStore — dust map', () => {
     botDoctorStore.clearDust('bybit', 'DOGE');
     expect(botDoctorStore.isDust('bybit', 'DOGE')).toBe(false);
   });
+
+  it('markDustWithReason is idempotent and refreshes the reason text', () => {
+    botDoctorStore.markDustWithReason('binance', 'xrp', 'below_min_notional', 'value $3 < $10');
+    expect(botDoctorStore.isDust('binance', 'XRP')).toBe(true);
+    const first = botDoctorStore.dustList().find(d => d.baseAsset === 'XRP');
+    expect(first?.reason).toContain('below_min_notional');
+    expect(first?.reason).toContain('$3');
+
+    // Re-marking with same reason: no-op.
+    const before = first?.markedAt;
+    botDoctorStore.markDustWithReason('binance', 'xrp', 'below_min_notional', 'value $3 < $10');
+    const same = botDoctorStore.dustList().find(d => d.baseAsset === 'XRP');
+    expect(same?.markedAt).toBe(before);
+
+    // Re-marking with a refreshed reason: updates in place, does not duplicate.
+    botDoctorStore.markDustWithReason('binance', 'xrp', 'below_min_notional', 'value $2.99 < $10');
+    expect(botDoctorStore.dustList().filter(d => d.baseAsset === 'XRP').length).toBe(1);
+    expect(botDoctorStore.dustList().find(d => d.baseAsset === 'XRP')?.reason).toContain('$2.99');
+  });
 });

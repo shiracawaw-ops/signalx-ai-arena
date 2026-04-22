@@ -34,6 +34,12 @@ import { tradeConfig, type TradeConfig, POLL_TIMEOUT_MIN_SEC, POLL_TIMEOUT_MAX_S
 import { executionLog, type ExecutionEntry } from '@/lib/execution-log';
 import { apiClient, type ExchangeErrorCode } from '@/lib/api-client';
 import { setCredentials, executeSignal } from '@/lib/execution-engine';
+import { classifyHolding, POSITION_CATEGORY_LABELS, POSITION_CATEGORY_ORDER, type PositionCategory, type ClassifyResult } from '@/lib/position-classifier';
+import { getOwned } from '@/lib/internal-positions';
+import { pipelineCache } from '@/lib/pipeline-cache';
+import { resolveCompliance, type ExchangeId } from '@/lib/asset-compliance';
+import { botDoctorStore, useBotDoctor } from '@/lib/bot-doctor-store';
+import type { SymbolRules } from '@/lib/risk-manager';
 import { submitManualOrder }      from '@/lib/live-execution-bridge';
 import { credentialStore }          from '@/lib/credential-store';
 import { exchangeEvents, type ExchangeEvent, type ExchangeStage } from '@/lib/exchange-events';
@@ -874,6 +880,43 @@ export default function ExchangePage() {
       toast({ title: 'Close unavailable', description: 'Switch to Real or Testnet mode to close live positions.', variant: 'destructive' });
       return;
     }
+
+    // Preflight: classify the holding using cached symbol rules. If the
+    // classifier says it's not closable (dust, rules unknown, wallet-only),
+    // surface the exact reason and bail BEFORE we hit the network. This is
+    // the same gate the engine applies upfront — keeping it here means the
+    // user gets an instant, descriptive toast instead of a delayed reject.
+    try {
+      const row = liveBalances.find(b => b.asset === asset);
+      if (row) {
+        const upper   = row.asset.toUpperCase();
+        const isStable = STABLES.has(upper);
+        const ledgerOwned = getOwned(selectedEx.id, upper);
+        const compl  = resolveCompliance(asset, selectedEx.id as ExchangeId);
+        const cachedRules = compl.ok
+          ? pipelineCache.get<SymbolRules>(`rules:${selectedEx.id}:${compl.exchangeSymbol}`)
+          : undefined;
+        const verdict = classifyHolding({
+          asset:        upper,
+          available:    row.available,
+          hold:         row.hold,
+          ...(typeof row.usdtValue === 'number' ? { usdtValue: row.usdtValue } : {}),
+          exchange:     selectedEx.id,
+          ...(cachedRules ? { symbolRules: cachedRules } : {}),
+          trackedQty:   ledgerOwned,
+          isDustMarked: botDoctorStore.isDust(selectedEx.id, upper),
+          isStable,
+        });
+        if (!verdict.canClose) {
+          if (verdict.reason === 'unsellable_dust' || verdict.reason === 'below_min_notional' ||
+              verdict.reason === 'below_min_sell_qty' || verdict.reason === 'residual_unsellable') {
+            botDoctorStore.markDustWithReason(selectedEx.id, upper, verdict.reason, verdict.detail);
+          }
+          toast({ title: 'Close blocked', description: verdict.detail, variant: 'destructive' });
+          return;
+        }
+      }
+    } catch (e) { console.warn('[closePosition] preflight skipped:', (e as Error).message); }
 
     if (mode === 'real') {
       const ok = window.confirm(
@@ -1871,54 +1914,16 @@ export default function ExchangePage() {
             </Card>
           )}
           {isLive && liveBalances.length > 0 ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-              {liveBalances.map(b => {
-                const isStable = STABLES.has(b.asset.toUpperCase());
-                const canClose = !isStable && b.available > 0;
-                const closing  = closingPositions.has(b.asset);
-                return (
-                <Card key={b.asset} className="border-zinc-800/60">
-                  <CardContent className="p-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="font-bold text-sm">{b.asset}</div>
-                      <Badge variant="outline" className="text-[9px]">{b.hold > 0 ? 'Partial Lock' : 'Available'}</Badge>
-                    </div>
-                    <div className="font-mono font-bold text-xl">{fmt(b.available, 6)}</div>
-                    <div className="text-xs text-zinc-500 mt-1">Total: {fmt(b.total, 6)}</div>
-                    <div className="text-xs text-zinc-500 mt-0.5">
-                      {typeof b.usdtValue === 'number' ? `≈ $${fmt(b.usdtValue)} USDT` : '≈ — USDT'}
-                    </div>
-                    {b.hold > 0 && <div className="text-[10px] text-amber-400 mt-0.5">Locked: {fmt(b.hold, 6)}</div>}
-                    {canClose && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="mt-3 w-full h-7 text-[10px] border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300 gap-1"
-                        disabled={closing}
-                        onClick={() => closePosition(b.asset)}
-                        data-testid={`button-close-position-${b.asset}`}
-                        title={`Submit a market SELL of ${b.asset} via the trading engine`}
-                      >
-                        {closing
-                          ? <RefreshCw size={11} className="animate-spin" />
-                          : <X size={11} />}
-                        {closing ? 'Closing…' : `Close ${b.asset} Position`}
-                      </Button>
-                    )}
-                    {progressMap[closeKey(b.asset)] && (
-                      <OrderProgressPanel
-                        p={progressMap[closeKey(b.asset)]!}
-                        dense
-                        testIdSuffix={`close-${b.asset}`}
-                        onDismiss={() => dismissProgress(closeKey(b.asset))}
-                        onResume={() => resumeProgress(closeKey(b.asset))}
-                      />
-                    )}
-                  </CardContent>
-                </Card>
-                );
-              })}
-            </div>
+            <ClassifiedBalances
+              liveBalances={liveBalances}
+              exchangeId={selectedEx.id}
+              stables={STABLES}
+              closingPositions={closingPositions}
+              progressMap={progressMap}
+              onClose={closePosition}
+              onDismissProgress={dismissProgress}
+              onResumeProgress={resumeProgress}
+            />
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
               {balances.map(b => (
@@ -3299,6 +3304,161 @@ export default function ExchangePage() {
           </Card>
         </div>
       </ErrorBoundary>)}
+    </div>
+  );
+}
+
+// ─── Classified Balances grid ────────────────────────────────────────────────
+// Splits the live balances into 4 collapsible sections (Active / Partial /
+// Dust / Wallet) and a hidden Fully-Closed bucket. Uses position-classifier
+// + cached symbol rules so the Close button only appears when the SELL would
+// actually clear exchange minimums.
+
+interface ClassifiedBalancesProps {
+  liveBalances: Array<{ asset: string; available: number; hold: number; total: number; usdtValue?: number; scope?: string }>;
+  exchangeId:   string;
+  stables:      Set<string>;
+  closingPositions: Set<string>;
+  progressMap:  Record<string, OrderProgress | undefined>;
+  onClose:           (asset: string) => void;
+  onDismissProgress: (key: string) => void;
+  onResumeProgress:  (key: string) => void;
+}
+
+function ClassifiedBalances(p: ClassifiedBalancesProps) {
+  const doctor = useBotDoctor();
+  void doctor.lastUpdated; // re-render whenever doctor state changes
+  const [open, setOpen] = useState<Record<PositionCategory, boolean>>({
+    active_position:  true,
+    partial_position: true,
+    dust_balance:     false,
+    wallet_holding:   false,
+    fully_closed:     false,
+  });
+
+  const classified = p.liveBalances.map(b => {
+    const upper = b.asset.toUpperCase();
+    const isStable = p.stables.has(upper);
+    const tracked  = getOwned(p.exchangeId, upper);
+    const compl    = resolveCompliance(b.asset, p.exchangeId as ExchangeId);
+    const cachedRules = compl.ok
+      ? pipelineCache.get<SymbolRules>(`rules:${p.exchangeId}:${compl.exchangeSymbol}`)
+      : undefined;
+    const verdict: ClassifyResult = classifyHolding({
+      asset:     upper,
+      available: b.available,
+      hold:      b.hold,
+      ...(typeof b.usdtValue === 'number' ? { usdtValue: b.usdtValue } : {}),
+      exchange:  p.exchangeId,
+      ...(cachedRules ? { symbolRules: cachedRules } : {}),
+      trackedQty: tracked,
+      isDustMarked: botDoctorStore.isDust(p.exchangeId, upper),
+      isStable,
+    });
+    return { row: b, verdict };
+  });
+
+  const buckets: Record<PositionCategory, typeof classified> = {
+    active_position: [], partial_position: [], dust_balance: [], wallet_holding: [], fully_closed: [],
+  };
+  for (const c of classified) buckets[c.verdict.category].push(c);
+
+  const chipClass: Record<PositionCategory, string> = {
+    active_position:  'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+    partial_position: 'bg-amber-500/15  text-amber-300  border-amber-500/30',
+    dust_balance:     'bg-zinc-700/50  text-zinc-300  border-zinc-600/40',
+    wallet_holding:   'bg-blue-500/15  text-blue-300  border-blue-500/30',
+    fully_closed:     'bg-zinc-800/60  text-zinc-500  border-zinc-700/40',
+  };
+
+  return (
+    <div className="space-y-4">
+      {POSITION_CATEGORY_ORDER.map(cat => {
+        const items = buckets[cat];
+        if (items.length === 0) return null;
+        // Hide Fully Closed by default unless there's something interesting.
+        const isOpen = open[cat];
+        return (
+          <div key={cat} className="border border-zinc-800/60 rounded-lg overflow-hidden bg-zinc-950/40">
+            <button
+              type="button"
+              className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-zinc-900/60 transition-colors"
+              onClick={() => setOpen(s => ({ ...s, [cat]: !s[cat] }))}
+              data-testid={`button-toggle-section-${cat}`}
+            >
+              <div className="flex items-center gap-2">
+                <ChevronDown
+                  size={12}
+                  className={`text-zinc-500 transition-transform ${isOpen ? '' : '-rotate-90'}`}
+                />
+                <span className="text-xs font-semibold uppercase tracking-wide text-zinc-300">
+                  {POSITION_CATEGORY_LABELS[cat]}
+                </span>
+                <Badge variant="outline" className={`text-[9px] ${chipClass[cat]}`}>{items.length}</Badge>
+              </div>
+              <span className="text-[10px] text-zinc-500">
+                {cat === 'active_position'  && 'Open positions held by your bots'}
+                {cat === 'partial_position' && 'Bot opened — qty has been reduced'}
+                {cat === 'dust_balance'     && 'Below exchange minimums — cannot be closed'}
+                {cat === 'wallet_holding'   && 'Wallet asset not opened by a bot'}
+                {cat === 'fully_closed'     && 'Bot opened then flattened'}
+              </span>
+            </button>
+            {isOpen && (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 p-3">
+                {items.map(({ row: b, verdict }) => {
+                  const closing = p.closingPositions.has(b.asset);
+                  return (
+                    <Card key={b.asset} className="border-zinc-800/60">
+                      <CardContent className="p-4">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="font-bold text-sm">{b.asset}</div>
+                          <Badge variant="outline" className={`text-[9px] ${chipClass[cat]}`}
+                                 data-testid={`chip-status-${b.asset}`}>
+                            {POSITION_CATEGORY_LABELS[cat]}
+                          </Badge>
+                        </div>
+                        <div className="font-mono font-bold text-xl">{fmt(b.available, 6)}</div>
+                        <div className="text-xs text-zinc-500 mt-1">Total: {fmt(b.total, 6)}</div>
+                        <div className="text-xs text-zinc-500 mt-0.5">
+                          {typeof b.usdtValue === 'number' ? `≈ $${fmt(b.usdtValue)} USDT` : '≈ — USDT'}
+                        </div>
+                        {b.hold > 0 && <div className="text-[10px] text-amber-400 mt-0.5">Locked: {fmt(b.hold, 6)}</div>}
+                        <div className="text-[10px] text-zinc-400 mt-2 leading-snug" data-testid={`chip-reason-${b.asset}`}>
+                          {verdict.detail}
+                        </div>
+                        {verdict.canClose ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="mt-3 w-full h-7 text-[10px] border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300 gap-1"
+                            disabled={closing}
+                            onClick={() => p.onClose(b.asset)}
+                            data-testid={`button-close-position-${b.asset}`}
+                            title={`Submit a market SELL of ${b.asset} via the trading engine`}
+                          >
+                            {closing ? <RefreshCw size={11} className="animate-spin" /> : <X size={11} />}
+                            {closing ? 'Closing…' : `Close ${b.asset} Position`}
+                          </Button>
+                        ) : null}
+                        {p.progressMap[closeKey(b.asset)] && (
+                          <OrderProgressPanel
+                            p={p.progressMap[closeKey(b.asset)]!}
+                            dense
+                            testIdSuffix={`close-${b.asset}`}
+                            onDismiss={() => p.onDismissProgress(closeKey(b.asset))}
+                            onResume={() => p.onResumeProgress(closeKey(b.asset))}
+                          />
+                        )}
+                      </CardContent>
+                    </Card>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -208,6 +208,30 @@ class BotDoctorStore {
     this.save(); this.notify();
   }
 
+  /**
+   * Idempotent dust marker that also refreshes the reason string when the
+   * asset is already marked. Shared entry point for the position classifier
+   * and the execution engine so both surfaces describe the same dust the
+   * same way.
+   */
+  markDustWithReason(exchange: string, baseAsset: string, code: string, detail: string): void {
+    const key = dustKey(exchange, baseAsset);
+    const reason = code ? `${code}: ${detail}` : detail;
+    const existing = this.state.dust[key];
+    if (existing) {
+      if (existing.reason === reason) return;
+      existing.reason   = reason;
+      existing.markedAt = Date.now();
+      this.state.lastUpdated = Date.now();
+      this.save(); this.notify();
+      return;
+    }
+    this.state.dust[key] = { exchange, baseAsset: baseAsset.toUpperCase(), reason, markedAt: Date.now() };
+    this.logDecision({ type: 'dust', detail: `${exchange}:${baseAsset} marked dust — ${reason}` });
+    this.state.lastUpdated = Date.now();
+    this.save(); this.notify();
+  }
+
   isDust(exchange: string, baseAsset: string): boolean {
     return !!this.state.dust[dustKey(exchange, baseAsset)];
   }

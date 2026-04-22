@@ -20,6 +20,8 @@ import { baseTicker } from './risk-manager.js';
 import { realProfitStore }  from './real-profit-store.js';
 import { botActivityStore } from './bot-activity-store.js';
 import { botDoctorStore }   from './bot-doctor-store.js';
+import { pipelineCache }    from './pipeline-cache.js';
+import { resolveCompliance } from './asset-compliance.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -266,6 +268,41 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     return reject(signal, exchange, mode, REJECT.BELOW_MIN_NOTIONAL,
       `Doctor: ${exchange}:${baseTk} is marked as dust. Clear the dust mark to retry.`);
   }
+
+  // 6a-ter. Upfront SELL min-notional gate (uses cached symbol rules).
+  // For closing SELLs we already know the qty we own — if it's below the
+  // exchange minimums we should NOT call the network or the heavyweight
+  // shield/risk pipeline. Marking dust here also stops follow-up retries
+  // from the same bot. We deliberately do NOT call feNoteFailure for this
+  // path so a single dust asset can never push the per-symbol cooldown
+  // counter into "cooldown_active" storms across the fleet.
+  if (mode === 'real' && signal.side === 'sell' && ownedHere > 0) {
+    try {
+      const compl = resolveCompliance(signal.symbol, exchange as ExchangeId);
+      if (compl.ok) {
+        const cachedRules = pipelineCache.get<RiskSymbolRules>(`rules:${exchange}:${compl.exchangeSymbol}`);
+        if (cachedRules) {
+          const px       = signal.price > 0 ? signal.price : 0;
+          const notional = px * ownedHere;
+          const minQty   = cachedRules.minQty       ?? 0;
+          const minNot   = cachedRules.minNotional  ?? 0;
+          if (minQty > 0 && ownedHere < minQty) {
+            const detail = `Owned ${ownedHere} ${baseTk} below ${exchange} minQty ${minQty}.`;
+            botDoctorStore.markDustWithReason(exchange, baseTk, REJECT.OWNED_QTY_BELOW_MIN_NOTIONAL, detail);
+            return reject(signal, exchange, mode, REJECT.OWNED_QTY_BELOW_MIN_NOTIONAL, detail);
+          }
+          if (minNot > 0 && px > 0 && notional < minNot) {
+            const detail = `Owned ${baseTk} value $${notional.toFixed(2)} below ${exchange} minNotional $${minNot}.`;
+            botDoctorStore.markDustWithReason(exchange, baseTk, REJECT.OWNED_QTY_BELOW_MIN_NOTIONAL, detail);
+            return reject(signal, exchange, mode, REJECT.OWNED_QTY_BELOW_MIN_NOTIONAL, detail);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[engine] upfront SELL gate skipped:', (e as Error).message);
+    }
+  }
+
   const gate     = feGateBlocked(gateKey);
   if (gate.blocked && !isClosingSell) {
     return reject(signal, exchange, mode, REJECT.EXCHANGE_REJECTED,
