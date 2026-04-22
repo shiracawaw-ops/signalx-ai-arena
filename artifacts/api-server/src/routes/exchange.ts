@@ -324,6 +324,51 @@ router.post('/exchange/:exchange/self-test', async (req, res) => {
   } catch (e) { serverError(res, ex, e); }
 });
 
+// ── Dust sweep helpers ──────────────────────────────────────────────────────
+// Per-exchange "go to the venue's own dust converter" URLs surfaced by the
+// fallback path so users on adapters without a native dust API still have a
+// one-click way to clean up tiny leftovers manually.
+const DUST_HELP_URLS: Record<string, string> = {
+  binance:  'https://www.binance.com/en/my/wallet/account/main/convert-bnb',
+  bybit:    'https://www.bybit.com/user/assets/home/spot',
+  okx:      'https://www.okx.com/balance/recovery',
+  kucoin:   'https://www.kucoin.com/assets/balances?utm_source=signalx',
+  kraken:   'https://www.kraken.com/u/funding',
+  coinbase: 'https://accounts.coinbase.com/portfolios',
+  bitget:   'https://www.bitget.com/en/asset/spot',
+  htx:      'https://www.htx.com/en-us/finance/exchange/',
+  gate:     'https://www.gate.io/myaccount/myfund',
+  mexc:     'https://www.mexc.com/assets',
+  bitfinex: 'https://www.bitfinex.com/balances',
+  deribit:  'https://www.deribit.com/account/positions',
+};
+
+// POST /api/exchange/:exchange/dust/sweep — convert dust leftovers via the
+// venue's native dust-conversion endpoint. Body: `{ assets: string[] }`.
+// Adapters without a native dust API return `{ ok: true, notSupported: true,
+// helpUrl, message }` so the UI can fall back to a copy-paste explanation.
+router.post('/exchange/:exchange/dust/sweep', async (req, res) => {
+  const ex      = requireExchange(req, res); if (!ex) return;
+  const creds   = extractCreds(req);
+  if (!creds) return badRequest(res, 'Missing API credentials');
+  const assets = Array.isArray(req.body?.assets) ? (req.body.assets as unknown[]).map(String) : [];
+  if (assets.length === 0) return badRequest(res, 'Missing `assets` array');
+  const adapter = getAdapter(ex)!;
+  logAction(ex, `sweepDust(${assets.length} assets)`, creds.apiKey);
+  if (typeof adapter.sweepDust !== 'function') {
+    const helpUrl = DUST_HELP_URLS[ex];
+    return res.json({
+      ok: true, exchange: ex, notSupported: true,
+      ...(helpUrl ? { helpUrl } : {}),
+      message: `${ex} does not expose a dust-conversion API. Open the exchange's converter page and clean up manually.`,
+    });
+  }
+  try {
+    const result = await adapter.sweepDust(creds, assets);
+    return res.json({ ok: true, exchange: ex, sweep: result });
+  } catch (e) { serverError(res, ex, e); }
+});
+
 // POST /api/exchange/:exchange/symbol/rules — get symbol trading rules
 router.post('/exchange/:exchange/symbol/rules', async (req, res) => {
   const ex      = requireExchange(req, res); if (!ex) return;

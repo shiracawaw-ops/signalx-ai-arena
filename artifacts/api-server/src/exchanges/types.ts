@@ -231,4 +231,28 @@ export interface ExchangeAdapter {
   getPrice(symbol: string): Promise<number>;  // public ticker price (no auth required)
   normalizeSymbol(symbol: string): string;  // e.g. "BTC" → "BTCUSDT" for Binance
   ping(): Promise<number>;  // latency ms
+  /**
+   * Optional: convert tiny "dust" leftovers into a stable settlement asset
+   * using the venue's native dust-conversion endpoint (e.g. Binance
+   * /sapi/v1/asset/dust). Adapters that don't implement this fall back to
+   * a copy-paste explanation in the route handler so the UI can still
+   * point the user at the exchange's own converter UI.
+   */
+  sweepDust?(creds: ExchangeCredentials, assets: string[]): Promise<DustSweepResult>;
+}
+
+// Result of a dust-sweep call. Adapters report which assets were converted,
+// which failed (with a per-asset reason), and an optional aggregate stable-coin
+// amount the user received from the conversion.
+export interface DustSweepResult {
+  exchange:        string;
+  swept:           string[];                                // base assets successfully converted
+  failed:          Array<{ asset: string; reason: string }>;
+  /** Total stable-coin (e.g. BNB or USDT, depending on venue) credited. */
+  totalReceived?:  number;
+  /** Asset symbol the venue paid out in (e.g. "BNB" for Binance dust→BNB). */
+  receivedAsset?:  string;
+  /** Free-form note shown verbatim under the toast (e.g. fee disclosures). */
+  note?:           string;
+  raw?:            unknown;
 }

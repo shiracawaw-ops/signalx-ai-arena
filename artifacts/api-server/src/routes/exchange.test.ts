@@ -7,7 +7,7 @@ const VALID_CREDS = {
   'x-secret-key': 'test-secret-key',
 };
 
-const mockAdapter = {
+const mockAdapter: Record<string, ReturnType<typeof vi.fn>> = {
   ping: vi.fn(),
   validateCredentials: vi.fn(),
   getPermissions: vi.fn(),
@@ -19,6 +19,13 @@ const mockAdapter = {
   getPrice: vi.fn(),
   getSymbolRules: vi.fn(),
 };
+
+beforeEach(() => {
+  // Default: no native dust API on the mock adapter so the route falls
+  // back to its "notSupported" path. Individual tests opt in by assigning
+  // mockAdapter.sweepDust = vi.fn() before calling the endpoint.
+  delete mockAdapter['sweepDust'];
+});
 
 vi.mock('../exchanges/registry.js', () => ({
   listAdapters: () => ['binance', 'okx', 'bybit'],
@@ -335,6 +342,58 @@ describe('POST /api/exchange/:exchange/symbol/rules', () => {
       .post('/api/exchange/binance/symbol/rules')
       .send({ symbol: 'BTCUSDT' });
     expect(res.status).toBe(400);
+  });
+});
+
+// ── POST /api/exchange/:exchange/dust/sweep ──────────────────────────────────
+
+describe('POST /api/exchange/:exchange/dust/sweep', () => {
+  it('returns notSupported with helpUrl when adapter has no dust API', async () => {
+    const res = await request(app)
+      .post('/api/exchange/binance/dust/sweep')
+      .set(VALID_CREDS)
+      .send({ assets: ['BNB', 'SHIB'] });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.notSupported).toBe(true);
+    expect(typeof res.body.helpUrl).toBe('string');
+    expect(res.body.message).toMatch(/dust/i);
+  });
+
+  it('proxies the sweep result when the adapter implements sweepDust', async () => {
+    mockAdapter['sweepDust'] = vi.fn().mockResolvedValue({
+      exchange: 'binance', swept: ['SHIB'], failed: [{ asset: 'BNB', reason: 'Above threshold' }],
+      totalReceived: 0.0001, receivedAsset: 'BNB',
+    });
+    const res = await request(app)
+      .post('/api/exchange/binance/dust/sweep')
+      .set(VALID_CREDS)
+      .send({ assets: ['BNB', 'SHIB'] });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.sweep.swept).toEqual(['SHIB']);
+    expect(res.body.sweep.failed[0]).toEqual({ asset: 'BNB', reason: 'Above threshold' });
+    expect(mockAdapter['sweepDust']).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'test-api-key' }),
+      ['BNB', 'SHIB'],
+    );
+  });
+
+  it('returns 400 when assets array is missing or empty', async () => {
+    const res = await request(app)
+      .post('/api/exchange/binance/dust/sweep')
+      .set(VALID_CREDS)
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body.ok).toBe(false);
+  });
+
+  it('returns 400 when credentials are missing', async () => {
+    const res = await request(app)
+      .post('/api/exchange/binance/dust/sweep')
+      .send({ assets: ['BNB'] });
+    expect(res.status).toBe(400);
+    expect(res.body.ok).toBe(false);
   });
 });
 

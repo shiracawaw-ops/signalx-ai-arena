@@ -61,3 +61,73 @@ describe('BinanceAdapter.getBalances', () => {
     expect(foo?.usdtValue).toBeUndefined();
   });
 });
+
+describe('BinanceAdapter.sweepDust', () => {
+  const creds = { apiKey: 'k', secretKey: 's', testnet: false };
+
+  it('returns testnet-unsupported failures without hitting the network', async () => {
+    const adapter = new BinanceAdapter();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const out = await adapter.sweepDust({ ...creds, testnet: true }, ['SHIB', 'DOGE']);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(out.swept).toEqual([]);
+    expect(out.failed).toEqual([
+      { asset: 'SHIB', reason: 'TESTNET_UNSUPPORTED' },
+      { asset: 'DOGE', reason: 'TESTNET_UNSUPPORTED' },
+    ]);
+  });
+
+  it('parses transferResult and reports swept assets, fee, and total received BNB', async () => {
+    const adapter = new BinanceAdapter();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      mockJsonResponse({
+        totalServiceCharge: '0.0001',
+        totalTransfered: '0.0123',
+        transferResult: [
+          { fromAsset: 'SHIB', amount: '1000000', transferedAmount: '0.01', serviceChargeAmount: '0.0001', tranId: 1 },
+        ],
+      }),
+    );
+    const out = await adapter.sweepDust(creds, ['shib', 'BNB']);
+    expect(out.swept).toEqual(['SHIB']);
+    expect(out.failed).toEqual([
+      { asset: 'BNB', reason: expect.stringMatching(/Not eligible|threshold/i) },
+    ]);
+    expect(out.totalReceived).toBeCloseTo(0.0123);
+    expect(out.receivedAsset).toBe('BNB');
+    expect(out.note).toMatch(/service charge/i);
+  });
+
+  it('maps a top-level API error to per-asset failures', async () => {
+    const adapter = new BinanceAdapter();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ code: -2014, msg: 'API-key format invalid.' }), {
+        status: 400, headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const out = await adapter.sweepDust(creds, ['SHIB']);
+    expect(out.swept).toEqual([]);
+    expect(out.failed).toHaveLength(1);
+    expect(out.failed[0].asset).toBe('SHIB');
+    expect(out.failed[0].reason).toMatch(/API-key|invalid/i);
+    expect(out.receivedAsset).toBe('BNB');
+  });
+
+  it('signs the request and sends one repeated asset param per coin', async () => {
+    const adapter = new BinanceAdapter();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      mockJsonResponse({ totalServiceCharge: '0', totalTransfered: '0', transferResult: [] }),
+    );
+    await adapter.sweepDust(creds, ['shib', 'SHIB', '  doge  ', '']);
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const body = String(init.body);
+    // Dedup + uppercased + trimmed; empties dropped
+    expect(body.match(/asset=SHIB/g)?.length).toBe(1);
+    expect(body.match(/asset=DOGE/g)?.length).toBe(1);
+    expect(body).toMatch(/timestamp=\d+/);
+    expect(body).toMatch(/&signature=[a-f0-9]{64}$/);
+    expect((init.headers as Record<string, string>)['X-MBX-APIKEY']).toBe('k');
+    expect((init.headers as Record<string, string>)['Content-Type'])
+      .toBe('application/x-www-form-urlencoded');
+  });
+});

@@ -417,6 +417,11 @@ export default function ExchangePage() {
   // user can't double-click and so spinners only show on the row being acted on.
   const [cancellingOrders, setCancellingOrders] = useState<Set<string>>(new Set());
   const [closingPositions, setClosingPositions] = useState<Set<string>>(new Set());
+  // Per-asset busy flags for the "Sweep dust" button (per-row + section-bulk).
+  // Tracks any base asset currently being sent through the venue's native
+  // dust-conversion endpoint so the button can disable + spin without
+  // double-fires from rapid clicks.
+  const [sweepingAssets, setSweepingAssets] = useState<Set<string>>(new Set());
 
   // ── Cancel-all-open-orders state ───────────────────────────────────────────
   // `cancelAllOpen` toggles the Real-mode "type CANCEL ALL" confirmation dialog.
@@ -1065,6 +1070,85 @@ export default function ExchangePage() {
       });
     }
   }, [toast]);
+
+  // ── Sweep dust ─────────────────────────────────────────────────────────────
+  // Calls the venue's native dust-conversion endpoint (e.g. Binance
+  // /sapi/v1/asset/dust) for one or more base assets, then clears the
+  // matching Doctor dust marks so the cards disappear on the next refresh.
+  // Adapters without a native dust API return `notSupported: true` plus a
+  // helpUrl — we open that in a new tab so the user can clean up manually.
+  const sweepDust = useCallback(async (assets: string[]) => {
+    const targets = Array.from(new Set(assets.map(a => a.toUpperCase()).filter(Boolean)));
+    if (targets.length === 0) return;
+    if (mode !== 'real' && mode !== 'testnet') {
+      toast({ title: 'Sweep unavailable', description: 'Switch to Real or Testnet mode to sweep dust on the live account.', variant: 'destructive' });
+      return;
+    }
+    if (!apiKey || !secretKey) {
+      toast({ title: 'Not connected', description: 'Connect with API credentials before sweeping dust.', variant: 'destructive' });
+      return;
+    }
+    if (mode === 'real') {
+      const ok = window.confirm(
+        `Sweep ${targets.length} dust asset${targets.length === 1 ? '' : 's'} on ${selectedEx.name}?\n\n` +
+        `This calls the exchange's native dust-conversion endpoint. The exchange ` +
+        `decides which assets are eligible and pays out in its dust-payout token ` +
+        `(e.g. BNB on Binance) — usually with a small service charge.\n\n` +
+        `Assets: ${targets.join(', ')}\n\nContinue?`
+      );
+      if (!ok) return;
+    }
+    setSweepingAssets(prev => { const n = new Set(prev); for (const a of targets) n.add(a); return n; });
+    try {
+      const creds = { apiKey, secretKey, ...(passphrase ? { passphrase } : {}) };
+      const r = await apiClient.sweepDust(selectedEx.id, creds, targets);
+      if (!r.ok) {
+        toast({ title: 'Sweep failed', description: r.error, variant: 'destructive' });
+        return;
+      }
+      if (r.data.notSupported) {
+        toast({
+          title: `${selectedEx.name} has no dust-sweep API`,
+          description: r.data.message ?? 'Open the exchange UI to convert dust manually.',
+        });
+        if (r.data.helpUrl) window.open(r.data.helpUrl, '_blank', 'noopener,noreferrer');
+        return;
+      }
+      const sweep = r.data.sweep;
+      if (!sweep) {
+        toast({ title: 'Sweep returned no result', description: 'Try refreshing the balance and sweeping again.', variant: 'destructive' });
+        return;
+      }
+      // Auto-clear Doctor dust marks for every asset the venue actually
+      // converted so the card disappears on the next refresh.
+      for (const a of sweep.swept) botDoctorStore.clearDust(selectedEx.id, a);
+      const okCount   = sweep.swept.length;
+      const failCount = sweep.failed.length;
+      const payout    = sweep.totalReceived && sweep.receivedAsset
+        ? ` Received ≈ ${sweep.totalReceived} ${sweep.receivedAsset}.`
+        : '';
+      const noteSuffix = sweep.note ? ` ${sweep.note}` : '';
+      if (okCount > 0 && failCount === 0) {
+        toast({ title: `Swept ${okCount} dust asset${okCount === 1 ? '' : 's'}`, description: `${sweep.swept.join(', ')}.${payout}${noteSuffix}` });
+      } else if (okCount > 0 && failCount > 0) {
+        toast({
+          title: `Swept ${okCount}, ${failCount} skipped`,
+          description: `Converted: ${sweep.swept.join(', ')}.${payout} Skipped: ${sweep.failed.map(f => `${f.asset} (${f.reason})`).join('; ')}.${noteSuffix}`,
+        });
+      } else {
+        toast({
+          title: 'No assets converted',
+          description: sweep.failed.map(f => `${f.asset}: ${f.reason}`).join('; ') || 'The exchange rejected the request.' + noteSuffix,
+          variant: 'destructive',
+        });
+      }
+    } catch (e) {
+      toast({ title: 'Sweep failed', description: (e as Error).message ?? 'Unexpected error', variant: 'destructive' });
+    } finally {
+      setSweepingAssets(prev => { const n = new Set(prev); for (const a of targets) n.delete(a); return n; });
+      refreshLiveData();
+    }
+  }, [mode, apiKey, secretKey, passphrase, selectedEx.id, selectedEx.name, toast, refreshLiveData]);
 
   // ── Connect ───────────────────────────────────────────────────────────────
   const handleConnect = async () => {
@@ -1922,8 +2006,10 @@ export default function ExchangePage() {
               exchangeId={selectedEx.id}
               stables={STABLE_ASSETS}
               closingPositions={closingPositions}
+              sweepingAssets={sweepingAssets}
               progressMap={progressMap}
               onClose={closePosition}
+              onSweep={sweepDust}
               onDismissProgress={dismissProgress}
               onResumeProgress={resumeProgress}
             />
@@ -3322,8 +3408,10 @@ interface ClassifiedBalancesProps {
   exchangeId:   string;
   stables:      ReadonlySet<string>;
   closingPositions: Set<string>;
+  sweepingAssets:   Set<string>;
   progressMap:  Record<string, OrderProgress | undefined>;
   onClose:           (asset: string) => void;
+  onSweep:           (assets: string[]) => void;
   onDismissProgress: (key: string) => void;
   onResumeProgress:  (key: string) => void;
 }
@@ -3386,32 +3474,57 @@ function ClassifiedBalances(p: ClassifiedBalancesProps) {
         if (items.length === 0) return null;
         // Hide Fully Closed by default unless there's something interesting.
         const isOpen = open[cat];
+        // For the Dust section, render a section-level "Sweep all" affordance
+        // next to the chevron so the user can clean up every dust row in one
+        // call to the venue's native dust converter instead of clicking each
+        // card individually.
+        const dustAssets = cat === 'dust_balance'
+          ? items.map(i => i.row.asset.toUpperCase())
+          : [];
+        const anySweeping = cat === 'dust_balance'
+          && dustAssets.some(a => p.sweepingAssets.has(a));
         return (
           <div key={cat} className="border border-zinc-800/60 rounded-lg overflow-hidden bg-zinc-950/40">
-            <button
-              type="button"
-              className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-zinc-900/60 transition-colors"
-              onClick={() => setOpen(s => ({ ...s, [cat]: !s[cat] }))}
-              data-testid={`button-toggle-section-${cat}`}
-            >
-              <div className="flex items-center gap-2">
-                <ChevronDown
-                  size={12}
-                  className={`text-zinc-500 transition-transform ${isOpen ? '' : '-rotate-90'}`}
-                />
-                <span className="text-xs font-semibold uppercase tracking-wide text-zinc-300">
-                  {POSITION_CATEGORY_LABELS[cat]}
+            <div className="flex items-center justify-between px-3 py-2 hover:bg-zinc-900/60 transition-colors gap-2">
+              <button
+                type="button"
+                className="flex-1 flex items-center justify-between text-left"
+                onClick={() => setOpen(s => ({ ...s, [cat]: !s[cat] }))}
+                data-testid={`button-toggle-section-${cat}`}
+              >
+                <div className="flex items-center gap-2">
+                  <ChevronDown
+                    size={12}
+                    className={`text-zinc-500 transition-transform ${isOpen ? '' : '-rotate-90'}`}
+                  />
+                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-300">
+                    {POSITION_CATEGORY_LABELS[cat]}
+                  </span>
+                  <Badge variant="outline" className={`text-[9px] ${chipClass[cat]}`}>{items.length}</Badge>
+                </div>
+                <span className="text-[10px] text-zinc-500">
+                  {cat === 'active_position'  && 'Open positions held by your bots'}
+                  {cat === 'partial_position' && 'Bot opened — qty has been reduced'}
+                  {cat === 'dust_balance'     && 'Below exchange minimums — sweep into the venue\u2019s dust-payout token'}
+                  {cat === 'wallet_holding'   && 'Wallet asset not opened by a bot'}
+                  {cat === 'fully_closed'     && 'Bot opened then flattened'}
                 </span>
-                <Badge variant="outline" className={`text-[9px] ${chipClass[cat]}`}>{items.length}</Badge>
-              </div>
-              <span className="text-[10px] text-zinc-500">
-                {cat === 'active_position'  && 'Open positions held by your bots'}
-                {cat === 'partial_position' && 'Bot opened — qty has been reduced'}
-                {cat === 'dust_balance'     && 'Below exchange minimums — cannot be closed'}
-                {cat === 'wallet_holding'   && 'Wallet asset not opened by a bot'}
-                {cat === 'fully_closed'     && 'Bot opened then flattened'}
-              </span>
-            </button>
+              </button>
+              {cat === 'dust_balance' && dustAssets.length > 0 && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-[10px] border-amber-500/40 text-amber-300 hover:bg-amber-500/10 hover:text-amber-200 gap-1 flex-shrink-0"
+                  disabled={anySweeping}
+                  onClick={(e) => { e.stopPropagation(); p.onSweep(dustAssets); }}
+                  data-testid="button-sweep-all-dust"
+                  title={`Sweep all ${dustAssets.length} dust assets via the venue's native dust-conversion endpoint`}
+                >
+                  {anySweeping ? <RefreshCw size={11} className="animate-spin" /> : <Wallet size={11} />}
+                  {anySweeping ? 'Sweeping…' : `Sweep all dust (${dustAssets.length})`}
+                </Button>
+              )}
+            </div>
             {isOpen && (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 p-3">
                 {items.map(({ row: b, verdict, dustEntry }) => {
@@ -3475,6 +3588,23 @@ function ClassifiedBalances(p: ClassifiedBalancesProps) {
                             {closing ? 'Closing…' : `Close ${b.asset} Position`}
                           </Button>
                         ) : null}
+                        {cat === 'dust_balance' && (() => {
+                          const sweeping = p.sweepingAssets.has(b.asset.toUpperCase());
+                          return (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="mt-2 w-full h-7 text-[10px] border-amber-500/40 text-amber-300 hover:bg-amber-500/10 hover:text-amber-200 gap-1"
+                              disabled={sweeping}
+                              onClick={() => p.onSweep([b.asset])}
+                              data-testid={`button-sweep-dust-${b.asset}`}
+                              title={`Convert ${b.asset} dust into the venue's dust-payout token (e.g. BNB on Binance)`}
+                            >
+                              {sweeping ? <RefreshCw size={11} className="animate-spin" /> : <Wallet size={11} />}
+                              {sweeping ? 'Sweeping…' : `Sweep ${b.asset}`}
+                            </Button>
+                          );
+                        })()}
                         {p.progressMap[closeKey(b.asset)] && (
                           <OrderProgressPanel
                             p={p.progressMap[closeKey(b.asset)]!}

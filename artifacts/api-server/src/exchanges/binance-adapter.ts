@@ -6,7 +6,7 @@ import { logger } from '../lib/logger.js';
 import type {
   ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission,
   Balance, SymbolRules, OrderRequest, OrderResult, OrderTestResult,
-  ExchangeDiagnostic, SelfTestResult, DiagnosticStep,
+  ExchangeDiagnostic, SelfTestResult, DiagnosticStep, DustSweepResult,
 } from './types.js';
 
 const BASE         = 'https://api.binance.com';
@@ -699,6 +699,84 @@ export class BinanceAdapter implements ExchangeAdapter {
     }, 'binance');
     if (!r.ok) return [];
     return ((r.data as unknown[]) ?? []).map(o => parseOrder(o as Record<string, unknown>));
+  }
+
+  /**
+   * Convert tiny "dust" leftovers into BNB via Binance's native
+   * POST /sapi/v1/asset/dust endpoint. The API expects an `asset` parameter
+   * repeated for every base asset to convert; Binance applies its own
+   * eligibility filter (only assets actually below the dust threshold
+   * are converted) and ignores the rest with a per-asset error.
+   *
+   * Returns the list of assets the exchange actually converted, plus any
+   * that it rejected (with the reason it gave us). Note: Binance pays out
+   * in BNB — not USDT — so the UI surfaces that distinction in the toast.
+   */
+  async sweepDust(creds: ExchangeCredentials, assets: string[]): Promise<DustSweepResult> {
+    if (creds.testnet) {
+      return {
+        exchange: 'binance', swept: [], failed: assets.map(a => ({ asset: a, reason: 'TESTNET_UNSUPPORTED' })),
+        note: 'Binance testnet does not expose the dust-conversion endpoint. Switch to Real mode to sweep dust on the live account.',
+      };
+    }
+    const cleaned = Array.from(new Set(
+      assets.map(a => String(a ?? '').trim().toUpperCase()).filter(Boolean),
+    ));
+    if (cleaned.length === 0) {
+      return { exchange: 'binance', swept: [], failed: [], note: 'No assets supplied' };
+    }
+    // Binance signs body params for sapi POST: send as application/x-www-form-urlencoded
+    // with the `asset` key repeated once per coin and the signature appended.
+    const ts = Date.now();
+    const parts = [
+      ...cleaned.map(a => `asset=${encodeURIComponent(a)}`),
+      `timestamp=${ts}`,
+    ];
+    const body = parts.join('&');
+    const signature = sign(creds.secretKey, body);
+    const fullBody = `${body}&signature=${signature}`;
+    const r = await safeFetch(`${BASE}/sapi/v1/asset/dust`, {
+      method: 'POST',
+      headers: {
+        'X-MBX-APIKEY': creds.apiKey,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: fullBody,
+    }, 'binance');
+
+    if (!r.ok) {
+      const msg = r.error?.message ?? 'Dust conversion failed';
+      logger.warn({ exchange: 'binance', key: maskKey(creds.apiKey), assets: cleaned, err: msg }, '[binance.sweepDust] failed');
+      // Whole request rejected (e.g. -1100, -2014). Surface as per-asset failures
+      // so the UI can render an actionable list rather than a generic banner.
+      return {
+        exchange: 'binance', swept: [], receivedAsset: 'BNB',
+        failed: cleaned.map(a => ({ asset: a, reason: msg })),
+      };
+    }
+
+    // Successful Binance response shape:
+    // { totalServiceCharge, totalTransfered, transferResult: [
+    //     { amount, fromAsset, operateTime, serviceChargeAmount, tranId, transferedAmount, ... } ] }
+    const d = r.data as Record<string, unknown>;
+    const transfers = (d['transferResult'] as Array<Record<string, unknown>> | undefined) ?? [];
+    const sweptAssets = transfers.map(t => String(t['fromAsset'] ?? '').toUpperCase()).filter(Boolean);
+    const sweptSet = new Set(sweptAssets);
+    const failed = cleaned
+      .filter(a => !sweptSet.has(a))
+      .map(a => ({ asset: a, reason: 'Not eligible for dust conversion (above threshold or unsupported by Binance)' }));
+    const totalReceived = parseFloat(String(d['totalTransfered'] ?? d['totalTransferred'] ?? '0')) || 0;
+    const fee           = parseFloat(String(d['totalServiceCharge'] ?? '0')) || 0;
+    logger.info({ exchange: 'binance', key: maskKey(creds.apiKey), swept: sweptAssets, totalReceived, fee }, '[binance.sweepDust] success');
+    return {
+      exchange:      'binance',
+      swept:          sweptAssets,
+      failed,
+      totalReceived,
+      receivedAsset: 'BNB',
+      ...(fee > 0 ? { note: `Binance kept ${fee} BNB as the dust-conversion service charge.` } : {}),
+      raw: d,
+    };
   }
 
   async getOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<OrderResult | null> {

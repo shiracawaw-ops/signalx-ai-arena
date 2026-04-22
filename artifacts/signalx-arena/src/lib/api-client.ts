@@ -422,6 +422,31 @@ export const apiClient = {
     });
   },
 
+  async sweepDust(
+    exchange: string,
+    creds: ExchangeCredentials,
+    assets: string[],
+  ): Promise<ApiResult<{
+    sweep?: {
+      exchange:      string;
+      swept:         string[];
+      failed:        Array<{ asset: string; reason: string }>;
+      totalReceived?: number;
+      receivedAsset?: string;
+      note?:         string;
+    };
+    notSupported?: boolean;
+    helpUrl?:      string;
+    message?:      string;
+  }>> {
+    console.log(`[api-client] sweepDust ${exchange} assets=${assets.join(',')} key=${maskKey(creds.apiKey)}`);
+    return request(`${BACKEND}/exchange/${exchange}/dust/sweep`, {
+      method:  'POST',
+      headers: credHeaders(creds),
+      body:    JSON.stringify({ assets }),
+    });
+  },
+
   async runSelfTest(
     exchange: string,
     creds: ExchangeCredentials,
