@@ -3426,7 +3426,20 @@ function ClassifiedBalances(p: ClassifiedBalancesProps) {
     wallet_holding:   false,
     fully_closed:     false,
   });
-  const [dustOnly, setDustOnly] = useState(false);
+  const [dustOnly, setDustOnly] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('sx_classified_dust_only') === '1';
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('sx_classified_dust_only', dustOnly ? '1' : '0');
+    } catch {
+      // ignore storage failures (private mode, quota, etc.)
+    }
+  }, [dustOnly]);
 
   const classified = p.liveBalances.map(b => {
     const upper = b.asset.toUpperCase();
@@ -3467,11 +3480,9 @@ function ClassifiedBalances(p: ClassifiedBalancesProps) {
   }
   const dustCount = classified.filter(c => !!c.dustEntry).length;
 
-  // Auto-reset the filter if the last dust mark gets cleared while it's active,
-  // so users aren't trapped looking at an empty filtered view.
-  useEffect(() => {
-    if (dustOnly && dustCount === 0) setDustOnly(false);
-  }, [dustOnly, dustCount]);
+  // The filter preference is intentionally preserved when dustCount drops to 0
+  // (e.g. after switching exchanges) so the trader's choice survives across
+  // visits. The empty-state message below handles the "nothing to show" case.
 
   const chipClass: Record<PositionCategory, string> = {
     active_position:  'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
