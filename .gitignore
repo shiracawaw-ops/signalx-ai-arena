@@ -53,3 +53,6 @@ replit.nix
 # Electron build output
 dist-electron/
 attached_assets/builds/
+
+# Electron release artifacts (uploaded as GitHub release assets, not committed)
+artifacts/*/release/
