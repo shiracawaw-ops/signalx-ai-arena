@@ -1,0 +1,87 @@
+Patch the current project directly in existing files only.
+
+Do not redesign the UI.
+Do not create a new app.
+Apply code changes now.
+
+Current live issue:
+The Exchange page shows:
+
+* Can't reach Bybit
+* network_error
+* Cannot reach the API server
+* API connected but trading permission missing
+
+Task:
+Diagnose and fix the unstable real-mode connectivity and permission state handling.
+
+Required fixes:
+
+1. Network error handling
+
+* find where the app checks Bybit/API reachability
+* identify why the app can show connected state while also showing network_error
+* fix stale or contradictory connection state
+* make connection state transitions consistent and truthful
+
+2. API server / exchange reachability
+
+* verify whether the app is calling Bybit directly or through an internal API server
+* fix the failure path so "Cannot reach the API server" identifies the real failing layer
+* distinguish clearly between:
+  a) no internet / exchange unreachable
+  b) internal API server down
+  c) request timeout
+  d) invalid API credentials
+  e) missing trading permission
+
+3. Permission state
+
+* fix the trading permission check path
+* ensure Self-Test / Permissions reflects the real exchange result
+* do not keep "API connected" if the exchange is unreachable right now
+* do not keep stale success flags from earlier sessions
+
+4. State consistency
+
+* networkUp, apiValidated, balanceFetched, tradePermission, tradingArmed must reflect current reality
+* no mixed state where connected badge is green while network_error is active
+* clear stale state when the connection drops
+
+5. Logging and diagnostics
+
+* add exact logs for:
+
+  * ping/reachability
+  * internal API server availability
+  * exchange request failure
+  * timeout
+  * permission check result
+* surface the exact failing layer in diagnostics
+
+Return exactly:
+
+files changed
+
+* <file path>
+* <file path>
+
+critical fixes applied
+
+* <short item>
+* <short item>
+
+where connection state handling was fixed
+
+* <file path>: <function/class/section>
+
+where permission state handling was fixed
+
+* <file path>: <function/class/section>
+
+how to verify
+
+* disconnect/reconnect network and confirm state updates correctly
+* confirm no stale green connected state remains during network_error
+* run Permissions self-test
+* confirm the app shows the exact failing layer

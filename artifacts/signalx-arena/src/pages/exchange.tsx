@@ -85,6 +85,15 @@ const CONNECTION_ERROR_STATES: ReadonlySet<ConnectionState> = new Set([
   'rate_limited',  'balance_error',
 ]);
 
+// States in which the connection is logically alive — exchange is reachable
+// AND the API key has been validated. `rate_limited` is treated as alive
+// because trading is only momentarily blocked, not the connection itself.
+// Anything not in this set means we MUST NOT show a green "Connected"
+// badge, regardless of any earlier success flag in the React tree.
+const CONNECTED_STATES: ReadonlySet<ConnectionState> = new Set([
+  'connected', 'balance_loaded', 'balance_empty', 'rate_limited',
+]);
+
 function friendlyConnectionError(
   state: ConnectionState, exName: string, error?: string,
 ): { title: string; body: string; needsKeys: boolean } {
@@ -541,6 +550,24 @@ export default function ExchangePage() {
     const unsub4 = exchangeEvents.subscribe(setDiagEvents);
     return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
   }, [selectedEx.id]);
+
+  // ── Truth-sync: derive `isConnected` from connection state for real/testnet
+  // ──────────────────────────────────────────────────────────────────────────
+  // The local `isConnected` flag was previously set/cleared imperatively
+  // from the connect/disconnect handlers. Background failures
+  // (refreshLiveData → network_error, balance_error, rate_limited, etc.)
+  // mutate `modeState.connectionState` via `exMode.setConnectionState(...)`
+  // but do NOT touch the local flag, which produced the contradictory
+  // green "Connected · Xms" badge sitting next to a red "network_error"
+  // card. This effect makes `modeState.connectionState` the single source
+  // of truth for real/testnet — the badge can never lie.
+  // Demo / paper retain their imperative path because they never enter
+  // the real connection state machine.
+  useEffect(() => {
+    if (mode !== 'real' && mode !== 'testnet') return;
+    const live = CONNECTED_STATES.has(modeState.connectionState);
+    setIsConnected(prev => (prev === live ? prev : live));
+  }, [mode, modeState.connectionState]);
 
   // ── Sync mode singleton when user changes mode selector ──────────────────
   // Must use setMode() — not update() — so armed/networkUp/balanceFetched/

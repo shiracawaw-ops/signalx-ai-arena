@@ -129,6 +129,32 @@ function parseRetryAfter(value: string | null): number | undefined {
 }
 
 const FETCH_TIMEOUT_MS = 15_000;
+const HEALTHZ_PROBE_TIMEOUT_MS = 2_500;
+
+// Layer label used in error logs / telemetry so the user (and the diagnostics
+// pane) can see which hop actually failed instead of the generic "network".
+//   api-server : the embedded/proxied API server itself was unreachable
+//   exchange   : the API server is up but the upstream exchange call failed
+//   timeout    : request exceeded FETCH_TIMEOUT_MS
+//   transport  : pre-classification fetch error before we could probe
+type FailureLayer = 'api-server' | 'exchange' | 'timeout' | 'transport';
+
+// Raw, low-overhead probe of the API server's /healthz endpoint. Used by the
+// request() error path to disambiguate "API server is down" from "exchange
+// is down" — the user sees both as a network failure otherwise.
+// Deliberately NOT routed through request() to avoid recursion.
+async function probeApiServerOnce(): Promise<boolean> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), HEALTHZ_PROBE_TIMEOUT_MS);
+  try {
+    const r = await fetch(`${BACKEND}/healthz`, { signal: ctrl.signal });
+    return r.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(t);
+  }
+}
 
 async function request<T = unknown>(url: string, init: RequestInit = {}): Promise<ApiResult<T>> {
   const controller = new AbortController();
@@ -197,14 +223,41 @@ async function request<T = unknown>(url: string, init: RequestInit = {}): Promis
     // Friendly error messages for common network failures.
     // Note: never tell the user we are "switching to demo" — we do not.
     // Demo is only entered on explicit user action.
+    let layer: FailureLayer = 'transport';
+    let msg: string;
+
     if (err.name === 'AbortError') {
-      return { ok: false, error: 'Request timed out — check your connection or try again.', code: 'network' };
+      layer = 'timeout';
+      msg = 'Request timed out — exchange or API server did not respond in time.';
+    } else if (
+      err.message?.toLowerCase().includes('failed to fetch') ||
+      err.message?.toLowerCase().includes('network')
+    ) {
+      // Disambiguate the actual failing layer with a short healthz probe —
+      // unless THIS call WAS the healthz probe (cannot recurse on ourselves).
+      const isHealthzCall = url.endsWith('/healthz');
+      if (isHealthzCall) {
+        layer = 'api-server';
+        msg = 'Cannot reach the API server.';
+      } else {
+        const apiUp = await probeApiServerOnce();
+        if (apiUp) {
+          layer = 'exchange';
+          msg = 'Exchange unreachable — request reached the API server but the upstream exchange did not respond.';
+        } else {
+          layer = 'api-server';
+          msg = 'Cannot reach the API server (the local backend is not responding).';
+        }
+      }
+    } else {
+      msg = err.message ?? 'Network error';
     }
-    if (err.message?.toLowerCase().includes('failed to fetch') ||
-        err.message?.toLowerCase().includes('network')) {
-      return { ok: false, error: 'Cannot reach the API server.', code: 'network' };
-    }
-    return { ok: false, error: err.message ?? 'Network error', code: 'network' };
+
+    // Diagnostic log line — surfaces the exact failing layer.
+    // Format kept terse so it is greppable in production telemetry.
+    console.error(`[api-client][network] layer=${layer} url=${url} msg=${msg}`);
+
+    return { ok: false, error: `[${layer}] ${msg}`, code: 'network' };
   }
 }
 
