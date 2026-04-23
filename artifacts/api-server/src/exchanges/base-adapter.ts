@@ -110,6 +110,16 @@ export function stubSymbolRules(symbol: string): SymbolRules {
 
 // Normalize a "BTC"-style symbol to exchange-specific format (default: BTCUSDT)
 export function toUsdtPair(symbol: string): string {
-  if (symbol.endsWith('USDT') || symbol.endsWith('USD')) return symbol;
-  return `${symbol}USDT`;
+  const raw = String(symbol ?? '').trim().toUpperCase();
+  if (!raw) return '';
+
+  // Accept common incoming formats from UI/signals: "DOGE", "doge/usdt",
+  // "DOGE-USDT", "DOGE_USDT", "DOGEUSD". Adapters using this helper are
+  // USDT-settled spot paths, so normalize all USD-stable variants to USDT.
+  const compact = raw.replace(/[\s/_-]/g, '');
+  if (compact.endsWith('USDT')) return compact;
+  if (compact.endsWith('USDC') || compact.endsWith('USDE') || compact.endsWith('BUSD') || compact.endsWith('USD')) {
+    return `${compact.replace(/(USDC|USDE|BUSD|USD)$/, '')}USDT`;
+  }
+  return `${compact}USDT`;
 }

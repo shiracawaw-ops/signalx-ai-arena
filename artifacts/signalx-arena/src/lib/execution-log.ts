@@ -35,6 +35,15 @@ export interface ExecutionEntry {
   stepSize?:       number;
   rejectionDetail?: string;
   rulesSource?:    string;        // "live" | "cached" | "stub"
+  // ── Price provenance / symbol normalization audit ───────────────────────────
+  // Logged on live/testnet attempts so operators can verify the exact market
+  // quote and normalized symbol used for sizing, validation, and submission.
+  requestedSymbol?:   string;
+  normalizedSymbol?:  string;
+  priceSource?:       string;
+  fetchedMarketPrice?: number;
+  quoteTimestamp?:    number;
+  finalNotional?:     number;
 }
 
 const STORAGE_KEY = 'sx_execution_log_v1';

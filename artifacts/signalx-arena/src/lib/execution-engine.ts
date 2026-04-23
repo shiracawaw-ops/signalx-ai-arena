@@ -31,6 +31,24 @@ import { pipelineCache }    from './pipeline-cache.js';
 import { resolveCompliance } from './asset-compliance.js';
 import { STABLE_ASSETS, stripStableSuffix } from './stable-assets.js';
 
+const MAX_PRICE_DRIFT_RATIO = 0.05;
+
+interface LiveQuoteSnapshot {
+  requestedSymbol: string;
+  normalizedSymbol: string;
+  priceSource: string;
+  fetchedMarketPrice: number;
+  quoteTimestamp: number;
+}
+
+function logLiveQuoteSnapshot(exchange: string, mode: string, side: 'buy' | 'sell', quote: LiveQuoteSnapshot): void {
+  console.log(
+    `[engine][${mode}] live quote ${exchange} ${side} ` +
+    `requested=${quote.requestedSymbol} normalized=${quote.normalizedSymbol} ` +
+    `source=${quote.priceSource} price=${quote.fetchedMarketPrice} quoteTs=${quote.quoteTimestamp}`,
+  );
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 export interface Signal {
@@ -290,6 +308,65 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     return reject(signal, exchange, mode, REJECT.EMERGENCY_STOP, 'Emergency stop is active.');
   }
 
+  // 6a. Live quote source of truth (testnet/real only): fetch a fresh exchange
+  // quote for the exact symbol before sizing/validation, then use it end-to-end.
+  // This prevents stale/internal UI prices from drifting into notional checks.
+  let liveQuote: LiveQuoteSnapshot | null = null;
+  try {
+    const compliance = resolveCompliance(signal.symbol, exchange as ExchangeId);
+    const normalizedSymbol = compliance.ok ? compliance.exchangeSymbol : signal.symbol;
+    const quoteRes = await apiClient.getPrice(exchange, normalizedSymbol);
+    if (!quoteRes.ok) {
+      return reject(
+        signal,
+        exchange,
+        mode,
+        REJECT.PRICE_UNAVAILABLE,
+        `Cannot fetch a fresh ${exchange} quote for ${normalizedSymbol}: ${quoteRes.error}`,
+      );
+    }
+    const fetchedMarketPrice = Number((quoteRes.data as { price?: number }).price ?? 0);
+    if (!(fetchedMarketPrice > 0)) {
+      return reject(
+        signal,
+        exchange,
+        mode,
+        REJECT.PRICE_UNAVAILABLE,
+        `Exchange returned an invalid live quote for ${normalizedSymbol}.`,
+      );
+    }
+    liveQuote = {
+      requestedSymbol: signal.symbol,
+      normalizedSymbol,
+      priceSource: `${exchange}:spot_ticker`,
+      fetchedMarketPrice,
+      quoteTimestamp: Date.now(),
+    };
+    logLiveQuoteSnapshot(exchange, mode, signal.side, liveQuote);
+
+    if (signal.price > 0) {
+      const drift = Math.abs(liveQuote.fetchedMarketPrice - signal.price) / signal.price;
+      if (drift > MAX_PRICE_DRIFT_RATIO) {
+        return reject(
+          signal,
+          exchange,
+          mode,
+          REJECT.PRICE_DRIFT_TOO_LARGE,
+          `Signal/internal price ${signal.price} deviates ${(drift * 100).toFixed(2)}% from live ${exchange} spot ${liveQuote.fetchedMarketPrice} for ${liveQuote.normalizedSymbol}.`,
+        );
+      }
+    }
+  } catch (e) {
+    return reject(
+      signal,
+      exchange,
+      mode,
+      REJECT.PRICE_UNAVAILABLE,
+      `Failed to fetch a fresh ${exchange} quote: ${(e as Error).message}`,
+    );
+  }
+  const pricingPrice = liveQuote.fetchedMarketPrice;
+
   // 6b. Per-symbol cooldown (frontend circuit breaker)
   // SELL of a position we just opened bypasses cooldowns — closing trades
   // must never be blocked by guards meant to throttle entry retries.
@@ -321,7 +398,7 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       if (compl.ok) {
         const cachedRules = pipelineCache.get<RiskSymbolRules>(`rules:${exchange}:${compl.exchangeSymbol}`);
         if (cachedRules) {
-          const px       = signal.price > 0 ? signal.price : 0;
+          const px       = pricingPrice > 0 ? pricingPrice : 0;
           const notional = px * ownedHere;
           const minQty   = cachedRules.minQty       ?? 0;
           const minNot   = cachedRules.minNotional  ?? 0;
@@ -360,7 +437,7 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       arenaSymbol: signal.symbol,
       side:        signal.side,
       amountUSD:   config.tradeAmountUSD,
-      refPrice:    signal.price,
+      refPrice:    pricingPrice,
       credentials,
       signalAgeMs: Math.max(0, Date.now() - signal.ts),
       ...(signal.confidence !== undefined ? { confidence: signal.confidence } : {}),
@@ -464,7 +541,7 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     exchange,
     symbol:           signal.symbol,
     side:             signal.side,
-    price:            signal.price,
+    price:            pricingPrice,
     amountUSD:        config.tradeAmountUSD,
     availableQuote,
     availableBase,
@@ -487,7 +564,7 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       side:      signal.side,
       orderType: config.orderType,
       quantity:  risk.finalQty ?? 0,
-      price:     signal.price,
+      price:     pricingPrice,
       amountUSD: config.tradeAmountUSD,
       status:    'rejected',
       rejectReason:    risk.reason,
@@ -500,6 +577,12 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       minNotional:     risk.minNotional,
       stepSize:        risk.stepSize,
       rulesSource:     risk.filterSource,
+      requestedSymbol: liveQuote.requestedSymbol,
+      normalizedSymbol: liveQuote.normalizedSymbol,
+      priceSource: liveQuote.priceSource,
+      fetchedMarketPrice: liveQuote.fetchedMarketPrice,
+      quoteTimestamp: liveQuote.quoteTimestamp,
+      finalNotional: (risk.finalQty ?? 0) * pricingPrice,
     });
     console.warn(`[engine][${mode}] REJECTED — ${risk.reason}: ${risk.detail}`);
     return { ok: false, logId: entry.id, rejectReason: risk.reason, detail: risk.detail };
@@ -527,6 +610,12 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     minNotional: risk.minNotional,
     stepSize:    risk.stepSize,
     rulesSource: risk.filterSource,
+    requestedSymbol: liveQuote.requestedSymbol,
+    normalizedSymbol: liveQuote.normalizedSymbol,
+    priceSource: liveQuote.priceSource,
+    fetchedMarketPrice: liveQuote.fetchedMarketPrice,
+    quoteTimestamp: liveQuote.quoteTimestamp,
+    finalNotional: (risk.quantity ?? 0) * (risk.price ?? pricingPrice),
   });
 
   const t0 = Date.now();
