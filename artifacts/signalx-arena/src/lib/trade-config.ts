@@ -55,6 +55,17 @@ function normalizePollTimeouts(raw: unknown): PollTimeoutSeconds {
   };
 }
 
+// Cooldown between trades. Default is 0 (= fully disabled across all
+// execution paths: risk-manager.ts skips the gate, no `cooldown_active`
+// reject is logged, no per-symbol/per-bot block is applied). Users who
+// want throttling set a positive value in the Trade Config UI.
+export const DEFAULT_COOLDOWN_SECONDS = 0;
+
+// Legacy default we used to ship; configs persisted with this exact value
+// are silently migrated to the new default on load so users do not stay
+// stuck on the old throttle after upgrade.
+const LEGACY_DEFAULT_COOLDOWN_SECONDS = 60;
+
 function defaultConfig(exchange = 'binance'): TradeConfig {
   return {
     exchange,
@@ -63,7 +74,7 @@ function defaultConfig(exchange = 'binance'): TradeConfig {
     maxOpenPositions:   3,
     stopLossPct:        2.0,
     takeProfitPct:      4.0,
-    cooldownSeconds:    60,
+    cooldownSeconds:    DEFAULT_COOLDOWN_SECONDS,
     allowedSymbols:     [],
     onlyLong:           true,
     emergencyStop:      false,
@@ -98,14 +109,23 @@ class TradeConfigManager {
       // bounded values to render.
       const out: Record<string, TradeConfig> = {};
       for (const [ex, cfg] of Object.entries(parsed)) {
-        out[ex] = {
+        const merged: TradeConfig = {
           ...defaultConfig(ex),
           ...cfg,
           exchange:           ex,
           pollTimeoutSeconds: normalizePollTimeouts(cfg?.pollTimeoutSeconds),
         };
+        // One-shot migration: configs persisted with the legacy 60s default
+        // are pulled to the new 0s default. Any non-legacy custom value the
+        // user picked is preserved as-is.
+        if (cfg?.cooldownSeconds === LEGACY_DEFAULT_COOLDOWN_SECONDS) {
+          merged.cooldownSeconds = DEFAULT_COOLDOWN_SECONDS;
+        }
+        out[ex] = merged;
       }
       this.configs = out;
+      // Persist the migration so the next load doesn't see the legacy value.
+      this.save();
     } catch { this.configs = {}; }
   }
 

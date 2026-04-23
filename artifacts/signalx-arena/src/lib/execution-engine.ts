@@ -16,6 +16,7 @@ import type { SymbolRules as RiskSymbolRules } from './risk-manager.js';
 import { preflight, noteRejection, noteSuccess, clearShieldCooldownFor } from './rejection-shield.js';
 import type { ExchangeId } from './asset-compliance.js';
 import { recordBuy, recordSell, getOwned } from './internal-positions.js';
+import { credentialStore } from './credential-store.js';
 import {
   checkBotAllocation,
   commitBotAllocation,
@@ -207,15 +208,23 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     return reject(signal, exchange, mode, REJECT.LIVE_DISABLED, `Mode "${mode}" does not support live execution.`);
   }
 
-  // 1b. REAL-mode strict gate: all 6 readiness conditions must be met atomically
+  // 1b. REAL-mode strict gate: all 6 readiness conditions must be met atomically.
+  // Before surfacing the generic "missing conditions: [...]" message, check the
+  // root cause first so the user sees exactly what to do (almost always: connect
+  // and validate keys on the Exchange page) instead of a cryptic 5-flag dump.
   if (mode === 'real' && !exchangeMode.isExecutionReady()) {
+    const savedCreds = credentialStore.get(exchange);
+    if (!savedCreds) {
+      return reject(signal, exchange, mode, REJECT.MISSING_CREDENTIALS,
+        `No saved API credentials for ${exchange}. Open the Exchange page, paste your API key + secret, then click Connect to validate.`);
+    }
     const report  = exchangeMode.readinessReport();
     const missing = Object.entries(report)
       .filter(([k, v]) => k !== 'ready' && v === false)
       .map(([k]) => k)
       .join(', ');
     return reject(signal, exchange, mode, REJECT.ADAPTER_NOT_READY,
-      `Real trading not fully ready. Missing conditions: [${missing}].`);
+      `Real trading not fully ready for ${exchange}. Saved credentials found but readiness gates not green: [${missing}]. Click Connect on the Exchange page to re-run validation.`);
   }
 
   // 2. Trading Armed (required for real; testnet is also gated by arm for safety)
@@ -233,9 +242,19 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     return reject(signal, exchange, mode, REJECT.NO_TRADE_PERMISSION, 'API key does not have trade permission on this exchange.');
   }
 
-  // 5. Credentials injected
+  // 5. Credentials injected.
+  // Lazy-hydrate from the singleton credentialStore so a tab navigation or
+  // a reload that landed somewhere other than /exchange does not strand
+  // a perfectly good saved key. setCredentials(...) is still the primary
+  // path; this is a safety net.
   if (!credentials) {
-    return reject(signal, exchange, mode, REJECT.MISSING_CREDENTIALS, 'Credentials not provided to engine. Reconnect.');
+    const fromStore = credentialStore.get(exchange);
+    if (fromStore) {
+      credentials = fromStore;
+    } else {
+      return reject(signal, exchange, mode, REJECT.MISSING_CREDENTIALS,
+        `No saved API credentials for ${exchange}. Open the Exchange page, paste your API key + secret, then click Connect to validate.`);
+    }
   }
 
   // 5b. Backend reachability — fall back gracefully if API server is down

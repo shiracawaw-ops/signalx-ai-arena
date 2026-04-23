@@ -1,0 +1,100 @@
+Patch the current project directly in existing files only.
+
+Do not redesign the UI.
+Do not create a new app.
+Do not give analysis only.
+Apply the code changes now.
+
+Current confirmed problems from the running app:
+
+1. Bybit real execution is blocked because the exchange adapter is not ready
+2. Trade Config still shows cooldown between trades = 60, so cooldown patch was not actually applied
+
+Observed runtime state:
+
+* [exchange][state-change][bybit] No saved credentials for this exchange
+* adapter_not_ready
+* Missing: networkUp, apiValidated, balanceFetched, tradePermission, tradingArmed
+
+Your task is to repair both the real Bybit wiring and the cooldown behavior end-to-end.
+
+Required fixes:
+
+A) Bybit credentials and adapter readiness
+
+1. Find where Bybit credentials are loaded, saved, validated, and passed into the live execution engine
+2. Fix the path so saved credentials are actually read by the runtime exchange adapter
+3. Ensure the adapter readiness gates are updated correctly after validation:
+
+   * networkUp
+   * apiValidated
+   * balanceFetched
+   * tradePermission
+   * tradingArmed
+4. If credentials are missing, show a clear UI/runtime reason
+5. If credentials exist, do not keep the adapter in adapter_not_ready incorrectly
+6. Ensure apiClient.validate(exchange) or equivalent validation path is actually connected to the current saved Bybit config
+7. Verify the real engine uses the saved Bybit credentials, not stale/default/empty state
+
+B) Cooldown repair
+
+1. Use one source of truth only:
+   trade_config.cooldown_between_trades_seconds
+2. Set the default cooldown to 0 for current Bybit trade config
+3. If cooldown = 0:
+
+   * fully disable cooldown logic
+   * do not block trades
+   * do not emit cooldown_active logs
+   * do not block symbol-level or bot-level repeated trades
+4. Keep the setting visible in the UI
+5. Make sure the saved Trade Config value is the same value used by the real execution engine
+6. Remove any fallback default > 0 for Bybit real mode
+7. Preserve normal cooldown behavior only when cooldown > 0
+
+C) UI/config wiring
+
+1. Patch the Trade Config page so the saved values are not display-only
+2. The real engine, AutoPilot, bot fleet, and symbol gates must all read the saved trade config
+3. After patching, the UI should show cooldown default as 0, not 60
+
+D) Deliverables
+Patch the code directly and return exactly:
+
+files changed
+
+* <file path>
+* <file path>
+
+critical fixes applied
+
+* <short item>
+* <short item>
+
+where Bybit credential/adaptor wiring was fixed
+
+* <file path>: <function/class/section>
+* <file path>: <function/class/section>
+
+where cooldown logic was removed or bypassed
+
+* <file path>: <function/class/section>
+* <file path>: <function/class/section>
+
+how 0 is now interpreted
+
+* 0 means cooldown fully disabled across all execution paths
+* no cooldown blocking
+* no cooldown_active logging
+
+how to verify
+
+* save valid Bybit credentials
+* confirm adapter is no longer stuck on adapter_not_ready
+* confirm readiness gates become true after validation
+* set cooldown_between_trades_seconds to 0 in Trade Config
+* save config
+* run real mode / AutoPilot
+* execute repeated eligible trades
+* confirm no cooldown block occurs
+* confirm logs do not contain cooldown_active

@@ -138,14 +138,19 @@ export function validateRisk(input: RiskInput): RiskResult {
     return { ok: false, reason: REJECT.MAX_DAILY_TRADES, detail: `Max daily trades (${config.maxDailyTrades}) reached. Today: ${dailyTradeCount}` };
   }
 
-  // Cooldown check — only enforced for ENTRIES. A SELL of an already-owned
-  // base asset is a CLOSE: it must never be cooldown-blocked, otherwise the
-  // user can't get out of a position they just opened.
-  const isClosingSell = side === 'sell' && availableBase > 0;
-  const elapsed = Date.now() - lastTradeTs;
-  if (!isClosingSell && lastTradeTs > 0 && elapsed < config.cooldownSeconds * 1000) {
-    const remaining = Math.ceil((config.cooldownSeconds * 1000 - elapsed) / 1000);
-    return { ok: false, reason: REJECT.COOLDOWN_ACTIVE, detail: `Cooldown active — ${remaining}s remaining. (Closing sells bypass cooldown.)` };
+  // Cooldown check — only enforced for ENTRIES, and only when the user has
+  // actually opted in by setting cooldownSeconds > 0. cooldownSeconds === 0
+  // means "fully disabled across all execution paths" — no block, no
+  // cooldown_active reject row, no log noise. A SELL of an already-owned
+  // base asset is a CLOSE: it must never be cooldown-blocked, otherwise
+  // the user can't get out of a position they just opened.
+  if (config.cooldownSeconds > 0) {
+    const isClosingSell = side === 'sell' && availableBase > 0;
+    const elapsed = Date.now() - lastTradeTs;
+    if (!isClosingSell && lastTradeTs > 0 && elapsed < config.cooldownSeconds * 1000) {
+      const remaining = Math.ceil((config.cooldownSeconds * 1000 - elapsed) / 1000);
+      return { ok: false, reason: REJECT.COOLDOWN_ACTIVE, detail: `Cooldown active — ${remaining}s remaining. (Closing sells bypass cooldown.)` };
+    }
   }
 
   // Duplicate signal
