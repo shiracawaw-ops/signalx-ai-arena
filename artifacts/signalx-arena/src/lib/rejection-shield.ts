@@ -35,6 +35,17 @@ export interface ShieldInput {
   /** Optional caller-supplied expected edge in bps for the quality gate.
    *  When supplied and below the round-trip fee cost the gate vetoes. */
   expectedEdgeBps?: number;
+  /** Optional free quote balance available for the intended order path. */
+  freeQuoteBalance?: number;
+  /** Optional free base balance available for sell path. */
+  freeBaseBalance?: number;
+  /** Optional reserve to keep aside for fees. */
+  feeReserveUSD?: number;
+  /** Optional reserve to keep aside as safety cushion. */
+  safetyReserveUSD?: number;
+  /** Optional strict max-daily trade gate details. */
+  maxDailyTrades?: number;
+  usedDailyTrades?: number;
 }
 
 /**
@@ -269,7 +280,14 @@ export async function preflight(input: ShieldInput): Promise<ShieldVerdict> {
   if (input.credentials && rules && !isClosingSell) {
     const needed  = input.side === 'buy' ? notional * 1.01 : estQty;
     const asset   = input.side === 'buy' ? (rules.quoteCurrency ?? 'USDT') : (rules.baseCurrency ?? compliance.base);
-    const have    = await fetchAvailable(input.exchange, asset, input.credentials);
+    let have: number | undefined;
+    if (input.side === 'buy' && input.freeQuoteBalance !== undefined) {
+      have = Math.max(0, input.freeQuoteBalance - (input.feeReserveUSD ?? 0) - (input.safetyReserveUSD ?? 0));
+    } else if (input.side === 'sell' && input.freeBaseBalance !== undefined) {
+      have = input.freeBaseBalance;
+    } else {
+      have = await fetchAvailable(input.exchange, asset, input.credentials);
+    }
     if (have !== undefined) {
       if (have < needed) {
         checks.push({ id: 'balance', ok: false, detail: `Need ${needed.toFixed(4)} ${asset}, have ${have.toFixed(4)}` });
@@ -277,6 +295,30 @@ export async function preflight(input: ShieldInput): Promise<ShieldVerdict> {
       }
       checks.push({ id: 'balance', ok: true, detail: `${have.toFixed(4)} ${asset} available.` });
     }
+  }
+
+  // Strict final block when daily trade limit has already been consumed.
+  if (
+    input.maxDailyTrades !== undefined &&
+    input.maxDailyTrades > 0 &&
+    input.usedDailyTrades !== undefined &&
+    input.usedDailyTrades >= input.maxDailyTrades
+  ) {
+    checks.push({
+      id: 'maxDailyTrades',
+      ok: false,
+      detail: `Used ${input.usedDailyTrades}/${input.maxDailyTrades} trades today.`,
+    });
+    return finalize(
+      'block',
+      `Max daily trades reached (${input.usedDailyTrades}/${input.maxDailyTrades}).`,
+      compliance,
+      rules,
+      estQty,
+      notional,
+      checks,
+      'cooldown_active',
+    );
   }
 
   const passVerdict = finalize('pass', 'All pre-flight checks passed.', compliance, rules, estQty, notional, checks);

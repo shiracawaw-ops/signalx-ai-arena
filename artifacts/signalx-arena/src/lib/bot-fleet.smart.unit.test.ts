@@ -71,10 +71,66 @@ describe('summarizeFleet — capital usage gate', () => {
 
 describe('pickRealBotsScored — assignment modes', () => {
   const scores: BotScore[] = [
-    { id: 'a', compositeScore: 30, recentScore: 90, rejectionRate: 0.50, stabilityScore: 20 },
-    { id: 'b', compositeScore: 80, recentScore: 30, rejectionRate: 0.05, stabilityScore: 95 },
-    { id: 'c', compositeScore: 60, recentScore: 60, rejectionRate: 0.10, stabilityScore: 70 },
-    { id: 'd', compositeScore: 10, recentScore: 10, rejectionRate: 0.80, stabilityScore: 10 },
+    {
+      id: 'a',
+      compositeScore: 30,
+      recentScore: 90,
+      rejectionRate: 0.20,
+      stabilityScore: 70,
+      netRealizedAfterFees: 120,
+      recentRealizedNetPnl: 40,
+      executionQualityScore: 88,
+      invalidAttemptRate: 0.10,
+      drawdownPct: 9,
+      slippageQualityScore: 82,
+      marketRegimeFitScore: 84,
+      doctorHealthStatus: 'healthy',
+    },
+    {
+      id: 'b',
+      compositeScore: 80,
+      recentScore: 75,
+      rejectionRate: 0.05,
+      stabilityScore: 95,
+      netRealizedAfterFees: 260,
+      recentRealizedNetPnl: 55,
+      executionQualityScore: 95,
+      invalidAttemptRate: 0.03,
+      drawdownPct: 5,
+      slippageQualityScore: 92,
+      marketRegimeFitScore: 90,
+      doctorHealthStatus: 'healthy',
+    },
+    {
+      id: 'c',
+      compositeScore: 60,
+      recentScore: 60,
+      rejectionRate: 0.10,
+      stabilityScore: 80,
+      netRealizedAfterFees: 180,
+      recentRealizedNetPnl: 30,
+      executionQualityScore: 90,
+      invalidAttemptRate: 0.07,
+      drawdownPct: 8,
+      slippageQualityScore: 88,
+      marketRegimeFitScore: 86,
+      doctorHealthStatus: 'healthy',
+    },
+    {
+      id: 'd',
+      compositeScore: 10,
+      recentScore: 20,
+      rejectionRate: 0.60,
+      stabilityScore: 20,
+      netRealizedAfterFees: -20,
+      recentRealizedNetPnl: -10,
+      executionQualityScore: 30,
+      invalidAttemptRate: 0.60,
+      drawdownPct: 40,
+      slippageQualityScore: 30,
+      marketRegimeFitScore: 20,
+      doctorHealthStatus: 'critical',
+    },
   ];
 
   it('auto_best ranks by composite score', () => {
@@ -84,7 +140,9 @@ describe('pickRealBotsScored — assignment modes', () => {
 
   it('auto_recent ranks by recent performance', () => {
     botFleet.set({ activeRealBots: 2, assignmentMode: 'auto_recent' });
-    expect(botFleet.pickRealBotsScored(scores)).toEqual(['a', 'c']);
+    // `c` is filtered by strict real gate because its recent realized net PnL
+    // is negative enough to trip `rejected_poor_recent_performance`.
+    expect(botFleet.pickRealBotsScored(scores)).toEqual(['a', 'b']);
   });
 
   it('auto_lowest_rejection prefers bots with the cleanest fill record', () => {
@@ -102,9 +160,10 @@ describe('pickRealBotsScored — assignment modes', () => {
     // Pin a + d first.
     botFleet.syncRealBotIds([{ id: 'a' }, { id: 'd' }, { id: 'b' }, { id: 'c' }]);
     expect(botFleet.get().realBotIds).toEqual(['a', 'd']);
-    // Re-sync with scores must NOT promote b/c past the pinned manual pair.
+    // Re-sync with scores keeps manual pinning for gate-passing bots only.
+    // `d` is ineligible under strict real gating, so slot 2 is filled by `b`.
     botFleet.syncRealBotIds(scores);
-    expect(botFleet.get().realBotIds).toEqual(['a', 'd']);
+    expect(botFleet.get().realBotIds).toEqual(['a', 'b']);
   });
 
   it('syncRealBotIds auto-detects score payloads and re-ranks', () => {

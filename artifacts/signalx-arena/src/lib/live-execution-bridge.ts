@@ -17,6 +17,7 @@ import { orderProgress } from './order-progress.js';
 import { baseTicker } from './risk-manager.js';
 import type { AutoPilotDecision } from './autopilot.js';
 import { botFleet, type RemainingMode } from './bot-fleet.js';
+import { botActivityStore } from './bot-activity-store.js';
 
 // ── Fleet gate ───────────────────────────────────────────────────────────────
 // A bot is allowed to send REAL orders only when it appears in the fleet's
@@ -37,6 +38,26 @@ function checkFleetGate(botId: string): FleetGateResult {
   // realBotIds will be populated and the gate becomes active.
   if (cfg.realBotIds.length === 0) return { allowed: true };
   if (cfg.realBotIds.includes(botId)) return { allowed: true };
+  const activity = botActivityStore.snapshot().bots[botId];
+  if (
+    activity?.realState === 'real_ineligible' ||
+    activity?.realState === 'degraded' ||
+    activity?.realState === 'blocked' ||
+    activity?.realState === 'benched'
+  ) {
+    const reasonCode =
+      activity.realGateReason === 'rejected_low_profit_after_fees'       ? REJECT.REJECTED_LOW_PROFIT_AFTER_FEES :
+      activity.realGateReason === 'rejected_unhealthy_bot'               ? REJECT.REJECTED_UNHEALTHY_BOT :
+      activity.realGateReason === 'rejected_high_reject_rate'            ? REJECT.REJECTED_HIGH_REJECT_RATE :
+      activity.realGateReason === 'rejected_poor_recent_performance'     ? REJECT.REJECTED_POOR_RECENT_PERFORMANCE :
+      activity.realGateReason === 'rejected_market_regime_mismatch'      ? REJECT.REJECTED_MARKET_REGIME_MISMATCH :
+                                                                           REJECT.REJECTED_LOWER_RANK_THAN_ACTIVE_BOTS;
+    return {
+      allowed: false,
+      mode: cfg.remainingMode,
+      message: `${reasonCode}: Real-mode gate marked this bot ${activity.realState}; real execution is blocked.`,
+    };
+  }
   const wording =
     cfg.remainingMode === 'standby'  ? 'Bot is in fleet standby — real execution suppressed.' :
     cfg.remainingMode === 'disabled' ? 'Bot is disabled by fleet config — no real orders.'   :
