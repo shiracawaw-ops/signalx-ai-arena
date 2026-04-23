@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const getPriceMock = vi.fn();
-const getSymbolRulesMock = vi.fn();
-const getBalancesMock = vi.fn();
-const placeOrderMock = vi.fn();
+const { getPriceMock, getSymbolRulesMock, getBalancesMock, placeOrderMock } = vi.hoisted(() => ({
+  getPriceMock: vi.fn(),
+  getSymbolRulesMock: vi.fn(),
+  getBalancesMock: vi.fn(),
+  placeOrderMock: vi.fn(),
+}));
 
 vi.mock('./api-client.js', () => ({
   apiClient: {
@@ -93,7 +95,8 @@ describe('execution-engine live quote pricing pipeline', () => {
     const attempt = placeOrderMock.mock.calls[0]?.[2];
     expect(attempt.symbol).toBe('DOGE');
     // quantity must be derived from the live quote, not the incoming signal price.
-    expect(attempt.quantity).toBeCloseTo(1026, 0);
+    // tradeAmountUSD defaults to 100, so floor(100 / 0.09747) = 1025 at stepSize 1.
+    expect(attempt.quantity).toBe(1025);
 
     const logs = executionLog.all();
     const executingOrExecuted = logs.find(e => e.signalId?.startsWith('sig_'));

@@ -311,7 +311,7 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
   // 6a. Live quote source of truth (testnet/real only): fetch a fresh exchange
   // quote for the exact symbol before sizing/validation, then use it end-to-end.
   // This prevents stale/internal UI prices from drifting into notional checks.
-  let liveQuote: LiveQuoteSnapshot | null = null;
+  let liveQuote!: LiveQuoteSnapshot;
   try {
     const compliance = resolveCompliance(signal.symbol, exchange as ExchangeId);
     const normalizedSymbol = compliance.ok ? compliance.exchangeSymbol : signal.symbol;
