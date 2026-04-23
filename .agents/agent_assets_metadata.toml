@@ -12,3 +12,9 @@ id = "XR8hYbK5AbY4AdDXu7A0z"
 uri = "file://dist-electron/SignalX-AI-Arena-1.5.1-Windows-Portable.zip"
 type = "unspecified"
 title = "SignalX AI Arena 1.5.1 — Windows (Portable)"
+
+[[outputs]]
+id = "sZRwqK_xF6CqOuyMV-BuP"
+uri = "file://artifacts/signalx-arena/release/SignalX-AI-Arena-1.5.7-win-x64.zip"
+type = "unspecified"
+title = "SignalX AI Arena v1.5.7 — Windows x64 (unsigned)"
