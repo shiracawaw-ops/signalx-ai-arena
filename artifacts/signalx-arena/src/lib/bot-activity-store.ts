@@ -17,6 +17,24 @@ const WINDOW_MS    = 24 * 60 * 60 * 1000; // 24h rolling window for "today"
 
 export type ActivityKind = 'attempt' | 'success' | 'reject' | 'skip';
 
+export type RealEligibilityState =
+  | 'real_eligible'
+  | 'real_ineligible'
+  | 'standby'
+  | 'paper_only'
+  | 'benched'
+  | 'degraded'
+  | 'blocked';
+
+export type RealGateReason =
+  | 'rejected_low_profit_after_fees'
+  | 'rejected_unhealthy_bot'
+  | 'rejected_lower_rank_than_active_bots'
+  | 'rejected_high_reject_rate'
+  | 'rejected_poor_recent_performance'
+  | 'rejected_market_regime_mismatch'
+  | 'approved_for_real_trade';
+
 export interface AttemptRecord {
   ts:       number;
   kind:     ActivityKind;
@@ -29,6 +47,11 @@ export interface BotActivity {
   botId:           string;
   name?:           string;
   eligibleNow:     boolean;
+  realState?:      RealEligibilityState;
+  realGateReason?: RealGateReason;
+  executionQualityScore?: number; // 0..100 higher is cleaner fills
+  invalidAttemptRate?:    number; // 0..1
+  doctorHealthStatus?:    'healthy' | 'watch' | 'critical' | 'benched';
   lastAttemptTs:   number;
   lastSuccessTs:   number;
   lastRejectTs:    number;
@@ -105,10 +128,23 @@ class BotActivityStore {
           this.state.bots[b.id] = {
             botId: b.id, name: b.name, eligibleNow: elig.has(b.id),
             lastAttemptTs: 0, lastSuccessTs: 0, lastRejectTs: 0, recent: [],
+            realState: elig.has(b.id) ? 'real_eligible' : 'standby',
+            realGateReason: elig.has(b.id) ? 'approved_for_real_trade' : 'rejected_lower_rank_than_active_bots',
+            executionQualityScore: 100,
+            invalidAttemptRate: 0,
+            doctorHealthStatus: 'healthy',
           };
         } else {
           this.state.bots[b.id].name        = b.name ?? this.state.bots[b.id].name;
           this.state.bots[b.id].eligibleNow = elig.has(b.id);
+          // Keep fleet eligibility synchronized with explicit real-state if
+          // no stricter gate has set it yet.
+          if (!this.state.bots[b.id].realState || this.state.bots[b.id].realState === 'standby') {
+            this.state.bots[b.id].realState = elig.has(b.id) ? 'real_eligible' : 'standby';
+            this.state.bots[b.id].realGateReason = elig.has(b.id)
+              ? 'approved_for_real_trade'
+              : 'rejected_lower_rank_than_active_bots';
+          }
         }
       }
     } else {
@@ -120,11 +156,44 @@ class BotActivityStore {
           this.state.bots[id] = {
             botId: id, eligibleNow: true,
             lastAttemptTs: 0, lastSuccessTs: 0, lastRejectTs: 0, recent: [],
+            realState: 'real_eligible',
+            realGateReason: 'approved_for_real_trade',
+            executionQualityScore: 100,
+            invalidAttemptRate: 0,
+            doctorHealthStatus: 'healthy',
           };
         }
       }
     }
     this.recomputeTotals(input.totalBots);
+    this.save();
+    this.notify();
+  }
+
+  /** Called by fleet gate logic to publish strict real-mode eligibility. */
+  setRealEligibility(input: {
+    byBot: Record<string, {
+      state: RealEligibilityState;
+      reason: RealGateReason;
+      executionQualityScore?: number;
+      invalidAttemptRate?: number;
+      doctorHealthStatus?: 'healthy' | 'watch' | 'critical' | 'benched';
+    }>;
+  }): void {
+    for (const [botId, gate] of Object.entries(input.byBot)) {
+      const cur = this.state.bots[botId] ?? {
+        botId, eligibleNow: false,
+        lastAttemptTs: 0, lastSuccessTs: 0, lastRejectTs: 0, recent: [],
+      } as BotActivity;
+      cur.realState      = gate.state;
+      cur.realGateReason = gate.reason;
+      cur.eligibleNow    = gate.state === 'real_eligible';
+      if (gate.executionQualityScore !== undefined) cur.executionQualityScore = gate.executionQualityScore;
+      if (gate.invalidAttemptRate !== undefined)    cur.invalidAttemptRate    = gate.invalidAttemptRate;
+      if (gate.doctorHealthStatus)                  cur.doctorHealthStatus    = gate.doctorHealthStatus;
+      this.state.bots[botId] = cur;
+    }
+    this.recomputeTotals(this.state.totals.totalBots);
     this.save();
     this.notify();
   }
@@ -139,12 +208,35 @@ class BotActivityStore {
       lastAttemptTs: 0, lastSuccessTs: 0, lastRejectTs: 0, recent: [],
     };
     const now = Date.now();
+    // Suppress repeated identical reject spam (same reason+symbol in a short
+    // burst) so diagnostics stay truthful and readable in bad conditions.
+    const last = cur.recent[0];
+    if (
+      input.kind === 'reject' &&
+      last &&
+      last.kind === 'reject' &&
+      last.reason === input.reason &&
+      last.symbol === input.symbol &&
+      now - last.ts < 15_000
+    ) {
+      cur.lastAttemptTs = now;
+      this.state.bots[input.botId] = cur;
+      this.recomputeTotals(this.state.totals.totalBots);
+      this.save();
+      this.notify();
+      return;
+    }
     cur.lastAttemptTs = now;
     if (input.kind === 'success') cur.lastSuccessTs = now;
     if (input.kind === 'reject') {
       cur.lastRejectTs     = now;
       cur.lastRejectCode   = input.reason;
       cur.lastRejectDetail = input.detail;
+      const submitted = cur.recent.filter(x => x.kind === 'attempt' || x.kind === 'success' || x.kind === 'reject').length + 1;
+      const rejects   = cur.recent.filter(x => x.kind === 'reject').length + 1;
+      const rejectRate = submitted > 0 ? rejects / submitted : 0;
+      cur.invalidAttemptRate    = rejectRate;
+      cur.executionQualityScore = Math.max(0, Math.min(100, 100 - rejectRate * 100));
     }
     cur.recent = [
       { ts: now, kind: input.kind, symbol: input.symbol, reason: input.reason, detail: input.detail },
@@ -172,13 +264,17 @@ class BotActivityStore {
     const ACTIVE_WINDOW = 5 * 60 * 1000;
     let eligible = 0, activeNow = 0, executedToday = 0, standby = 0, blocked = 0;
     for (const b of Object.values(this.state.bots)) {
-      if (b.eligibleNow) eligible++;
+      if (b.eligibleNow || b.realState === 'real_eligible') eligible++;
       if (b.lastSuccessTs > 0 && now - b.lastSuccessTs < ACTIVE_WINDOW) activeNow++;
       if (b.lastSuccessTs > 0 && now - b.lastSuccessTs < WINDOW_MS) executedToday++;
       // standby = eligible but no recent attempt at all
-      if (b.eligibleNow && b.lastAttemptTs === 0) standby++;
+      if (b.realState === 'standby' || ((b.eligibleNow || b.realState === 'real_eligible') && b.lastAttemptTs === 0)) standby++;
       // blocked = last attempt was a reject AND no success since
-      if (b.lastRejectTs > 0 && b.lastRejectTs > b.lastSuccessTs) blocked++;
+      if (
+        b.realState === 'blocked' ||
+        b.realState === 'benched' ||
+        (b.lastRejectTs > 0 && b.lastRejectTs > b.lastSuccessTs)
+      ) blocked++;
     }
     this.state.totals = {
       totalBots: Math.max(totalBots, Object.keys(this.state.bots).length),

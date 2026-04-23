@@ -7,11 +7,18 @@
 
 import type { Bot, Trade } from './storage';
 import type { BotScore } from './bot-fleet';
+import type { BotRealStat } from './real-profit-store';
+import type { BotActivity } from './bot-activity-store';
 
 const RECENT_TRADE_WINDOW = 25;
 
+export interface ScoreTelemetryInput {
+  perBotReal?: Record<string, BotRealStat>;
+  perBotActivity?: Record<string, BotActivity>;
+}
+
 /** Build a single BotScore for one bot using its trade history slice. */
-export function scoreOneBot(bot: Bot, trades: Trade[]): BotScore {
+export function scoreOneBot(bot: Bot, trades: Trade[], telemetry: ScoreTelemetryInput = {}): BotScore {
   const own = trades.filter(t => t.botId === bot.id);
   const recent = own.slice(-RECENT_TRADE_WINDOW);
 
@@ -37,30 +44,62 @@ export function scoreOneBot(bot: Bot, trades: Trade[]): BotScore {
   }
   const stabilityScore = Math.max(0, 100 - maxDrawdownPct * 2);
 
-  // Composite = mix of ROI, recent win-rate, and stability.
-  const compositeScore =
-    0.45 * roiNorm +
-    0.35 * (recentWinRate * 100) +
-    0.20 * stabilityScore;
+  const real = telemetry.perBotReal?.[bot.id];
+  const activity = telemetry.perBotActivity?.[bot.id];
+  const netRealizedAfterFees = real
+    ? (real.realizedPnlUSD - real.feesPaidUSD)
+    : 0;
+  const recentRealizedNetPnl = real?.todayNetPnlUSD ?? 0;
+  const rejectionRate = activity?.invalidAttemptRate
+    ?? (activity?.recent && activity.recent.length > 0
+      ? (() => {
+          const submitted = activity.recent.filter(x => x.kind === 'attempt' || x.kind === 'success' || x.kind === 'reject').length;
+          const rejects = activity.recent.filter(x => x.kind === 'reject').length;
+          return submitted > 0 ? rejects / submitted : 0;
+        })()
+      : 0);
+  const executionQualityScore = activity?.executionQualityScore
+    ?? Math.max(0, 100 - rejectionRate * 100);
+  const invalidAttemptRate = rejectionRate;
+  const drawdownPct = maxDrawdownPct;
+  const marketRegimeFitScore = Math.max(0, Math.min(100, 40 + recentWinRate * 60));
+  const slippageQualityScore = Math.max(0, Math.min(100, 100 - rejectionRate * 70));
+  const doctorHealthStatus = activity?.doctorHealthStatus ?? 'healthy';
 
-  // Without rejection telemetry on the bot itself we infer from the overall
-  // shield-rejection table elsewhere; default to 0 so it doesn't penalise.
-  const rejectionRate = 0;
+  // Composite = strict real-money metrics first, then execution cleanliness.
+  // When no real history exists yet, fall back to simulation-derived ROI.
+  const realizedAnchor = real
+    ? Math.max(0, Math.min(100, 100 * (1 - Math.exp(-Math.max(0, netRealizedAfterFees) / 100))))
+    : roiNorm;
+  const compositeScore =
+    0.35 * realizedAnchor +
+    0.20 * (recentWinRate * 100) +
+    0.15 * stabilityScore +
+    0.15 * executionQualityScore +
+    0.15 * (100 - rejectionRate * 100);
 
   return {
     id:              bot.id,
     name:            bot.name,
     compositeScore:  round1(compositeScore),
     recentScore:     round1(recentWinRate * 100),
-    rejectionRate,
+    rejectionRate:   round1(rejectionRate * 100) / 100,
     stabilityScore:  round1(stabilityScore),
     realizedPnl:     round1(pnl),
+    netRealizedAfterFees: round1(netRealizedAfterFees),
+    recentRealizedNetPnl: round1(recentRealizedNetPnl),
+    executionQualityScore: round1(executionQualityScore),
+    invalidAttemptRate: round1(invalidAttemptRate * 100) / 100,
+    drawdownPct: round1(drawdownPct),
+    slippageQualityScore: round1(slippageQualityScore),
+    marketRegimeFitScore: round1(marketRegimeFitScore),
+    doctorHealthStatus,
   };
 }
 
 /** Build BotScore[] for all bots in one pass. */
-export function scoreAllBots(bots: Bot[], trades: Trade[]): BotScore[] {
-  return bots.map(b => scoreOneBot(b, trades));
+export function scoreAllBots(bots: Bot[], trades: Trade[], telemetry: ScoreTelemetryInput = {}): BotScore[] {
+  return bots.map(b => scoreOneBot(b, trades, telemetry));
 }
 
 function round1(n: number): number {

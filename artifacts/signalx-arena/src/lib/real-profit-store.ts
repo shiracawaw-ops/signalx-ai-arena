@@ -27,6 +27,7 @@ export interface RealLot {
   fee:      number;   // entry fee (USD), pro-rated as the lot is closed
   ts:       number;   // entry timestamp
   botId?:   string;   // which bot opened this lot
+  symbol?:  string;   // exchange symbol (when known, e.g. BTCUSDT)
 }
 
 export interface RealProfitState {
@@ -53,20 +54,37 @@ export interface BotRealStat {
   trades:         number;
   wins:           number;
   losses:         number;
+  // Last closed trade's NET realized PnL after fees.
+  lastTradeNetPnlUSD?: number;
+  // Day bucket keyed in local timezone.
+  todayNetPnlUSD?: number;
+  // Alias for readability in panels.
+  lifetimeNetPnlUSD?: number;
+  // Optional mirrors from other stores (activity/doctor). Kept optional so
+  // this store remains the source of money truth without hard coupling.
+  rejectRate?: number;
+  executionQualityScore?: number;
+  doctorHealthStatus?: 'healthy' | 'watch' | 'critical' | 'benched';
 }
 
 export interface ClosedRealTrade {
+  // Backward-compatible timestamp field kept for older UI call sites.
   ts:           number;
   exchange:     string;
+  symbol:       string;
   baseAsset:    string;
-  qty:          number;
+  botId?:       string;
+  botName?:     string;
+  quantity:     number;
   entryPrice:   number;
   exitPrice:    number;
+  entryTime:    number;
+  exitTime:     number;
   feesUSD:      number;     // entry fee share + sell fee share for this match
   grossPnlUSD:  number;     // (exit - entry) * qty
   netPnlUSD:    number;     // gross - feesUSD
-  botId?:       string;
-  botName?:     string;
+  // Optional best-effort slippage impact in USD for this match.
+  slippageImpactUSD?: number;
 }
 
 const MAX_CLOSED_TRADES = 200;
@@ -143,7 +161,7 @@ class RealProfitStore {
   /** Record a successful real BUY fill. */
   recordRealBuy(input: {
     exchange: string; baseAsset: string; qty: number; price: number;
-    feeUSD?: number; botId?: string;
+    feeUSD?: number; botId?: string; symbol?: string;
   }): void {
     const key = lotKey(input.exchange, input.baseAsset);
     const fee = Math.max(0, input.feeUSD ?? 0);
@@ -154,6 +172,7 @@ class RealProfitStore {
       fee,
       ts:    Date.now(),
       botId: input.botId,
+      symbol: input.symbol,
     });
     this.state.feesPaidUSD += fee;
     if (input.botId) this.bumpBot(input.botId, { fees: fee, trades: 1 });
@@ -169,7 +188,8 @@ class RealProfitStore {
    */
   recordRealSell(input: {
     exchange: string; baseAsset: string; qty: number; price: number;
-    feeUSD?: number; botId?: string; botName?: string;
+    feeUSD?: number; botId?: string; botName?: string; symbol?: string;
+    slippageImpactUSD?: number;
   }): { realizedUSD: number; matchedQty: number } {
     const key = lotKey(input.exchange, input.baseAsset);
     const lots = this.state.lots[key] ?? [];
@@ -196,6 +216,7 @@ class RealProfitStore {
           trades:   1,
           win:      netRealized > 0 ? 1 : 0,
           loss:     netRealized > 0 ? 0 : 1,
+          lastTradeNet: netRealized,
         });
       }
       if (netRealized > 0) this.state.winsClosed   += 1;
@@ -206,15 +227,19 @@ class RealProfitStore {
         {
           ts:          Date.now(),
           exchange:    input.exchange,
+          symbol:      input.symbol ?? lot.symbol ?? input.baseAsset.toUpperCase(),
           baseAsset:   input.baseAsset.toUpperCase(),
-          qty:         take,
+          quantity:    take,
           entryPrice:  lot.price,
           exitPrice:   input.price,
+          entryTime:   lot.ts,
+          exitTime:    Date.now(),
           feesUSD:     lotFeeShare + sellFeeShare,
           grossPnlUSD: grossRealized,
           netPnlUSD:   netRealized,
           botId:       owner,
           botName:     input.botName,
+          ...(input.slippageImpactUSD !== undefined ? { slippageImpactUSD: input.slippageImpactUSD } : {}),
         },
         ...this.state.closedTrades,
       ].slice(0, MAX_CLOSED_TRADES);
@@ -271,13 +296,26 @@ class RealProfitStore {
     this.notify();
   }
 
-  private bumpBot(botId: string, p: { realized?: number; fees?: number; trades?: number; win?: number; loss?: number }) {
+  private bumpBot(botId: string, p: {
+    realized?: number;
+    fees?: number;
+    trades?: number;
+    win?: number;
+    loss?: number;
+    lastTradeNet?: number;
+  }) {
     const cur = this.state.perBot[botId] ?? { realizedPnlUSD: 0, feesPaidUSD: 0, trades: 0, wins: 0, losses: 0 };
     cur.realizedPnlUSD += p.realized ?? 0;
     cur.feesPaidUSD    += p.fees     ?? 0;
     cur.trades         += p.trades   ?? 0;
     cur.wins           += p.win      ?? 0;
     cur.losses         += p.loss     ?? 0;
+    if (p.lastTradeNet !== undefined) cur.lastTradeNetPnlUSD = p.lastTradeNet;
+    const lifetimeNet = cur.realizedPnlUSD - cur.feesPaidUSD;
+    cur.lifetimeNetPnlUSD = lifetimeNet;
+    const todayKey = new Date().toDateString();
+    const todayClosed = this.state.closedTrades.filter(t => new Date(t.exitTime).toDateString() === todayKey && t.botId === botId);
+    cur.todayNetPnlUSD = todayClosed.reduce((s, t) => s + t.netPnlUSD, 0) + (p.lastTradeNet ?? 0);
     this.state.perBot[botId] = cur;
   }
 }

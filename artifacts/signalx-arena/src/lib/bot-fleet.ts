@@ -67,6 +67,14 @@ export interface BotScore {
   rejectionRate?:    number;     // 0..1   — rejected / submitted
   stabilityScore?:   number;     // 0..100 — inverse of drawdown
   realizedPnl?:      number;     // for ranking ties
+  netRealizedAfterFees?: number; // strict real-money source of truth
+  recentRealizedNetPnl?: number; // recent closed real-trade net result
+  executionQualityScore?: number; // 0..100
+  invalidAttemptRate?:   number;  // 0..1
+  drawdownPct?:          number;  // 0..100
+  slippageQualityScore?: number;  // 0..100
+  marketRegimeFitScore?: number;  // 0..100
+  doctorHealthStatus?:   'healthy' | 'watch' | 'critical' | 'benched';
 }
 
 export interface FleetSummary {
@@ -88,6 +96,30 @@ export interface FleetSummary {
 }
 
 export interface BotLite { id: string; name?: string }
+
+export type RealEligibilityState =
+  | 'real_eligible'
+  | 'real_ineligible'
+  | 'standby'
+  | 'paper_only'
+  | 'benched'
+  | 'degraded'
+  | 'blocked';
+
+export type RealGateReason =
+  | 'rejected_low_profit_after_fees'
+  | 'rejected_unhealthy_bot'
+  | 'rejected_lower_rank_than_active_bots'
+  | 'rejected_high_reject_rate'
+  | 'rejected_poor_recent_performance'
+  | 'rejected_market_regime_mismatch'
+  | 'approved_for_real_trade';
+
+interface GateVerdict {
+  pass: boolean;
+  reason: RealGateReason;
+  rankingScore: number;
+}
 
 const STORAGE_KEY = 'sx_bot_fleet_v1';
 
@@ -132,6 +164,67 @@ function normalize(raw: Partial<FleetConfig> | null | undefined): FleetConfig {
     assignmentMode:  normalizeAssignment(raw.assignmentMode, d.assignmentMode),
     realBotIds,
   };
+}
+
+function normalized(n: number | undefined, fallback = 0): number {
+  return Number.isFinite(n) ? (n as number) : fallback;
+}
+
+function evalDoctorScore(status: BotScore['doctorHealthStatus']): number {
+  if (status === 'healthy') return 100;
+  if (status === 'watch')   return 60;
+  if (status === 'critical')return 20;
+  if (status === 'benched') return 0;
+  return 80;
+}
+
+function evaluateRealGate(s: BotScore): GateVerdict {
+  const netReal = normalized(s.netRealizedAfterFees, normalized(s.realizedPnl, 0));
+  const recent  = normalized(s.recentScore, 0);
+  const rejRate = Math.max(0, Math.min(1, normalized(s.rejectionRate, 0)));
+  const invRate = Math.max(0, Math.min(1, normalized(s.invalidAttemptRate, rejRate)));
+  const execQ   = Math.max(0, Math.min(100, normalized(s.executionQualityScore, 100 - rejRate * 100)));
+  const stab    = Math.max(0, Math.min(100, normalized(s.stabilityScore, 50)));
+  const ddPct   = Math.max(0, normalized(s.drawdownPct, 0));
+  const regime  = Math.max(0, Math.min(100, normalized(s.marketRegimeFitScore, 60)));
+  const doctor  = evalDoctorScore(s.doctorHealthStatus);
+  const slipQ   = Math.max(0, Math.min(100, normalized(s.slippageQualityScore, 70)));
+
+  if (s.doctorHealthStatus === 'benched' || s.doctorHealthStatus === 'critical') {
+    return { pass: false, reason: 'rejected_unhealthy_bot', rankingScore: 0 };
+  }
+  // Strict source-of-truth gate: bots must prove positive NET realized after fees.
+  if (netReal <= 0) {
+    return { pass: false, reason: 'rejected_low_profit_after_fees', rankingScore: 0 };
+  }
+  if (rejRate >= 0.45 || invRate >= 0.45) {
+    return { pass: false, reason: 'rejected_high_reject_rate', rankingScore: 0 };
+  }
+  if (recent < 45 || normalized(s.recentRealizedNetPnl, 0) < -5) {
+    return { pass: false, reason: 'rejected_poor_recent_performance', rankingScore: 0 };
+  }
+  if (regime < 40) {
+    return { pass: false, reason: 'rejected_market_regime_mismatch', rankingScore: 0 };
+  }
+  if (execQ < 45 || stab < 35 || ddPct > 25 || doctor < 40) {
+    return { pass: false, reason: 'rejected_unhealthy_bot', rankingScore: 0 };
+  }
+
+  // Ranking score only for bots that passed strict gates.
+  const netScore = 100 * (1 - Math.exp(-Math.max(0, netReal) / 100));
+  const rejScore = 100 - rejRate * 100;
+  const ddScore  = Math.max(0, 100 - ddPct * 3);
+  const rankingScore =
+    0.30 * netScore +
+    0.15 * recent +
+    0.10 * rejScore +
+    0.10 * execQ +
+    0.10 * stab +
+    0.10 * ddScore +
+    0.05 * slipQ +
+    0.05 * regime +
+    0.05 * doctor;
+  return { pass: true, reason: 'approved_for_real_trade', rankingScore };
 }
 
 type Listener = (cfg: FleetConfig) => void;
@@ -208,7 +301,11 @@ class BotFleetManager {
    */
   pickRealBotsScored(scores: BotScore[], mode: AssignmentMode = this.cfg.assignmentMode): string[] {
     const benched = getBenchedSet();
-    const eligibleScores = scores.filter(s => !benched.has(s.id));
+    const hardEligible = scores.filter(s => !benched.has(s.id));
+    const gatePassed = hardEligible
+      .map(s => ({ s, gate: evaluateRealGate(s) }))
+      .filter(x => x.gate.pass);
+    const eligibleScores = gatePassed.map(x => x.s);
     const need = Math.min(this.cfg.activeRealBots, eligibleScores.length);
     if (need <= 0) return [];
 
@@ -217,7 +314,13 @@ class BotFleetManager {
       return this.pickRealBots(lite);
     }
 
-    const ranked = [...eligibleScores].sort((a, b) => scoreFor(b, mode) - scoreFor(a, mode));
+    const gateScores = new Map(gatePassed.map(x => [x.s.id, x.gate.rankingScore]));
+    const ranked = [...eligibleScores].sort((a, b) => {
+      if (mode === 'auto_best') {
+        return (gateScores.get(b.id) ?? 0) - (gateScores.get(a.id) ?? 0);
+      }
+      return scoreFor(b, mode) - scoreFor(a, mode);
+    });
     return ranked.slice(0, need).map(s => s.id);
   }
 
@@ -250,11 +353,59 @@ class BotFleetManager {
     // circular dep with stores that read fleet config.
     try {
       void import('./bot-activity-store.js').then(({ botActivityStore }) => {
+        const isScores = looksLikeScores;
+        const scored = (isScores ? allBots : []) as BotScore[];
+        const selected = new Set(next);
+        const benched = getBenchedSet();
+        const byBot: Record<string, {
+          state: RealEligibilityState;
+          reason: RealGateReason;
+          executionQualityScore?: number;
+          invalidAttemptRate?: number;
+          doctorHealthStatus?: 'healthy' | 'watch' | 'critical' | 'benched';
+        }> = {};
+        for (const b of allBots.map(b => ({ id: b.id, name: (b as BotLite).name }))) {
+          const sc = scored.find(s => s.id === b.id);
+          const gate = sc ? evaluateRealGate(sc) : { pass: true, reason: 'approved_for_real_trade' as RealGateReason };
+          const inReal = selected.has(b.id);
+          let state: RealEligibilityState;
+          let reason: RealGateReason = gate.reason;
+          if (benched.has(b.id) || sc?.doctorHealthStatus === 'benched') {
+            state = 'benched';
+            reason = 'rejected_unhealthy_bot';
+          } else if (inReal && gate.pass) {
+            state = 'real_eligible';
+            reason = 'approved_for_real_trade';
+          } else if (!gate.pass && gate.reason === 'rejected_high_reject_rate') {
+            state = 'blocked';
+          } else if (!gate.pass && gate.reason === 'rejected_poor_recent_performance') {
+            state = 'degraded';
+          } else if (!gate.pass) {
+            state = 'real_ineligible';
+          } else if (this.cfg.remainingMode === 'paper') {
+            state = 'paper_only';
+            reason = 'rejected_lower_rank_than_active_bots';
+          } else if (this.cfg.remainingMode === 'standby') {
+            state = 'standby';
+            reason = 'rejected_lower_rank_than_active_bots';
+          } else {
+            state = 'blocked';
+            reason = 'rejected_lower_rank_than_active_bots';
+          }
+          byBot[b.id] = {
+            state,
+            reason,
+            ...(sc?.executionQualityScore !== undefined ? { executionQualityScore: sc.executionQualityScore } : {}),
+            ...(sc?.invalidAttemptRate !== undefined ? { invalidAttemptRate: sc.invalidAttemptRate } : {}),
+            ...(sc?.doctorHealthStatus ? { doctorHealthStatus: sc.doctorHealthStatus } : {}),
+          };
+        }
         botActivityStore.setFleet({
           totalBots:      allBots.length,
           eligibleBotIds: next,
           allBotsHint:    allBots.map(b => ({ id: b.id, name: (b as BotLite).name })),
         });
+        botActivityStore.setRealEligibility({ byBot });
       }).catch(() => { /* ignore — telemetry must never break the picker */ });
     } catch { /* swallow */ }
     return next;

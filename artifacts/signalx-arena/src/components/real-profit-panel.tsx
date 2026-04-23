@@ -94,12 +94,15 @@ export function RealProfitPanel() {
               <table className="w-full text-[11px]">
                 <thead className="text-zinc-500 uppercase tracking-wider text-[9px] sticky top-0 bg-emerald-950/30 backdrop-blur">
                   <tr>
-                    <th className="text-left py-1 px-1">Time</th>
+                    <th className="text-left py-1 px-1">Exit time</th>
+                    <th className="text-left py-1 px-1">Entry time</th>
                     <th className="text-left py-1 px-1">Symbol</th>
                     <th className="text-right py-1 px-1">Qty</th>
                     <th className="text-right py-1 px-1">Entry</th>
                     <th className="text-right py-1 px-1">Exit</th>
+                    <th className="text-right py-1 px-1">Gross</th>
                     <th className="text-right py-1 px-1">Fees</th>
+                    <th className="text-right py-1 px-1">Slip</th>
                     <th className="text-right py-1 px-1">Net P/L</th>
                     <th className="text-left py-1 px-1">Bot</th>
                   </tr>
@@ -107,12 +110,21 @@ export function RealProfitPanel() {
                 <tbody className="font-mono">
                   {closed.map((t, i) => (
                     <tr key={i} className="border-t border-zinc-800/50">
-                      <td className="py-1 px-1 text-zinc-400">{new Date(t.ts).toLocaleTimeString()}</td>
+                      <td className="py-1 px-1 text-zinc-400">{new Date(t.exitTime).toLocaleTimeString()}</td>
+                      <td className="py-1 px-1 text-zinc-500">{new Date(t.entryTime).toLocaleTimeString()}</td>
                       <td className="py-1 px-1 text-zinc-200">{t.exchange}:{t.baseAsset}</td>
-                      <td className="py-1 px-1 text-right text-zinc-300">{t.qty.toLocaleString(undefined, { maximumFractionDigits: 6 })}</td>
+                      <td className="py-1 px-1 text-right text-zinc-300">{t.quantity.toLocaleString(undefined, { maximumFractionDigits: 6 })}</td>
                       <td className="py-1 px-1 text-right text-zinc-300">${t.entryPrice.toLocaleString(undefined, { maximumFractionDigits: 4 })}</td>
                       <td className="py-1 px-1 text-right text-zinc-300">${t.exitPrice.toLocaleString(undefined, { maximumFractionDigits: 4 })}</td>
+                      <td className={`py-1 px-1 text-right ${t.grossPnlUSD >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                        ${fmt(t.grossPnlUSD)}
+                      </td>
                       <td className="py-1 px-1 text-right text-zinc-500">${t.feesUSD.toFixed(3)}</td>
+                      <td className="py-1 px-1 text-right text-zinc-500">
+                        {typeof t.slippageImpactUSD === 'number'
+                          ? `$${t.slippageImpactUSD.toFixed(3)}`
+                          : '—'}
+                      </td>
                       <td className={`py-1 px-1 text-right font-bold ${t.netPnlUSD >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                         ${fmt(t.netPnlUSD)}
                       </td>

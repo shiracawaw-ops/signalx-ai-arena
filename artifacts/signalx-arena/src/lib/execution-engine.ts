@@ -20,6 +20,7 @@ import { credentialStore } from './credential-store.js';
 import {
   checkBotAllocation,
   commitBotAllocation,
+  getCommittedUSD,
   releaseBotAllocation,
   resetBotAllocation,
 } from './bot-allocation.js';
@@ -100,6 +101,71 @@ function feNoteFailure(key: string) {
   feGates.set(key, g);
 }
 function feNoteSuccess(key: string) { feGates.delete(key); }
+
+// Reject-noise suppression: avoid flooding logs with identical hard blocks
+// under bad conditions (cooldown storms, max-daily hard stop, dust retries).
+const REJECT_NOISE_WINDOW_MS = 30_000;
+const rejectNoiseByKey = new Map<string, number>();
+const NOISE_REASONS = new Set<string>([
+  REJECT.COOLDOWN_ACTIVE,
+  REJECT.MAX_DAILY_TRADES,
+  REJECT.OWNED_QTY_BELOW_MIN_NOTIONAL,
+  REJECT.BELOW_MIN_NOTIONAL,
+  REJECT.ADAPTER_NOT_READY,
+]);
+
+function rejectNoiseKey(
+  mode: 'demo' | 'paper' | 'testnet' | 'real',
+  exchange: string,
+  signal: Signal,
+  reason: string,
+): string {
+  return `${mode}:${exchange}:${signal.botId ?? 'manual'}:${signal.symbol}:${reason}`;
+}
+
+function shouldSuppressRejectNoise(
+  mode: 'demo' | 'paper' | 'testnet' | 'real',
+  exchange: string,
+  signal: Signal,
+  reason: string,
+): boolean {
+  if (!NOISE_REASONS.has(reason)) return false;
+  const key = rejectNoiseKey(mode, exchange, signal, reason);
+  const now = Date.now();
+  const prev = rejectNoiseByKey.get(key) ?? 0;
+  rejectNoiseByKey.set(key, now);
+  return now - prev < REJECT_NOISE_WINDOW_MS;
+}
+
+function classifyExchangeReject(detail: string): string {
+  const d = detail.toLowerCase();
+  if (/retcode\s*=?\s*170140|lower limit|min.?notional|below.*notional/.test(d)) return REJECT.BELOW_MIN_NOTIONAL;
+  if (/retcode\s*=?\s*170131|insufficient.*balance|insufficient funds|not enough balance/.test(d)) return REJECT.INSUFFICIENT_BALANCE;
+  if (/precision|step.?size|lot size|invalid qty|invalid quantity/.test(d)) return REJECT.INVALID_ORDER_SIZE;
+  if (/symbol.*not.*found|unknown symbol/.test(d)) return REJECT.SYMBOL_NOT_FOUND;
+  if (/account mode|unified|spot/.test(d) && /mismatch|not allowed|not support/.test(d)) return REJECT.ACCOUNT_MODE_MISMATCH;
+  return REJECT.EXCHANGE_REJECTED;
+}
+
+function extractFeeUsd(orderData: unknown, fallbackTradeAmountUsd: number): number {
+  const o = (orderData ?? {}) as Record<string, unknown>;
+  const direct = Number(
+    o['feeUSD'] ??
+    o['fee'] ??
+    o['cumExecFee'] ??
+    o['cumFee'] ??
+    0,
+  );
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  // Conservative fallback: assume taker-like 0.1% if venue response omits fee.
+  return Math.max(0, fallbackTradeAmountUsd * 0.001);
+}
+
+function computeQuoteReserves(availableQuote: number, committedUSD: number): { feeReserveUSD: number; safetyReserveUSD: number } {
+  const feeReserveUSD = Math.max(0, Math.min(availableQuote, committedUSD * 0.01));
+  const safetyReserveUSD = Math.max(0, Math.min(availableQuote - feeReserveUSD, availableQuote * 0.02));
+  return { feeReserveUSD, safetyReserveUSD };
+}
 
 // Per-session credential injection (called from exchange.tsx after connect)
 export function setCredentials(creds: ExchangeCredentials | null) {
@@ -289,7 +355,6 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
   if (config.emergencyStop) {
     return reject(signal, exchange, mode, REJECT.EMERGENCY_STOP, 'Emergency stop is active.');
   }
-
   // 6b. Per-symbol cooldown (frontend circuit breaker)
   // SELL of a position we just opened bypasses cooldowns — closing trades
   // must never be blocked by guards meant to throttle entry retries.
@@ -308,7 +373,19 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       `Doctor: ${exchange}:${baseTk} is marked as dust. Clear the dust mark to retry.`);
   }
 
-  // 6a-ter. Upfront SELL min-notional gate (uses cached symbol rules).
+  // 6a-ter. Hard stop without churn: once max-daily is reached, do not
+  // continue into downstream gates that would generate repeated noisy rejects.
+  if (config.maxDailyTrades > 0 && dailyTradeCount >= config.maxDailyTrades) {
+    return reject(
+      signal,
+      exchange,
+      mode,
+      REJECT.MAX_DAILY_TRADES,
+      `Max daily trades reached (${dailyTradeCount}/${config.maxDailyTrades}). Trading is paused until daily reset.`,
+    );
+  }
+
+  // 6a-quater. Upfront SELL min-notional gate (uses cached symbol rules).
   // For closing SELLs we already know the qty we own — if it's below the
   // exchange minimums we should NOT call the network or the heavyweight
   // shield/risk pipeline. Marking dust here also stops follow-up retries
@@ -342,10 +419,69 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     }
   }
 
-  const gate     = feGateBlocked(gateKey);
+  // 7. Fetch symbol rules from backend
+  let symbolRules: RiskSymbolRules;
+  try {
+    const rulesRes = await apiClient.getSymbolRules(exchange, credentials, signal.symbol);
+    if (rulesRes.ok) {
+      symbolRules = (rulesRes.data as { rules: RiskSymbolRules }).rules;
+    } else {
+      symbolRules = { symbol: signal.symbol, minQty: 0.00001, maxQty: 9_000_000, stepSize: 0.00001, minNotional: 1, tickSize: 0.01, filterSource: 'stub' };
+    }
+  } catch {
+    symbolRules = { symbol: signal.symbol, minQty: 0.00001, maxQty: 9_000_000, stepSize: 0.00001, minNotional: 1, tickSize: 0.01, filterSource: 'stub' };
+  }
+
+  // 8. Fetch available balance — side-aware (BUY needs quote, SELL needs base)
+  let availableQuote = 0;
+  let availableBase  = 0;
+  let feeReserveUSD = 0;
+  let safetyReserveUSD = 0;
+  try {
+    const balRes = await apiClient.getBalances(exchange, credentials);
+    if (balRes.ok) {
+      const balances = (balRes.data as { balances: Array<{ asset: string; available: number }> }).balances;
+      const quoteAsset = symbolRules.quoteCurrency ?? 'USDT';
+      const baseAsset  = symbolRules.baseCurrency  ?? stripStableSuffix(signal.symbol);
+      // Prefer the exact quote asset, otherwise fall back to a stable
+      // settlement asset using the shared registry's declaration order
+      // (USDT first, then USDC, USD, …) — keeps fallback selection
+      // deterministic regardless of how an adapter orders balance rows.
+      let q = balances.find(b => b.asset === quoteAsset);
+      if (!q) {
+        for (const sym of STABLE_ASSETS) {
+          const hit = balances.find(b => b.asset === sym);
+          if (hit) { q = hit; break; }
+        }
+      }
+      const bs = balances.find(b => b.asset.toUpperCase() === baseAsset.toUpperCase());
+      availableQuote = q?.available  ?? 0;
+      availableBase  = bs?.available ?? 0;
+      // Reserve buffers so the engine never spends the entire free quote
+      // amount on a single order path.
+      const committed = signal.botId ? getCommittedUSD(signal.botId) : 0;
+      const reserves = computeQuoteReserves(availableQuote, Math.max(config.tradeAmountUSD, committed));
+      feeReserveUSD = reserves.feeReserveUSD;
+      safetyReserveUSD = reserves.safetyReserveUSD;
+    }
+  } catch { /* proceed with 0 — risk manager will catch */ }
+
+  // For SELL: trust the larger of (exchange-reported free base) and (local
+  // ledger of what we just bought this session). Bybit takes 1-3s to surface
+  // a fresh fill in /balances; without this the SELL after a successful BUY
+  // is rejected with INSUFFICIENT_BALANCE.
+  if (signal.side === 'sell') {
+    const ledgerOwned = getOwned(exchange, baseTk);
+    if (ledgerOwned > availableBase) {
+      console.log(`[engine] using ledger-owned ${ledgerOwned} for ${baseTk} (exchange reported ${availableBase})`);
+      availableBase = ledgerOwned;
+    }
+  }
+
+  const gate = feGateBlocked(gateKey);
   if (gate.blocked && !isClosingSell) {
-    return reject(signal, exchange, mode, REJECT.EXCHANGE_REJECTED,
-      `Cooldown active for ${exchange}:${signal.symbol} after ${FE_FAILURE_THRESHOLD} consecutive failures (${Math.ceil(gate.remainingMs/1000)}s remaining).`);
+    return reject(signal, exchange, mode, REJECT.COOLDOWN_ACTIVE,
+      `Cooldown active for ${exchange}:${signal.symbol} after ${FE_FAILURE_THRESHOLD} consecutive failures (${Math.ceil(gate.remainingMs / 1000)}s remaining).`);
   }
   if (isClosingSell) {
     // Forgive any pending shield cooldown for this exact symbol so the
@@ -353,7 +489,7 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     clearShieldCooldownFor(exchange, signal.symbol);
   }
 
-  // 6c. Rejection-Prevention Shield — pre-flight gate (compliance + cache + cooldown)
+  // 8a. Rejection-Prevention Shield — pre-flight gate (compliance + cache + cooldown)
   try {
     const shield = await preflight({
       exchange:    exchange as ExchangeId,
@@ -362,6 +498,12 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       amountUSD:   config.tradeAmountUSD,
       refPrice:    signal.price,
       credentials,
+      freeQuoteBalance: availableQuote,
+      freeBaseBalance:  availableBase,
+      feeReserveUSD,
+      safetyReserveUSD,
+      maxDailyTrades: config.maxDailyTrades,
+      usedDailyTrades: dailyTradeCount,
       signalAgeMs: Math.max(0, Date.now() - signal.ts),
       ...(signal.confidence !== undefined ? { confidence: signal.confidence } : {}),
       ...(signal.expectedEdgeBps !== undefined ? { expectedEdgeBps: signal.expectedEdgeBps } : {}),
@@ -389,61 +531,21 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     console.warn('[engine] Pipeline shield preflight failed (non-fatal):', (e as Error).message);
   }
 
-  // 7. Fetch symbol rules from backend
-  let symbolRules: RiskSymbolRules;
-  try {
-    const rulesRes = await apiClient.getSymbolRules(exchange, credentials, signal.symbol);
-    if (rulesRes.ok) {
-      symbolRules = (rulesRes.data as { rules: RiskSymbolRules }).rules;
-    } else {
-      symbolRules = { symbol: signal.symbol, minQty: 0.00001, maxQty: 9_000_000, stepSize: 0.00001, minNotional: 1, tickSize: 0.01, filterSource: 'stub' };
-    }
-  } catch {
-    symbolRules = { symbol: signal.symbol, minQty: 0.00001, maxQty: 9_000_000, stepSize: 0.00001, minNotional: 1, tickSize: 0.01, filterSource: 'stub' };
-  }
-
-  // 8. Fetch available balance — side-aware (BUY needs quote, SELL needs base)
-  let availableQuote = 0;
-  let availableBase  = 0;
-  try {
-    const balRes = await apiClient.getBalances(exchange, credentials);
-    if (balRes.ok) {
-      const balances = (balRes.data as { balances: Array<{ asset: string; available: number }> }).balances;
-      const quoteAsset = symbolRules.quoteCurrency ?? 'USDT';
-      const baseAsset  = symbolRules.baseCurrency  ?? stripStableSuffix(signal.symbol);
-      // Prefer the exact quote asset, otherwise fall back to a stable
-      // settlement asset using the shared registry's declaration order
-      // (USDT first, then USDC, USD, …) — keeps fallback selection
-      // deterministic regardless of how an adapter orders balance rows.
-      let q = balances.find(b => b.asset === quoteAsset);
-      if (!q) {
-        for (const sym of STABLE_ASSETS) {
-          const hit = balances.find(b => b.asset === sym);
-          if (hit) { q = hit; break; }
-        }
-      }
-      const bs = balances.find(b => b.asset.toUpperCase() === baseAsset.toUpperCase());
-      availableQuote = q?.available  ?? 0;
-      availableBase  = bs?.available ?? 0;
-    }
-  } catch { /* proceed with 0 — risk manager will catch */ }
-
-  // For SELL: trust the larger of (exchange-reported free base) and (local
-  // ledger of what we just bought this session). Bybit takes 1-3s to surface
-  // a fresh fill in /balances; without this the SELL after a successful BUY
-  // is rejected with INSUFFICIENT_BALANCE.
-  if (signal.side === 'sell') {
-    const ledgerOwned = getOwned(exchange, baseTk);
-    if (ledgerOwned > availableBase) {
-      console.log(`[engine] using ledger-owned ${ledgerOwned} for ${baseTk} (exchange reported ${availableBase})`);
-      availableBase = ledgerOwned;
-    }
-  }
+  const availableForNewOrders = Math.max(0, availableQuote - feeReserveUSD - safetyReserveUSD);
 
   // 8b. Per-bot capital allocation check (Phase 4 — Option 3 fixed cap).
   // Cap = tradeAmountUSD × maxOpenPositions; closing-SELLs are not gated
   // because they REDUCE commitment, not add to it.
   const isClosingSellForAlloc = signal.side === 'sell' && availableBase > 0;
+  if (!isClosingSellForAlloc && availableForNewOrders <= 0) {
+    return reject(
+      signal,
+      exchange,
+      mode,
+      REJECT.INSUFFICIENT_BALANCE,
+      `Free ${symbolRules.quoteCurrency ?? 'USDT'} after reserves is $0.00 (raw $${availableQuote.toFixed(2)} - fee reserve $${feeReserveUSD.toFixed(2)} - safety reserve $${safetyReserveUSD.toFixed(2)}).`,
+    );
+  }
   if (!isClosingSellForAlloc) {
     const alloc = checkBotAllocation({
       botId:     signal.botId,
@@ -468,6 +570,8 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     amountUSD:        config.tradeAmountUSD,
     availableQuote,
     availableBase,
+    feeReserveUSD,
+    safetyReserveUSD,
     openPositions:    openPositionCount,
     dailyTradeCount,
     lastTradeTs,
@@ -509,6 +613,15 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
 
   const isTestnet = mode === 'testnet';
 
+  const ownedBeforeSell = signal.side === 'sell' ? availableBase : 0;
+  const submittedSellQty = signal.side === 'sell' ? (risk.quantity ?? 0) : 0;
+  const remainingQtyEstimate = signal.side === 'sell'
+    ? Math.max(0, ownedBeforeSell - submittedSellQty)
+    : 0;
+  const remainingNotionalEstimate = signal.side === 'sell'
+    ? remainingQtyEstimate * (risk.price ?? signal.price)
+    : 0;
+
   const pending = executionLog.add({
     mode,
     exchange,
@@ -527,6 +640,13 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     minNotional: risk.minNotional,
     stepSize:    risk.stepSize,
     rulesSource: risk.filterSource,
+    ...(signal.side === 'sell' ? {
+      ownedQtyDetected: ownedBeforeSell,
+      sellQtySubmitted: submittedSellQty,
+      remainingQtyEstimate,
+      remainingNotionalEstimate,
+      closeIntent: signal.closeAll ? 'full' as const : 'partial' as const,
+    } : {}),
   });
 
   const t0 = Date.now();
@@ -560,17 +680,39 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
 
     if (!orderRes.ok) {
       const errMsg = (orderRes as { error: string }).error ?? 'Unknown error';
+      const rejectCode = classifyExchangeReject(errMsg);
+      if (shouldSuppressRejectNoise(mode, exchange, signal, rejectCode)) {
+        return { ok: false, logId: pending.id, rejectReason: rejectCode, detail: errMsg };
+      }
+    }
+
+    if (!orderRes.ok) {
+      const errMsg = (orderRes as { error: string }).error ?? 'Unknown error';
+      const rejectCode = classifyExchangeReject(errMsg);
       executionLog.update(pending.id, {
         status:           'failed',
         errorMsg:         errMsg,
         rejectionDetail:  errMsg,
         latencyMs:        latency,
         exchangeResponse: orderRes,
+        rejectReason:     rejectCode,
+        ...(signal.side === 'sell' ? { sellBlockReason: errMsg } : {}),
       });
       feNoteFailure(gateKey);
       noteRejection(exchange, signal.symbol);
       console.error(`[engine][${mode}] Order failed: ${errMsg}`);
-      return { ok: false, logId: pending.id, rejectReason: REJECT.EXCHANGE_REJECTED, detail: errMsg };
+      if (signal.botId && (mode === 'real' || mode === 'testnet')) {
+        try {
+          botActivityStore.recordAttempt({
+            botId: signal.botId,
+            kind: 'reject',
+            symbol: signal.symbol,
+            reason: rejectCode,
+            detail: errMsg,
+          });
+        } catch { /* no-op */ }
+      }
+      return { ok: false, logId: pending.id, rejectReason: rejectCode, detail: errMsg };
     }
 
     const data    = (orderRes as { data: { order: { orderId: string } } }).data;
@@ -581,6 +723,10 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       orderId,
       latencyMs:        latency,
       exchangeResponse: data,
+      ...(signal.side === 'sell' ? {
+        remainingQtyEstimate,
+        remainingNotionalEstimate,
+      } : {}),
     });
 
     dailyTradeCount++;
@@ -621,17 +767,22 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     // store. Testnet fills are NOT real money.
     try {
       if (mode === 'real') {
+        const fillFeeUSD = extractFeeUsd(data, config.tradeAmountUSD);
         if (signal.side === 'buy') {
           realProfitStore.recordRealBuy({
             exchange, baseAsset: baseTk,
             qty: risk.quantity!, price: risk.price!,
             botId: signal.botId,
+            symbol: signal.symbol,
+            feeUSD: fillFeeUSD,
           });
         } else {
           realProfitStore.recordRealSell({
             exchange, baseAsset: baseTk,
             qty: risk.quantity!, price: risk.price!,
             botId: signal.botId, botName: signal.botName,
+            symbol: signal.symbol,
+            feeUSD: fillFeeUSD,
           });
         }
       }
@@ -665,6 +816,9 @@ function reject(
   reason: string,
   detail: string,
 ): EngineResult {
+  if (shouldSuppressRejectNoise(mode, exchange, signal, reason)) {
+    return { ok: false, rejectReason: reason, detail };
+  }
   const entry = executionLog.add({
     mode,
     exchange,
@@ -722,6 +876,7 @@ export const _tests = {
     recentSignals   = [];
     openPositionCount = 0;
     feGates.clear();
+    rejectNoiseByKey.clear();
     resetBotAllocation();
   },
   getState() {

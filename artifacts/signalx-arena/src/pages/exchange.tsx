@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { motion } from 'framer-motion';
 import {
@@ -422,6 +422,7 @@ export default function ExchangePage() {
   const [validating,   setValidating]  = useState(false);
   const [balError,     setBalError]    = useState<string | null>(null);
   const [ordError,     setOrdError]    = useState<string | null>(null);
+  const [renderNowMs,  setRenderNowMs] = useState<number>(() => Date.now());
 
   // ── Manual Order form state ─────────────────────────────────────────────
   // The form is just a thin shell over executeSignal — it inherits every
@@ -522,8 +523,10 @@ export default function ExchangePage() {
   }, []);
   useEffect(() => {
     const pending = consumeDustFocus();
-    if (pending) handleDustFocus(pending);
-    return subscribeDustFocus(handleDustFocus);
+    if (pending) {
+      queueMicrotask(() => handleDustFocus(pending));
+    }
+    return subscribeDustFocus((req) => queueMicrotask(() => handleDustFocus(req)));
   }, [handleDustFocus]);
 
   // Track the latest active tab via a ref so async pollers (which capture
@@ -563,7 +566,8 @@ export default function ExchangePage() {
   // see after returning to /exchange.
   const exMounted = useRef(false);
   useEffect(() => {
-    setConfig(tradeConfig.get(selectedEx.id));
+    const nextCfg = tradeConfig.get(selectedEx.id);
+    queueMicrotask(() => setConfig(nextCfg));
 
     if (!exMounted.current) {
       // First mount: rehydrate cached live data for this exchange so the
@@ -571,21 +575,25 @@ export default function ExchangePage() {
       exMounted.current = true;
       const cached = credentialStore.getCache(selectedEx.id);
       if (cached) {
-        if (cached.liveBalances)   setLiveBalances(cached.liveBalances);
-        if (cached.liveOrders)     setLiveOrders(cached.liveOrders);
-        if (cached.permissions)    setLivePermissions(cached.permissions);
-        if (typeof cached.latency === 'number') setLatency(cached.latency);
+        queueMicrotask(() => {
+          if (cached.liveBalances)   setLiveBalances(cached.liveBalances);
+          if (cached.liveOrders)     setLiveOrders(cached.liveOrders);
+          if (cached.permissions)    setLivePermissions(cached.permissions);
+          if (typeof cached.latency === 'number') setLatency(cached.latency);
+        });
       }
     } else {
       // Active exchange switch: reset everything for the new exchange.
-      setBalances([]);
-      setOrders([]);
-      setLiveBalances([]); setLiveSummary(null);
-      setLiveOrders([]);
-      setLivePermissions(null);
-      setLatency(null);
-      setBalError(null);
-      setOrdError(null);
+      queueMicrotask(() => {
+        setBalances([]);
+        setOrders([]);
+        setLiveBalances([]); setLiveSummary(null);
+        setLiveOrders([]);
+        setLivePermissions(null);
+        setLatency(null);
+        setBalError(null);
+        setOrdError(null);
+      });
       if (exMode.get().exchange !== selectedEx.id) {
         exMode.setExchange(selectedEx.id);
       }
@@ -593,14 +601,32 @@ export default function ExchangePage() {
 
     // Rehydrate creds + connection flag from the singleton store.
     const saved = credentialStore.get(selectedEx.id);
-    setApiKey(saved?.apiKey     ?? '');
-    setSecretKey(saved?.secretKey ?? '');
-    setPassphrase(saved?.passphrase ?? '');
-    setIsConnected(!!saved);
-    setCredentials(saved);
+    queueMicrotask(() => {
+      setApiKey(saved?.apiKey     ?? '');
+      setSecretKey(saved?.secretKey ?? '');
+      setPassphrase(saved?.passphrase ?? '');
+      setIsConnected(!!saved);
+      setCredentials(saved);
+    });
     exchangeEvents.log('state-change', selectedEx.id,
       saved ? 'Restored saved credentials for this exchange' : 'No saved credentials for this exchange');
   }, [selectedEx.id]);
+
+  // Keep retry countdown text stable without calling Date.now() during render.
+  useEffect(() => {
+    if (!modeState.autoRetryAt) return;
+    const id = window.setInterval(() => setRenderNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [modeState.autoRetryAt]);
+
+  const balanceRetryCountdownText = useMemo(() => {
+    if (!modeState.autoRetryAt) return '';
+    const secs = Math.max(0, Math.ceil((modeState.autoRetryAt - renderNowMs) / 1000));
+    const reason = modeState.autoRetryReason === 'rate_limit' ? 'rate-limit' : 'network';
+    return secs > 0
+      ? `Retrying in ${secs}s after ${reason} blip…`
+      : `Retrying now after ${reason} blip…`;
+  }, [modeState.autoRetryAt, modeState.autoRetryReason, renderNowMs]);
 
   // ── Demo data loader ──────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
@@ -1600,7 +1626,7 @@ export default function ExchangePage() {
       {(mode === 'real' || mode === 'testnet') && CONNECTION_ERROR_STATES.has(modeState.connectionState) && (() => {
         const info = friendlyConnectionError(modeState.connectionState, selectedEx.name, modeState.connectionError);
         const retrySecs = modeState.autoRetryAt
-          ? Math.max(0, Math.ceil((modeState.autoRetryAt - Date.now()) / 1000))
+          ? Math.max(0, Math.ceil((modeState.autoRetryAt - renderNowMs) / 1000))
           : null;
         const retryReasonLabel =
           modeState.autoRetryReason === 'rate_limit' ? 'rate-limit' : 'network';
@@ -2036,13 +2062,7 @@ export default function ExchangePage() {
               >
                 <RefreshCw size={13} className="mt-0.5 flex-shrink-0 animate-spin" />
                 <span>
-                  {(() => {
-                    const secs = Math.max(0, Math.ceil((modeState.autoRetryAt - Date.now()) / 1000));
-                    const reason = modeState.autoRetryReason === 'rate_limit' ? 'rate-limit' : 'network';
-                    return secs > 0
-                      ? `Retrying in ${secs}s after ${reason} blip…`
-                      : `Retrying now after ${reason} blip…`;
-                  })()}
+                  {balanceRetryCountdownText}
                 </span>
               </div>
             ) : (
@@ -2349,8 +2369,7 @@ export default function ExchangePage() {
                         <td className="px-3 py-2">
                           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">{String(o['status'] ?? 'open')}</span>
                         </td>
-                        {/* eslint-disable-next-line react-hooks/purity */}
-                        <td className="px-3 py-2 text-zinc-500">{new Date(Number(o['timestamp']) || Date.now()).toLocaleTimeString()}</td>
+                        <td className="px-3 py-2 text-zinc-500">{new Date(Number(o['timestamp']) || renderNowMs).toLocaleTimeString()}</td>
                         <td className="px-3 py-2">
                           {isCancellable ? (
                             <Button
@@ -3139,6 +3158,16 @@ export default function ExchangePage() {
                   onChange={e => tradeConfig.set(selectedEx.id, { maxDailyTrades: Number(e.target.value) })}
                   className="h-7 w-28 text-xs font-mono text-right" />
               </CfgRow>
+              <div className="ml-auto text-[10px] text-zinc-500 -mt-1">
+                Current daily usage: {
+                  logEntries.filter(e =>
+                    e.exchange === selectedEx.id &&
+                    e.status === 'executed' &&
+                    (e.mode === 'real' || e.mode === 'testnet') &&
+                    new Date(e.ts).toDateString() === new Date().toDateString(),
+                  ).length
+                }/{config.maxDailyTrades > 0 ? config.maxDailyTrades : '∞'}
+              </div>
               <CfgRow label="Max open positions (0 = unlimited)">
                 <Input type="number" value={config.maxOpenPositions} min={0}
                   onChange={e => tradeConfig.set(selectedEx.id, { maxOpenPositions: Number(e.target.value) })}
@@ -3159,6 +3188,9 @@ export default function ExchangePage() {
                   onChange={e => tradeConfig.set(selectedEx.id, { cooldownSeconds: Number(e.target.value) })}
                   className="h-7 w-28 text-xs font-mono text-right" />
               </CfgRow>
+              <div className="ml-auto text-[10px] text-zinc-500 -mt-1">
+                {config.cooldownSeconds === 0 ? '0 = disabled (no cooldown gate)' : `Active cooldown: ${config.cooldownSeconds}s`}
+              </div>
               <CfgRow label="Order type">
                 <select value={config.orderType}
                   onChange={e => tradeConfig.set(selectedEx.id, { orderType: e.target.value as 'market' | 'limit' })}
@@ -3681,7 +3713,7 @@ function ClassifiedBalances(p: ClassifiedBalancesProps) {
   useEffect(() => {
     const asset = p.focusAsset;
     if (!asset) return;
-    setOpen(s => (s.dust_balance ? s : { ...s, dust_balance: true }));
+    queueMicrotask(() => setOpen(s => (s.dust_balance ? s : { ...s, dust_balance: true })));
     let cancelled = false;
     const tryFocus = (attempts: number) => {
       if (cancelled) return;

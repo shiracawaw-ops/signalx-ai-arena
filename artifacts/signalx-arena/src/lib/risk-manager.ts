@@ -34,6 +34,9 @@ export interface RiskInput {
   availableQuote?: number;     // free quote (USDT/USDC/USD) available
   availableBase?:  number;     // free base asset available (used for SELL)
   availableUSD?:   number;     // legacy alias for availableQuote
+  // Explicit reserves subtracted from free balances before sizing.
+  feeReserveUSD?:    number;   // reserve for maker/taker fees
+  safetyReserveUSD?: number;   // emergency cushion to avoid full-wallet spend
   openPositions: number;       // current number of open positions
   dailyTradeCount: number;     // trades placed today
   lastTradeTs:  number;        // timestamp of last trade (ms)
@@ -100,8 +103,11 @@ export function validateRisk(input: RiskInput): RiskResult {
   // Side-aware balance resolution. Engine populates availableQuote (USDT)
   // and availableBase (the base asset for the pair).  Falls back to legacy
   // availableUSD when only one number is known.
-  const availableQuote = input.availableQuote ?? input.availableUSD ?? 0;
+  const availableQuoteRaw = input.availableQuote ?? input.availableUSD ?? 0;
   const availableBase  = input.availableBase  ?? 0;
+  const feeReserve     = Math.max(0, input.feeReserveUSD ?? 0);
+  const safetyReserve  = Math.max(0, input.safetyReserveUSD ?? 0);
+  const availableQuote = Math.max(0, availableQuoteRaw - feeReserve - safetyReserve);
 
   // Emergency stop
   if (config.emergencyStop) {
@@ -167,6 +173,21 @@ export function validateRisk(input: RiskInput): RiskResult {
   // Price sanity
   if (!price || price <= 0) {
     return { ok: false, reason: REJECT.PRICE_UNAVAILABLE, detail: 'Cannot determine current price.' };
+  }
+  // Exchange tradability sanity (spot).
+  if (symbolRules.status && !/trading/i.test(symbolRules.status)) {
+    return {
+      ok: false,
+      reason: REJECT.SYMBOL_INACTIVE,
+      detail: `Symbol ${symbol} is not tradable right now (status=${symbolRules.status}).`,
+    };
+  }
+  if (symbolRules.isSpotTradingAllowed === false) {
+    return {
+      ok: false,
+      reason: REJECT.EXCHANGE_RESTRICTION,
+      detail: `Spot trading is not allowed for ${symbol} on this venue/account mode.`,
+    };
   }
 
   // Compute raw quantity from USD amount
@@ -253,7 +274,10 @@ export function validateRisk(input: RiskInput): RiskResult {
   if (side === 'buy') {
     if (availableQuote < notional * 1.01) {
       return { ok: false, reason: REJECT.INSUFFICIENT_BALANCE,
-        detail: `Insufficient ${quoteAsset}: need $${(notional * 1.01).toFixed(2)} (incl. fees), have $${availableQuote.toFixed(2)}.`,
+        detail:
+          `Insufficient ${quoteAsset}: need $${(notional * 1.01).toFixed(2)} (incl. fees), ` +
+          `free after reserves is $${availableQuote.toFixed(2)} ` +
+          `(raw $${availableQuoteRaw.toFixed(2)} - fee reserve $${feeReserve.toFixed(2)} - safety reserve $${safetyReserve.toFixed(2)}).`,
         ...diag, freeBalance: availableQuote, freeAsset: quoteAsset };
     }
   } else {

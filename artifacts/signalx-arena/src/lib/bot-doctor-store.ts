@@ -261,6 +261,11 @@ class BotDoctorStore {
     rejectDetail?: string;
     rejectionRate: number;   // current rolling reject rate for this bot (0..1)
     submittedRecent: number; // recent attempt count (gate threshold)
+    netRealizedAfterFeesUSD?: number;
+    realClosedTrades?: number;
+    eligibleNow?: boolean;
+    allocationPerBotUSD?: number;
+    minNotionalUSD?: number;
     exchange?:     string;
     baseAsset?:    string;
   }): BenchCode | null {
@@ -314,6 +319,41 @@ class BotDoctorStore {
         `${Math.round(rejectionRate * 100)}% of recent attempts rejected`);
       return 'high_reject_rate';
     }
+
+    // FULL_ACTIVE discipline: bench real-money underperformers after enough
+    // closed trades so random variance in tiny samples does not cause churn.
+    if (
+      this.canDeepAct() &&
+      (input.realClosedTrades ?? 0) >= 6 &&
+      (input.netRealizedAfterFeesUSD ?? 0) < 0
+    ) {
+      const net = Math.abs(input.netRealizedAfterFeesUSD ?? 0).toFixed(2);
+      this.bench(
+        botId,
+        'underperforming_real',
+        `Net realized PnL after fees is -$${net} over ${input.realClosedTrades ?? 0} closed trades`,
+      );
+      return 'underperforming_real';
+    }
+
+    // FULL_ACTIVE discipline: if a bot is eligible but receives too little
+    // capital to clear venue minimums, bench it to free slots for healthier
+    // candidates instead of letting it churn rejects.
+    if (
+      this.canDeepAct() &&
+      input.eligibleNow &&
+      (input.allocationPerBotUSD ?? Infinity) > 0 &&
+      (input.minNotionalUSD ?? 0) > 0 &&
+      (input.allocationPerBotUSD as number) < (input.minNotionalUSD as number)
+    ) {
+      this.bench(
+        botId,
+        'inactive_eligible',
+        `Per-bot allocation $${(input.allocationPerBotUSD as number).toFixed(2)} is below min notional $${(input.minNotionalUSD as number).toFixed(2)}`,
+      );
+      return 'inactive_eligible';
+    }
+
     return null;
   }
 

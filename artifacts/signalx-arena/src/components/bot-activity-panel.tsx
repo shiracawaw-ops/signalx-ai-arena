@@ -66,7 +66,11 @@ export function BotActivityPanel() {
                   <th className="text-left  px-3 py-1.5">Bot</th>
                   <th className="text-left  px-3 py-1.5">State</th>
                   <th className="text-right px-3 py-1.5">Realized PnL</th>
+                  <th className="text-right px-3 py-1.5">Today</th>
+                  <th className="text-right px-3 py-1.5">Last Trade</th>
                   <th className="text-right px-3 py-1.5">Reject %</th>
+                  <th className="text-right px-3 py-1.5">Exec Q.</th>
+                  <th className="text-left  px-3 py-1.5">Doctor</th>
                   <th className="text-left  px-3 py-1.5">Last reason</th>
                 </tr>
               </thead>
@@ -77,6 +81,10 @@ export function BotActivityPanel() {
                   const fees     = stat?.feesPaidUSD    ?? 0;
                   const net      = realized - fees;
                   const rate     = botActivityStore.rejectionRate(b.botId) * 100;
+                  const todayNet = stat?.todayNetPnlUSD ?? 0;
+                  const lastTradeNet = stat?.lastTradeNetPnlUSD ?? 0;
+                  const execQ = b.executionQualityScore ?? stat?.executionQualityScore ?? Math.max(0, 100 - rate);
+                  const doctor = b.doctorHealthStatus ?? stat?.doctorHealthStatus ?? 'healthy';
                   const state =
                     b.lastRejectTs > b.lastSuccessTs ? { label: 'Blocked', tone: 'text-red-400 bg-red-900/20'   } :
                     b.eligibleNow && b.lastAttemptTs === 0
@@ -97,8 +105,22 @@ export function BotActivityPanel() {
                       <td className={`px-3 py-1.5 text-right tabular-nums ${net >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                         {net >= 0 ? '+' : ''}${net.toFixed(2)}
                       </td>
+                      <td className={`px-3 py-1.5 text-right tabular-nums ${todayNet >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {todayNet >= 0 ? '+' : ''}${todayNet.toFixed(2)}
+                      </td>
+                      <td className={`px-3 py-1.5 text-right tabular-nums ${lastTradeNet >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {lastTradeNet >= 0 ? '+' : ''}${lastTradeNet.toFixed(2)}
+                      </td>
                       <td className={`px-3 py-1.5 text-right tabular-nums ${rate >= 30 ? 'text-red-400' : rate >= 10 ? 'text-amber-400' : 'text-zinc-300'}`}>
                         {rate.toFixed(0)}%
+                      </td>
+                      <td className={`px-3 py-1.5 text-right tabular-nums ${execQ < 45 ? 'text-red-400' : execQ < 70 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                        {execQ.toFixed(0)}
+                      </td>
+                      <td className={`px-3 py-1.5 text-[10px] uppercase tracking-wide ${
+                        doctor === 'benched' || doctor === 'critical' ? 'text-red-300' : doctor === 'watch' ? 'text-amber-300' : 'text-emerald-300'
+                      }`}>
+                        {doctor}
                       </td>
                       <td className="px-3 py-1.5 text-zinc-400 truncate max-w-[180px]" title={b.lastRejectDetail ?? ''}>
                         {lastReason}

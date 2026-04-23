@@ -5,6 +5,8 @@ import { useArena } from '@/hooks/use-arena';
 import { getBotTotalValue, getBotPnL } from '@/lib/engine';
 import { calcFeeAdjusted } from '@/lib/platform';
 import { ASSET_MAP } from '@/lib/storage';
+import { useBotActivity } from '@/lib/bot-activity-store';
+import { useRealProfit } from '@/lib/real-profit-store';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
@@ -145,6 +147,16 @@ interface BotReport {
   rank: number;
   prevRank: number;
   status: 'top' | 'good' | 'weak' | 'failing';
+  realNetAfterFees: number;
+  realGross: number;
+  realFees: number;
+  realTrades: number;
+  lastTradeNet: number;
+  todayNet: number;
+  lifetimeNet: number;
+  rejectRatePct: number;
+  executionQualityScore: number;
+  doctorHealthStatus: string;
 }
 
 // ── Rank change indicator ────────────────────────────────────────────────────
@@ -199,6 +211,8 @@ const SECTIONS = [
 
 export default function ReportsPage() {
   const { bots, trades, getCurrentPrice, market, tickCount } = useArena();
+  const activity = useBotActivity();
+  const real = useRealProfit();
   const [section, setSection] = useState<'overview' | 'top' | 'weak' | 'daily'>('overview');
 
   const prevReportsRef = useRef<Record<string, { rank: number; netPnl: number }>>({});
@@ -235,6 +249,12 @@ export default function ReportsPage() {
         const status: BotReport['status'] =
           feeAdj.netPnl > 50 ? 'top' : feeAdj.netPnl > 0 ? 'good' : feeAdj.netPnl > -50 ? 'weak' : 'failing';
 
+        const realStat = real.perBot[bot.id];
+        const act = activity.bots[bot.id];
+        const realGross = realStat?.realizedPnlUSD ?? 0;
+        const realFees = realStat?.feesPaidUSD ?? 0;
+        const realNetAfterFees = realGross - realFees;
+        const rejectRatePct = (act?.invalidAttemptRate ?? 0) * 100;
         return {
           id: bot.id, name: bot.name, symbol: bot.symbol,
           category: ASSET_MAP[bot.symbol]?.category ?? 'Unknown',
@@ -245,6 +265,16 @@ export default function ReportsPage() {
           trades: botTrades.length, wins, losses, winRate,
           maxDrawdown: maxDD, profitFactor,
           rank: 0, prevRank: prev[bot.id]?.rank ?? 0, status,
+          realNetAfterFees,
+          realGross,
+          realFees,
+          realTrades: realStat?.trades ?? 0,
+          lastTradeNet: realStat?.lastTradeNetPnlUSD ?? 0,
+          todayNet: realStat?.todayNetPnlUSD ?? 0,
+          lifetimeNet: realStat?.lifetimeNetPnlUSD ?? realNetAfterFees,
+          rejectRatePct,
+          executionQualityScore: act?.executionQualityScore ?? Math.max(0, 100 - rejectRatePct),
+          doctorHealthStatus: act?.doctorHealthStatus ?? 'healthy',
         };
       })
       .sort((a, b) => b.netPnl - a.netPnl)
@@ -255,7 +285,7 @@ export default function ReportsPage() {
     // eslint-disable-next-line react-hooks/refs
     prevReportsRef.current = next;
     return computed;
-  }, [bots, trades, market]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [bots, trades, market, real.perBot, activity.bots]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const totalGross  = reports.reduce((s, r) => s + r.grossPnl, 0);
   const totalNet    = reports.reduce((s, r) => s + r.netPnl, 0);
@@ -417,8 +447,8 @@ export default function ReportsPage() {
                       <AnimatedNumber
                         value={displayVal}
                         prefix={kpi.prefix}
-                        suffix={(kpi as any).suffix ?? ''}
-                        decimals={(kpi as any).decimals ?? 2}
+                        suffix={('suffix' in kpi ? kpi.suffix : '') ?? ''}
+                        decimals={('decimals' in kpi ? kpi.decimals : 2) ?? 2}
                       />
                     </div>
                   </CardContent>
@@ -498,7 +528,7 @@ export default function ReportsPage() {
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="border-b border-zinc-800 text-zinc-500">
-                      {['#', '±', 'Bot', 'Asset', 'Strat', 'Trades', 'Win%', 'Gross', 'Fees', 'Net P&L', 'DD%', 'Trend', 'Status'].map(h => (
+                      {['#', '±', 'Bot', 'Asset', 'Strat', 'Trades', 'Win%', 'Gross', 'Fees', 'Net P&L', 'Real Net', 'Reject%', 'ExecQ', 'Doctor', 'DD%', 'Trend', 'Status'].map(h => (
                         <th key={h} className="text-left px-2 py-2 font-medium">{h}</th>
                       ))}
                     </tr>
@@ -535,6 +565,22 @@ export default function ReportsPage() {
                         </td>
                         <td className={`px-2 py-2 font-mono font-bold ${r.netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                           <AnimatedNumber value={r.netPnl} prefix={r.netPnl >= 0 ? '+$' : '-$'} decimals={2} />
+                        </td>
+                        <td className={`px-2 py-2 font-mono font-bold ${r.realNetAfterFees >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {r.realNetAfterFees >= 0 ? '+' : '-'}${fmt(Math.abs(r.realNetAfterFees), 2)}
+                        </td>
+                        <td className={`px-2 py-2 font-mono ${r.rejectRatePct >= 30 ? 'text-red-400' : r.rejectRatePct >= 12 ? 'text-amber-400' : 'text-zinc-400'}`}>
+                          {fmt(r.rejectRatePct, 0)}%
+                        </td>
+                        <td className={`px-2 py-2 font-mono ${r.executionQualityScore >= 75 ? 'text-emerald-400' : r.executionQualityScore >= 45 ? 'text-amber-400' : 'text-red-400'}`}>
+                          {fmt(r.executionQualityScore, 0)}
+                        </td>
+                        <td className={`px-2 py-2 text-[10px] ${
+                          r.doctorHealthStatus === 'healthy' ? 'text-emerald-400' :
+                          r.doctorHealthStatus === 'watch' ? 'text-amber-400' :
+                          'text-red-400'
+                        }`}>
+                          {r.doctorHealthStatus}
                         </td>
                         <td className={`px-2 py-2 font-mono ${r.maxDrawdown < 10 ? 'text-zinc-400' : r.maxDrawdown < 20 ? 'text-amber-400' : 'text-red-400'}`}>
                           {fmt(r.maxDrawdown, 1)}%

@@ -35,6 +35,13 @@ export interface ExecutionEntry {
   stepSize?:       number;
   rejectionDetail?: string;
   rulesSource?:    string;        // "live" | "cached" | "stub"
+  // ── Sell/full-close diagnostics ────────────────────────────────────────────
+  ownedQtyDetected?:         number;
+  sellQtySubmitted?:         number;
+  remainingQtyEstimate?:     number;
+  remainingNotionalEstimate?: number;
+  closeIntent?:              'full' | 'partial';
+  sellBlockReason?:          string;
 }
 
 const STORAGE_KEY = 'sx_execution_log_v1';
@@ -151,6 +158,14 @@ export const REJECT = {
   EDGE_BELOW_FEES:            'edge_below_fees',
   // ── Phase 4 per-bot allocation gate ───────────────────────────────────────
   BOT_ALLOCATION_EXCEEDED:    'bot_allocation_exceeded',
+  // ── Real-mode strict eligibility reasons ───────────────────────────────────
+  REJECTED_LOW_PROFIT_AFTER_FEES:      'rejected_low_profit_after_fees',
+  REJECTED_UNHEALTHY_BOT:              'rejected_unhealthy_bot',
+  REJECTED_LOWER_RANK_THAN_ACTIVE_BOTS:'rejected_lower_rank_than_active_bots',
+  REJECTED_HIGH_REJECT_RATE:           'rejected_high_reject_rate',
+  REJECTED_POOR_RECENT_PERFORMANCE:    'rejected_poor_recent_performance',
+  REJECTED_MARKET_REGIME_MISMATCH:     'rejected_market_regime_mismatch',
+  APPROVED_FOR_REAL_TRADE:             'approved_for_real_trade',
 } as const;
 
 export type RejectReason = typeof REJECT[keyof typeof REJECT];
