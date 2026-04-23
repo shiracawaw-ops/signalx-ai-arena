@@ -292,15 +292,22 @@ export async function dispatchAutoPilotLiveSignal(args: {
   }
 
   const price = getCurrentPrice(sym);
+  // Wire AutoPilot's per-bot composite confidence (0..95, derived from
+  // realized PnL + win rate + drawdown + recency in autopilot.scoreBot)
+  // through to the trade-quality gate. Without this the gate evaluates
+  // every AutoPilot signal at the neutral default 0.7, so a bot scoring
+  // 92% gets the same quality weighting as one scoring 35% — defeating
+  // the point of the composite-quality preflight.
   const signal: Signal = {
-    id:      `autopilot_${sig.botId}_${sig.action}_${Date.now()}`,
-    symbol:  sym,
-    side:    sig.action === 'BUY' ? 'buy' : 'sell',
+    id:         `autopilot_${sig.botId}_${sig.action}_${Date.now()}`,
+    symbol:     sym,
+    side:       sig.action === 'BUY' ? 'buy' : 'sell',
     price,
-    ts:      Date.now(),
-    source:  'autopilot',
-    botId:   sig.botId,
-    botName: d.selectedBot.bot.name,
+    ts:         Date.now(),
+    source:     'autopilot',
+    botId:      sig.botId,
+    botName:    d.selectedBot.bot.name,
+    confidence: d.selectedBot.confidence,
   };
   const result = await executeSignal(signal);
 

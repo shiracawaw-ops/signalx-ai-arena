@@ -1,0 +1,203 @@
+Re-audit and refactor the entire current project end-to-end for one purpose only:
+
+maximize disciplined real-trading performance, execution quality, and net profitability after fees and exchange constraints.
+
+Do not redesign the app from scratch.
+Do not create a new app.
+Modify the existing project directly.
+Keep the current UI structure unless a small change is required for wiring or clarity.
+Be ruthless about removing, disabling, simplifying, merging, or replacing anything that does not genuinely improve real trading outcomes.
+
+Core principle:
+The whole system must work in one coherent direction only:
+better trade selection, cleaner execution, lower rejection rate, tighter risk control, fewer hidden blockers, and stronger net results after fees.
+
+Important constraints:
+
+- do not promise impossible guaranteed profit
+- do not optimize for vanity metrics
+- do not keep cosmetic systems that add complexity without trading value
+- do not keep blockers that silently suppress valid profitable trades
+- do not keep duplicate engines that overlap without clear benefit
+- do not fake success in real mode
+- do not use mock logic where real trading logic is required
+
+Mission:
+Re-study every tool, engine, module, page, pipeline system, guard, gate, helper, store, and runtime service in the project.
+Then remove, disable, simplify, merge, replace, or rewire anything that is:
+
+- unnecessary
+- redundant
+- cosmetic only
+- harmful to execution
+- harmful to profitability
+- inconsistent with the main trading objective
+- causing silent blocking, false rejects, or noisy behavior
+- adding complexity without measurable value
+
+Primary optimization target:
+Make the full program work in one unified context for high-quality profitable real trading only, with:
+
+- stronger signal quality
+- better bot eligibility rules
+- fewer false rejections
+- accurate balance-aware execution
+- proper min-notional / lot-size / tick-size handling
+- correct symbol normalization
+- correct Bybit real-mode behavior
+- clear risk control
+- cleaner logs
+- fewer hidden blockers
+- consistent decision flow
+- reliable end-to-end execution
+
+Required work:
+
+1) Full system re-audit
+   Inspect all visible and hidden parts of the program, including:
+
+- trading pipeline systems
+- bot selection logic
+- fleet gate / bench logic
+- execution planner
+- compliance engine / matrix
+- rejection shield
+- capital allocator
+- plan inspector
+- symbol unification
+- cache layers
+- diagnostics
+- admin tools
+- exchange adapter and credential flow
+- trade config
+- risk manager
+- execution engine
+- order tracking
+- close logic
+- UI-only cards and dashboards
+- stores, helpers, background loops, and hidden guards
+
+2) Classify every component by real usefulness
+   For each component, determine whether it is:
+
+- critical and keep
+- useful and keep
+- useful but simplify
+- redundant and merge
+- cosmetic only
+- harmful blocker
+- stale/dead code
+- inconsistent with profit-focused execution
+
+3) Remove or replace harmful logic
+   Especially identify and fix logic that:
+
+- blocks valid profitable trades incorrectly
+- benches bots too aggressively or opaquely
+- retries unsellable dust positions
+- uses stale balances
+- ignores fees in sizing
+- creates avoidable rejections
+- duplicates cooldown/gating behavior
+- adds complexity without improving net results
+- produces misleading UI health while harming actual execution
+
+4) Unify decision flow
+   Ensure the whole app follows one coherent execution chain:
+   signal generation -> eligibility -> capital allocation -> risk validation -> exchange validation -> submit -> tracking -> exit
+
+No duplicate paths.
+No conflicting gates.
+No hidden blocker layers.
+No cosmetic green systems pretending to help while real execution suffers.
+
+5) Profit-focused bot filtering
+   Rework bot eligibility so only genuinely high-quality candidates proceed.
+   Use real net logic after fees and exchange constraints.
+   Prefer fewer, better trades over noisy trade spam.
+   Make rejection reasons explicit and useful.
+
+6) Execution quality
+   Ensure:
+
+- true available balance is used
+- fee buffer is included
+- min notional and lot size are respected
+- symbol mapping is correct
+- dust positions are handled sanely
+- real mode never reports fake success
+- cooldown = 0 truly disables cooldown if intended by config
+- only meaningful guards remain
+
+7) Simplification mandate
+   If two or more systems overlap, merge or remove the weaker one.
+   If a system is mainly cosmetic, disable or remove it unless it clearly helps diagnosis.
+   If a system harms profitability or causes false blocking, replace or rewrite it safely.
+   If a system is dead code, remove it.
+
+8) Deliverables
+   Patch the project directly and create a full report.
+
+Create or update:
+PROFIT_REFACTOR_REPORT.md
+
+The report must include:
+
+- every component audited
+- keep / simplify / merge / remove decisions
+- exact reasons for each decision
+- files changed
+- blockers removed
+- systems merged or disabled
+- systems kept as critical
+- remaining risks
+- exact run/test steps
+
+Return exactly in this structure:
+
+AUDIT SUMMARY
+
+- <main finding>
+- <main finding>
+
+CRITICAL SYSTEMS KEPT
+
+- <system>: <reason>
+
+SYSTEMS SIMPLIFIED OR MERGED
+
+- <system>: <action>
+
+SYSTEMS REMOVED OR DISABLED
+
+- <system>: <reason>
+
+HARMFUL LOGIC FIXED
+
+- <file/module>: <problem fixed>
+
+FILES CHANGED
+
+- <file path>
+- <file path>
+
+EXPECTED IMPROVEMENTS
+
+- <improvement>
+- <improvement>
+
+REMAINING RISKS
+
+- <risk>
+- <risk>
+
+HOW TO VERIFY
+
+- <step>
+- <step>
+
+Important:
+Be honest.
+Do not claim guaranteed profit.
+Optimize for disciplined, coherent, high-quality real trading with the least unnecessary complexity.
+Begin the audit and refactor now.
