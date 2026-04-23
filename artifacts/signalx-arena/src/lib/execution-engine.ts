@@ -47,6 +47,14 @@ export interface Signal {
   /** Optional expected edge in bps; consumed by the trade-quality gate.
    *  When supplied and below the round-trip cost, the gate vetoes the trade. */
   expectedEdgeBps?: number;
+  /** When true on a SELL of an asset we own, the engine sells the FULL
+   *  owned base balance (rounded down to stepSize) instead of the
+   *  configured tradeAmountUSD-derived quantity. Bots set this so a bot
+   *  exit sells the entire position and never leaves a residual that
+   *  would later become un-sellable dust below the venue's minNotional.
+   *  Manual SELLs from the Exchange page leave this undefined so the
+   *  user keeps explicit control over partial exits. */
+  closeAll?: boolean;
 }
 
 export interface EngineResult {
@@ -467,6 +475,7 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     recentSignals,
     symbolRules,
     config,
+    closeAll:         signal.closeAll === true,
   });
 
   if (!risk.ok) {

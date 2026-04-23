@@ -183,6 +183,10 @@ export function bridgeBotTradeToExchange(trade: Trade): Promise<EngineResult> | 
     ts:     trade.timestamp,
     source: 'bot-engine',
     botId:  trade.botId,
+    // A bot SELL is always an exit decision — close the FULL owned
+    // position so we never leave a price-appreciation residual that
+    // would later sit below minNotional as un-sellable dust.
+    ...(trade.type === 'SELL' ? { closeAll: true } : {}),
   };
   return executeSignal(signal);
 }
@@ -308,6 +312,10 @@ export async function dispatchAutoPilotLiveSignal(args: {
     botId:      sig.botId,
     botName:    d.selectedBot.bot.name,
     confidence: d.selectedBot.confidence,
+    // AutoPilot SELLs are always position exits — close the full owned
+    // base balance so we never leave a residual fragment behind that
+    // would later become dust below the venue's minNotional.
+    ...(sig.action === 'SELL' ? { closeAll: true } : {}),
   };
   const result = await executeSignal(signal);
 

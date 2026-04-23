@@ -41,6 +41,12 @@ export interface RiskInput {
   recentSignals: string[];     // last N signal IDs to detect duplicates
   symbolRules:  SymbolRules;
   config:       TradeConfig;
+  /** When true and side==='sell' and availableBase>0, size the order to
+   *  the FULL owned base balance (rounded down to stepSize) instead of
+   *  the amountUSD-derived quantity. Bots set this on exits to guarantee
+   *  the entire position is closed and no residual fragment is left to
+   *  become dust below minNotional later. */
+  closeAll?:    boolean;
 }
 
 export interface RiskResult {
@@ -171,8 +177,15 @@ export function validateRisk(input: RiskInput): RiskResult {
   // (Bybit retCode 170131 / Binance -2010 "insufficient balance"), or it
   // fails risk with a confusing "need X have Y" message even though the
   // user's intent is "sell what I have".
+  //
+  // closeAll override: when a bot signals an exit it sets `closeAll=true`,
+  // and we size the order to the FULL owned base balance instead of the
+  // amountUSD-derived quantity. Otherwise, if price has risen since entry,
+  // amountUSD/price < ownedBase and we'd leave a residual fragment behind
+  // that quietly becomes dust below the venue's minNotional. Manual sells
+  // do NOT set closeAll, so user-driven partial exits keep working.
   const sellCap = side === 'sell' && availableBase > 0
-    ? Math.min(computedQty, availableBase)
+    ? (input.closeAll ? availableBase : Math.min(computedQty, availableBase))
     : computedQty;
 
   // Check step size — round DOWN to nearest valid step

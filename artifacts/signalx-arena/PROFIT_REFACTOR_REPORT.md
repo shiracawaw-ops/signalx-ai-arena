@@ -49,12 +49,33 @@
 
 ## HARMFUL LOGIC FIXED
 
-* `live-execution-bridge.ts` `dispatchAutoPilotLiveSignal` — the constructed `Signal` did not include `confidence`, so `execution-engine` had nothing to forward to `preflight()`, so `trade-quality.scoreTradeQuality` always used the neutral default `0.7` for the `confidence` component (10% weight). Effect on real trading: AutoPilot's per-bot scoring (which is the entire point of the AutoPilot system) was being **discarded at the quality gate**. High-confidence bots and low-confidence bots were graded identically. Fix: pass `d.selectedBot.confidence` through to the Signal. The composite-quality gate now actually rewards stronger bots and penalises weaker ones in the only place it matters — pre-flight veto.
+### Fix 1 — AutoPilot confidence wired to trade-quality gate (v1.5.5)
+
+`live-execution-bridge.ts` `dispatchAutoPilotLiveSignal` — the constructed `Signal` did not include `confidence`, so `execution-engine` had nothing to forward to `preflight()`, so `trade-quality.scoreTradeQuality` always used the neutral default `0.7` for the `confidence` component (10% weight). Effect on real trading: AutoPilot's per-bot scoring (which is the entire point of the AutoPilot system) was being **discarded at the quality gate**. High-confidence bots and low-confidence bots were graded identically. Fix: pass `d.selectedBot.confidence` through to the Signal. The composite-quality gate now actually rewards stronger bots and penalises weaker ones in the only place it matters — pre-flight veto.
+
+### Fix 2 — Bot-driven SELLs now close the FULL position (v1.5.6)
+
+`risk-manager.ts` was sizing every SELL from `tradeAmountUSD / price`, then capping at `availableBase`. This is correct for the entry-side amount but wrong for an *exit*: when price has risen since entry, `tradeAmountUSD / price < availableBase`, so the bot only sells the entry-equivalent quantity and **leaves the price-appreciation gain stranded as a residual fragment**. Over time those residuals fall below the venue's minNotional and become un-sellable dust — the exact behaviour the user reported.
+
+Fix:
+
+* Added `closeAll?: boolean` to the `Signal` interface (`execution-engine.ts`) and to `RiskInput` (`risk-manager.ts`).
+* In `validateRisk`, when `side === 'sell' && availableBase > 0 && closeAll === true`, the order is sized to the **full owned base balance** (rounded down to stepSize), not to `amountUSD / price`.
+* `dispatchAutoPilotLiveSignal` now sets `closeAll: true` on every AutoPilot SELL.
+* `bridgeBotTradeToExchange` now sets `closeAll: true` on every bot-engine SELL.
+* Manual SELLs from the Exchange page deliberately do **not** set `closeAll`, so user-driven partial exits still work as before.
+
+Net effect: when a bot decides "exit XRP", it sells **all** the XRP it has on that venue. The dust-creation loop is closed at its source. Dust that already exists from the legacy behaviour is still handled by the existing upfront SELL min-notional gate + Bot Doctor dust marks (no change there).
+
+New unit-test coverage: `risk-manager.closeAll.unit.test.ts` (4 cases) — proves manual sells preserve legacy sizing, bot/AutoPilot exits sell the full owned amount, stepSize rounding never overshoots free balance, and `closeAll` is correctly ignored on BUYs.
 
 ## FILES CHANGED
 
-* `artifacts/signalx-arena/src/lib/live-execution-bridge.ts` (one signal-construction site, lines ~297-314)
-* `artifacts/signalx-arena/PROFIT_REFACTOR_REPORT.md` (new)
+* `artifacts/signalx-arena/src/lib/live-execution-bridge.ts` — wire `confidence`, set `closeAll: true` on bot + AutoPilot SELLs.
+* `artifacts/signalx-arena/src/lib/execution-engine.ts` — added `closeAll` to `Signal`; passed through to risk.
+* `artifacts/signalx-arena/src/lib/risk-manager.ts` — added `closeAll` to `RiskInput`; sells full owned balance when set.
+* `artifacts/signalx-arena/src/lib/risk-manager.closeAll.unit.test.ts` — new (4 cases).
+* `artifacts/signalx-arena/PROFIT_REFACTOR_REPORT.md` — updated.
 
 ## EXPECTED IMPROVEMENTS
 
