@@ -193,8 +193,18 @@ export function computeAutoPilotDecision(
   const evaluations = activeBots.map(b => scoreBot(b, trades, getCurrentPrice));
   evaluations.sort((a, b) => b.score - a.score);
 
-  const topBots    = evaluations.slice(0, 3);
-  const selectedBot = topBots[0] ?? null;
+  // AutoPilot confidence floor — never let a low-confidence bot drive the
+  // master action. Bots warming up (no trade history) or with a poor track
+  // record (low pnl + low recent win rate) score < 50 in scoreBot. Picking
+  // them as the master action driver is what produces the "AutoPilot fired
+  // BUY but it lost immediately" experience. Below the floor we still
+  // expose `topBots` for the UI, but the SELECTED bot (and therefore the
+  // dispatch action) is gated. Floor of 50 chosen to match the "good"
+  // health threshold (pnlPct >= 0 → score weighting >= 50-ish).
+  const AUTOPILOT_CONFIDENCE_FLOOR = 50;
+  const topBots     = evaluations.slice(0, 3);
+  const qualifying  = evaluations.filter(e => e.confidence >= AUTOPILOT_CONFIDENCE_FLOOR);
+  const selectedBot = qualifying[0] ?? null;
 
   let masterAction: AutoPilotAction = selectedBot?.action ?? 'HOLD';
   if (risk.riskLevel === 'DANGER') masterAction = 'HOLD';

@@ -53,6 +53,25 @@
 
 `live-execution-bridge.ts` `dispatchAutoPilotLiveSignal` — the constructed `Signal` did not include `confidence`, so `execution-engine` had nothing to forward to `preflight()`, so `trade-quality.scoreTradeQuality` always used the neutral default `0.7` for the `confidence` component (10% weight). Effect on real trading: AutoPilot's per-bot scoring (which is the entire point of the AutoPilot system) was being **discarded at the quality gate**. High-confidence bots and low-confidence bots were graded identically. Fix: pass `d.selectedBot.confidence` through to the Signal. The composite-quality gate now actually rewards stronger bots and penalises weaker ones in the only place it matters — pre-flight veto.
 
+### Fix 3 — Bot quality: trend filter, demo fees, AutoPilot floor (v1.5.7)
+
+**Honest reality check first:** the user requested "100% results — like the demo, in real mode". This is impossible in real markets and the brief itself forbids that promise. The reason demo looked rosy is that the synthetic candles in `indicators.ts` generate a positive-drift price series (`(Math.random() - 0.35) * volatility` on every new candle = roughly +15% bullish bias) and the demo PnL was computed gross of fees. So a "95% win rate in demo" was never going to translate to live trading — the demo was lying.
+
+Three changes — make the demo honest, raise the bar on real-mode entries, and gate AutoPilot selection:
+
+* **Trend filter on bot entries** (`engine.ts`). Every BUY entry across every strategy (RSI / MACD / VWAP / Bollinger / SMA Cross / Breakout / Multi-Signal) now requires `sma20 > sma50`. RSI-oversold-in-a-downtrend usually means "going lower", not "bouncing" — that single failure mode causes most live losses. The SMA Cross strategy already encoded this; we extended the gate to every strategy. Closing logic in Phase A (TP/SL on already-open positions) is unchanged — open positions still exit normally.
+* **Realistic fees on demo PnL** (`engine.ts`). Every demo SELL now subtracts `0.10% × (entry notional + exit notional)` from both the wallet credit and the trade's `pnl` field. This matches the spot-taker fee tier on most majors. Effect: the win-rate and PnL numbers shown in the arena are now what a real exchange would actually pay out, not a fee-free fairy tale. Some demo trades that previously showed +0.05% PnL are now negative — that's the truth.
+* **AutoPilot confidence floor** (`autopilot.ts`). `selectedBot` is now picked from `evaluations.filter(e => e.confidence >= 50)`, not `evaluations[0]`. Bots warming up with no trade history (confidence ~0-12) and bots with poor recent track record can no longer drive the master action. `topBots` is still the top-3 by score for UI display, but the dispatch decision uses the qualifying set. Floor of 50 chosen to align with the "good" health threshold (`pnlPct >= 0`).
+
+What this **does NOT** do — explicit honest list:
+
+* Does **not** guarantee any profit percentage in real markets. Demo win rate is no longer a guaranteed promise either; both are estimates.
+* Does **not** make real fills as fast as demo fills. Real exchanges have network latency (50-300ms), order-book matching delays, and partial fills. No software fix bridges that physics gap — only co-locating with the exchange does, and that's outside this product's scope.
+* Does **not** change the synthetic price drift in the demo candle generator. That would be a much bigger UX shift (demo win rates would drop sharply); deferred for a deliberate user-facing decision.
+* Does **not** speed up the bot tick interval. Faster ticks = more orders per minute = more fees, which on real venues is **negative** EV unless the per-trade edge is unusually high. The current cadence (configurable via Trade Config) is already at a sensible baseline.
+
+New unit-test coverage: `engine.trend-and-fees.unit.test.ts` (3 cases) — proves trend filter blocks BUYs in a clear downtrend, allows them in a clear uptrend, and demo SELLs deduct round-trip fees from PnL and wallet correctly.
+
 ### Fix 2 — Bot-driven SELLs now close the FULL position (v1.5.6)
 
 `risk-manager.ts` was sizing every SELL from `tradeAmountUSD / price`, then capping at `availableBase`. This is correct for the entry-side amount but wrong for an *exit*: when price has risen since entry, `tradeAmountUSD / price < availableBase`, so the bot only sells the entry-equivalent quantity and **leaves the price-appreciation gain stranded as a residual fragment**. Over time those residuals fall below the venue's minNotional and become un-sellable dust — the exact behaviour the user reported.

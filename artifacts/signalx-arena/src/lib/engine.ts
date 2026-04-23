@@ -39,6 +39,14 @@ export const DEFAULT_STOP_LOSS_PCT   = -0.015; // -1.5% → small loss that rare
 // One position per bot — no DCA stacking
 const MAX_INVEST_RATIO =  0.38;  // max 38%: one 30% buy, blocks second
 
+// Realistic taker-fee schedule — applied to demo PnL so the win rate the
+// user sees in the arena reflects what real Binance/Bybit/etc. would
+// actually deliver after fees, not a fee-free fairy tale. Real exchange
+// fees on the live execution path are deducted by the exchange itself,
+// not by us, so this only affects DEMO/PAPER trades. 0.10% per side =
+// 0.20% per round trip — matches the spot taker tier on most majors.
+const DEMO_TAKER_FEE_RATE = 0.001;
+
 export interface BotTickOverrides {
   /** Take profit fraction, e.g. 0.04 for +4%. Must be > 0. */
   takeProfit?: number;
@@ -86,7 +94,19 @@ export function executeBotTick(
   }
 
   // ── Phase B: No open position — look for entry signals ────────────────────────
-  if (action === 'HOLD') {
+  // Trend filter — single highest-EV addition for real-mode profitability:
+  // ONLY consider BUY entries when the higher-timeframe trend is up
+  // (sma20 > sma50). Catching falling knives is the most common cause of
+  // losing trades in real markets — RSI oversold in a downtrend usually
+  // means "going lower", not "bouncing". The SMA Cross strategy already
+  // bakes this in; we extend the same gate to every strategy here, so a
+  // bot's BUY signal in a downtrend is suppressed regardless of which
+  // indicator fired it. Closing logic in Phase A is unaffected — open
+  // positions still exit normally on TP/SL.
+  const trendUp = isFinite(indicators.sma.sma20) && isFinite(indicators.sma.sma50)
+    && indicators.sma.sma20 > indicators.sma.sma50;
+
+  if (action === 'HOLD' && trendUp) {
     switch (bot.strategy) {
       case 'RSI':
         // Only BUY on RSI signal — never SELL on indicator (handled by TP/SL above)
@@ -154,9 +174,18 @@ export function executeBotTick(
     };
 
   } else if (action === 'SELL' && updatedBot.position > 0) {
-    const qty     = updatedBot.position;
-    const proceeds = qty * price;
-    const pnl     = (price - updatedBot.avgEntryPrice) * qty;
+    const qty       = updatedBot.position;
+    const grossProc = qty * price;
+    // Realistic round-trip fee: 0.1% on the entry notional + 0.1% on the
+    // exit notional. Subtracted from BOTH the wallet credit and the PnL
+    // so the displayed performance number is what a real exchange would
+    // pay out, not a fee-free fairy tale. This is what closes the
+    // demo↔real expectation gap at its source.
+    const entryNotional = updatedBot.avgEntryPrice * qty;
+    const exitNotional  = grossProc;
+    const fee           = (entryNotional + exitNotional) * DEMO_TAKER_FEE_RATE;
+    const proceeds      = grossProc - fee;
+    const pnl           = (price - updatedBot.avgEntryPrice) * qty - fee;
     updatedBot.balance += proceeds;
     updatedBot.position = 0;
     updatedBot.avgEntryPrice = 0;
@@ -170,6 +199,7 @@ export function executeBotTick(
       timestamp: Date.now(),
       pnl,
       indicators: indicatorUsed,
+      fee,
     };
   }
 
