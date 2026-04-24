@@ -4,6 +4,20 @@ import { getBotPnL, getBotTotalValue } from './engine';
 
 export type AutoPilotAction = 'BUY' | 'SELL' | 'HOLD';
 export type RiskLevel = 'SAFE' | 'MODERATE' | 'HIGH' | 'DANGER';
+export type AutoPilotHoldReasonCode =
+  | 'no_breakout'
+  | 'trend_filter_failed'
+  | 'momentum_filter_failed'
+  | 'risk_gate_prevented_entry'
+  | 'symbol_level_block'
+  | 'market_regime_says_hold'
+  | 'no_entry_signal'
+  | 'confidence_below_threshold';
+
+export interface AutoPilotHoldReason {
+  code: AutoPilotHoldReasonCode;
+  message: string;
+}
 
 export interface BotEvaluation {
   bot:          Bot;
@@ -27,6 +41,7 @@ export interface AutoPilotDecision {
   riskLevel:      RiskLevel;
   riskReason:     string;
   masterAction:   AutoPilotAction;
+  holdReasons:    AutoPilotHoldReason[];
   portfolioPnL:   number;
   portfolioPnLPct:number;
   activeBotCount: number;
@@ -40,6 +55,8 @@ export interface DecisionLogEntry {
   message:   string;
   level:     'info' | 'warn' | 'danger' | 'success';
 }
+
+export const AUTOPILOT_CONFIDENCE_FLOOR = 50;
 
 // ── Score a single bot ─────────────────────────────────────────────────────
 function scoreBot(
@@ -64,7 +81,9 @@ function scoreBot(
   const recentLosses = recent.filter(t => t.pnl <= 0).length;
   const recentWinRate = recent.length > 0 ? (recentWins / recent.length) * 100 : 50;
 
-  const drawdown = Math.max(0, ((bot.startingBalance - bot.balance) / bot.startingBalance) * 100);
+  const drawdown = bot.startingBalance > 0
+    ? Math.max(0, ((bot.startingBalance - totalValue) / bot.startingBalance) * 100)
+    : 0;
   const tradeCount = botTrades.length;
 
   let health: BotEvaluation['health'];
@@ -129,6 +148,19 @@ function scoreBot(
   };
 }
 
+export function evaluateBots(
+  bots: Bot[],
+  trades: Trade[],
+  getCurrentPrice: (s: string) => number,
+  opts: { eligibleBotIds?: Iterable<string> } = {},
+): BotEvaluation[] {
+  const eligible = opts.eligibleBotIds ? new Set(opts.eligibleBotIds) : null;
+  const activeBots = bots.filter(b => b.isRunning && (!eligible || eligible.has(b.id)));
+  const evaluations = activeBots.map(b => scoreBot(b, trades, getCurrentPrice));
+  evaluations.sort((a, b) => b.score - a.score);
+  return evaluations;
+}
+
 // ── Portfolio risk ────────────────────────────────────────────────────────
 function assessRisk(
   bots: Bot[],
@@ -142,7 +174,10 @@ function assessRisk(
   const portfolioPnLPct = totalStarting > 0 ? (portfolioPnL / totalStarting) * 100 : 0;
 
   const maxDrawdown = activeBots.reduce((max, b) => {
-    const dd = Math.max(0, ((b.startingBalance - b.balance) / b.startingBalance) * 100);
+    const botValue = getBotTotalValue(b, getCurrentPrice(b.symbol));
+    const dd = b.startingBalance > 0
+      ? Math.max(0, ((b.startingBalance - botValue) / b.startingBalance) * 100)
+      : 0;
     return Math.max(max, dd);
   }, 0);
 
@@ -186,12 +221,15 @@ export function computeAutoPilotDecision(
   bots: Bot[],
   trades: Trade[],
   getCurrentPrice: (s: string) => number,
+  opts: { eligibleBotIds?: Iterable<string> } = {},
 ): AutoPilotDecision {
   const risk       = assessRisk(bots, trades, getCurrentPrice);
+  const eligible   = opts.eligibleBotIds ? new Set(opts.eligibleBotIds) : null;
   const activeBots = bots.filter(b => b.isRunning);
-
-  const evaluations = activeBots.map(b => scoreBot(b, trades, getCurrentPrice));
-  evaluations.sort((a, b) => b.score - a.score);
+  const eligibleActiveCount = eligible
+    ? activeBots.filter(b => eligible.has(b.id)).length
+    : activeBots.length;
+  const evaluations = evaluateBots(bots, trades, getCurrentPrice, opts);
 
   // AutoPilot confidence floor — never let a low-confidence bot drive the
   // master action. Bots warming up (no trade history) or with a poor track
@@ -201,14 +239,45 @@ export function computeAutoPilotDecision(
   // expose `topBots` for the UI, but the SELECTED bot (and therefore the
   // dispatch action) is gated. Floor of 50 chosen to match the "good"
   // health threshold (pnlPct >= 0 → score weighting >= 50-ish).
-  const AUTOPILOT_CONFIDENCE_FLOOR = 50;
   const topBots     = evaluations.slice(0, 3);
   const qualifying  = evaluations.filter(e => e.confidence >= AUTOPILOT_CONFIDENCE_FLOOR);
   const selectedBot = qualifying[0] ?? null;
 
   let masterAction: AutoPilotAction = selectedBot?.action ?? 'HOLD';
+  const holdReasons: AutoPilotHoldReason[] = [];
+  if (!selectedBot) {
+    holdReasons.push({
+      code: 'confidence_below_threshold',
+      message: `No bot passed confidence floor (${AUTOPILOT_CONFIDENCE_FLOOR}%).`,
+    });
+    if (eligible && activeBots.length > 0 && eligibleActiveCount === 0) {
+      holdReasons.push({
+        code: 'symbol_level_block',
+        message: 'No running bot currently sits in the real-eligible fleet set. Move bots out of standby/paper or lower active real bot count.',
+      });
+    }
+  }
   if (risk.riskLevel === 'DANGER') masterAction = 'HOLD';
   else if (risk.riskLevel === 'HIGH' && masterAction === 'BUY') masterAction = 'HOLD';
+
+  if (risk.riskLevel === 'DANGER') {
+    holdReasons.push({
+      code: 'market_regime_says_hold',
+      message: `Risk level ${risk.riskLevel}: ${risk.riskReason}`,
+    });
+  } else if (risk.riskLevel === 'HIGH' && selectedBot?.action === 'BUY' && masterAction === 'HOLD') {
+    holdReasons.push({
+      code: 'risk_gate_prevented_entry',
+      message: `Risk level ${risk.riskLevel} blocked BUY: ${risk.riskReason}`,
+    });
+  }
+
+  if (masterAction === 'HOLD' && selectedBot?.action === 'HOLD') {
+    holdReasons.push({
+      code: 'no_entry_signal',
+      message: selectedBot.reasons[0] ?? 'Selected bot has no actionable entry signal.',
+    });
+  }
 
   return {
     selectedBot,
@@ -216,6 +285,7 @@ export function computeAutoPilotDecision(
     riskLevel:       risk.riskLevel,
     riskReason:      risk.riskReason,
     masterAction,
+    holdReasons,
     portfolioPnL:    risk.portfolioPnL,
     portfolioPnLPct: risk.portfolioPnLPct,
     activeBotCount:  activeBots.length,

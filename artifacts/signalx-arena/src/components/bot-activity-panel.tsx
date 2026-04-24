@@ -6,12 +6,19 @@
 import { useMemo } from 'react';
 import { useBotActivity, botActivityStore } from '@/lib/bot-activity-store';
 import { useRealProfit } from '@/lib/real-profit-store';
+import { useArena } from '@/hooks/use-arena';
+import { diagnoseBotActivations } from '@/lib/bot-activation-diagnostics';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 
 export function BotActivityPanel() {
   const a = useBotActivity();
   const p = useRealProfit();
+  const { bots, trades, market } = useArena();
+  const diagByBotId = useMemo(() => {
+    const list = diagnoseBotActivations({ bots, trades, market });
+    return new Map(list.map(d => [d.botId, d]));
+  }, [bots, trades, market]);
 
   // Sort: blocked first (need attention), then standby, then active.
   const rows = useMemo(() => {
@@ -77,13 +84,15 @@ export function BotActivityPanel() {
                   const fees     = stat?.feesPaidUSD    ?? 0;
                   const net      = realized - fees;
                   const rate     = botActivityStore.rejectionRate(b.botId) * 100;
+                  const diag = diagByBotId.get(b.botId);
                   const state =
                     b.lastRejectTs > b.lastSuccessTs ? { label: 'Blocked', tone: 'text-red-400 bg-red-900/20'   } :
                     b.eligibleNow && b.lastAttemptTs === 0
                                                     ? { label: 'Standby', tone: 'text-amber-300 bg-amber-900/20' } :
                     !b.eligibleNow                  ? { label: 'Benched', tone: 'text-zinc-400 bg-zinc-800/40' } :
                                                       { label: 'Active',  tone: 'text-emerald-400 bg-emerald-900/20' };
-                  const lastReason = b.lastRejectCode ?? '—';
+                  const lastReason = b.lastRejectCode ?? diag?.standbyReason ?? '—';
+                  const standbyHint = !b.lastRejectCode ? diag?.detail : b.lastRejectDetail;
                   return (
                     <tr key={b.botId} className="border-t border-zinc-800/40">
                       <td className="px-3 py-1.5 font-medium truncate max-w-[140px]">
@@ -100,7 +109,7 @@ export function BotActivityPanel() {
                       <td className={`px-3 py-1.5 text-right tabular-nums ${rate >= 30 ? 'text-red-400' : rate >= 10 ? 'text-amber-400' : 'text-zinc-300'}`}>
                         {rate.toFixed(0)}%
                       </td>
-                      <td className="px-3 py-1.5 text-zinc-400 truncate max-w-[180px]" title={b.lastRejectDetail ?? ''}>
+                      <td className="px-3 py-1.5 text-zinc-400 truncate max-w-[180px]" title={standbyHint ?? ''}>
                         {lastReason}
                       </td>
                     </tr>
