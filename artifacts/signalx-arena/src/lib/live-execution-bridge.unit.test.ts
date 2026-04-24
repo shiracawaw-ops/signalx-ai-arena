@@ -89,6 +89,7 @@ function makeDecision(
     riskLevel:      'SAFE',
     riskReason:     '',
     masterAction:   action,
+    holdReasons:    [],
     portfolioPnL:   0,
     portfolioPnLPct: 0,
     activeBotCount: 1,

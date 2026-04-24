@@ -18,6 +18,11 @@ import { BotActivityPanel } from '@/components/bot-activity-panel';
 import { loadWallet } from '@/lib/wallet';
 import { botFleet } from '@/lib/bot-fleet';
 import { scoreAllBots } from '@/lib/bot-scoring';
+import {
+  summarizePortfolioSnapshot,
+  diagnoseBotActivations,
+  summarizeHoldReasons,
+} from '@/lib/bot-activation-diagnostics';
 
 // ── Sim-only detection ─────────────────────────────────────────────────────
 // A bot is "simulator-only" when the user is in a live/testnet mode but the
@@ -232,7 +237,7 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 
 // ── AutoPilot Page ─────────────────────────────────────────────────────────
 export default function AutoPilotPage() {
-  const { bots, trades, getCurrentPrice, isGlobalRunning, stop, start } = useArena();
+  const { bots, trades, market, getCurrentPrice, isGlobalRunning, stop, start } = useArena();
   const { user } = useUser();
 
   const [decision, setDecision]   = useState<AutoPilotDecision | null>(null);
@@ -280,14 +285,20 @@ export default function AutoPilotPage() {
     // Re-rank the fleet's "real bots" every cycle using fresh scoring data so
     // the smart-assignment modes ('auto_best', 'auto_recent', etc.) actually
     // promote the best candidates instead of holding the first N inserted.
+    let eligibleIds: string[] = [];
     try {
       const scores = scoreAllBots(botsRef.current, tradesRef.current);
-      botFleet.syncRealBotIds(scores);
+      eligibleIds = botFleet.syncRealBotIds(scores);
     } catch (err) {
       console.warn('[autopilot] fleet score sync failed:', err);
     }
 
-    const d = computeAutoPilotDecision(botsRef.current, tradesRef.current, gcRef.current);
+    const d = computeAutoPilotDecision(
+      botsRef.current,
+      tradesRef.current,
+      gcRef.current,
+      { eligibleBotIds: eligibleIds },
+    );
     setDecision(d);
 
     // Log new bot selection — ref-based, no stale closure
@@ -367,17 +378,31 @@ export default function AutoPilotPage() {
 
   // Fee-adjusted portfolio net P&L
   const netFeeMetrics = useMemo(() => {
-    const grossPnl = bots.reduce((s, b) => s + b.balance - b.startingBalance, 0);
+    const grossPnl = bots.reduce((s, b) => s + getBotTotalValue(b, getCurrentPrice(b.symbol)) - b.startingBalance, 0);
     const totalTrades = trades.length;
     const avgTradeVal = totalTrades > 0
       ? trades.reduce((s, t) => s + t.quantity * t.price, 0) / totalTrades
       : 50;
-    const startBal = bots.reduce((s, b) => s + b.startingBalance, 0);
+    const startBal = summarizePortfolioSnapshot(bots, getCurrentPrice).totalStarting;
     return calcFeeAdjusted(grossPnl, totalTrades, avgTradeVal, startBal);
-  }, [bots, trades]);
+  }, [bots, trades, getCurrentPrice]);
 
   const selected = decision?.selectedBot;
   const topBots  = decision?.topBots ?? [];
+  const botDiagnostics = useMemo(
+    () => diagnoseBotActivations({
+      bots,
+      trades,
+      market,
+      selectedBotId: selected?.bot.id ?? null,
+      holdReasons: decision?.holdReasons ?? [],
+    }),
+    [bots, trades, market, selected?.bot.id, decision?.holdReasons],
+  );
+  const holdDiagnosis = useMemo(
+    () => summarizeHoldReasons(decision?.holdReasons ?? []),
+    [decision?.holdReasons],
+  );
 
   return (
     <div className="min-h-full bg-background text-foreground">
@@ -429,12 +454,19 @@ export default function AutoPilotPage() {
         {/* ── Bot Activity Transparency (who's eligible / standby / blocked) ── */}
         <BotActivityPanel />
 
-        {/* ── No data state ── */}
+        {/* ── No selected bot state ── */}
         {!selected && (
           <div className="text-center py-20 text-zinc-500">
             <div className="text-4xl mb-3">🤖</div>
-            <div className="font-semibold text-zinc-300 mb-1">AutoPilot warming up…</div>
-            <div className="text-sm">Waiting for bots to generate trading data</div>
+            <div className="font-semibold text-zinc-300 mb-1">AutoPilot is in HOLD</div>
+            <div className="text-sm">{holdDiagnosis.summary}</div>
+            {holdDiagnosis.reasons.length > 0 && (
+              <div className="mt-4 inline-flex flex-col items-start gap-1 text-left text-[11px] text-amber-300">
+                {holdDiagnosis.reasons.map((r, i) => (
+                  <span key={`${r.code}_${i}`}>• {r.code}: {r.message}</span>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -528,7 +560,7 @@ export default function AutoPilotPage() {
                 </div>
               </div>
 
-              {/* Signal */}
+                {/* Signal */}
               <div className="flex flex-col gap-4">
                 <ActionSignal
                   action={decision.masterAction}
@@ -545,6 +577,20 @@ export default function AutoPilotPage() {
                   <div className="text-[9px] uppercase tracking-widest opacity-60 mb-1 font-bold">Risk Engine</div>
                   {decision.riskReason}
                 </div>
+
+                {holdDiagnosis.reasons.length > 0 && (
+                  <div className="rounded-xl border border-amber-800/40 bg-amber-900/10 px-4 py-3 text-xs text-amber-300">
+                    <div className="text-[9px] uppercase tracking-widest opacity-70 mb-1 font-bold">AutoPilot HOLD Reasons</div>
+                    <div className="mb-1.5 text-amber-200">{holdDiagnosis.summary}</div>
+                    <ul className="space-y-1 list-disc pl-4">
+                      {holdDiagnosis.reasons.map((r, i) => (
+                        <li key={`${r.code}_${i}`}>
+                          <span className="font-semibold">{r.code}</span>: {r.message}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -561,7 +607,7 @@ export default function AutoPilotPage() {
                 <div className={`font-mono font-bold text-xl ${netFeeMetrics.netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                   {fmtPnL(netFeeMetrics.netPnl)}
                 </div>
-                <div className="text-[10px] text-zinc-500">fees: ${fmt(netFeeMetrics.totalFees, 2)} · {PLATFORM_FEE_RATE * 100}% rate</div>
+                <div className="text-[10px] text-zinc-500">fees: ${fmt(netFeeMetrics.totalFees, 2)} · {PLATFORM_FEE_RATE * 100}% rate · net {fmtPct(netFeeMetrics.netReturn)}</div>
               </div>
               <StatCard
                 label="Total Portfolio"
@@ -621,6 +667,48 @@ export default function AutoPilotPage() {
                 <SectionTitle>Decision Log</SectionTitle>
                 <div className="bg-zinc-900/40 border border-zinc-800/50 rounded-2xl px-4 py-2 max-h-56 overflow-y-auto">
                   {log.map(e => <LogRow key={e.id} entry={e} />)}
+                </div>
+              </div>
+            )}
+
+            {botDiagnostics.length > 0 && (
+              <div>
+                <SectionTitle>Eligible Bot Entry Diagnostics</SectionTitle>
+                <div className="bg-zinc-900/40 border border-zinc-800/50 rounded-2xl overflow-x-auto">
+                  <table className="w-full text-[11px]">
+                    <thead className="bg-zinc-900/70 text-zinc-500 uppercase tracking-wider">
+                      <tr>
+                        <th className="text-left px-3 py-2">Bot</th>
+                        <th className="text-left px-3 py-2">Signal</th>
+                        <th className="text-right px-3 py-2">Confidence</th>
+                        <th className="text-right px-3 py-2">Entry Score</th>
+                        <th className="text-left px-3 py-2">Standby reason</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {botDiagnostics.slice(0, 12).map(dg => (
+                        <tr key={dg.botId} className="border-t border-zinc-800/40 align-top">
+                          <td className="px-3 py-2">
+                            <div className="font-semibold text-zinc-200">{dg.botName}</div>
+                            <div className="text-zinc-500 text-[10px]">{dg.symbol} · {dg.strategy}</div>
+                          </td>
+                          <td className={`px-3 py-2 font-semibold ${
+                            dg.signalDirection === 'BUY' ? 'text-emerald-400'
+                            : dg.signalDirection === 'SELL' ? 'text-red-400'
+                            : 'text-zinc-400'
+                          }`}>
+                            {dg.signalDirection}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono text-zinc-200">{dg.confidence.toFixed(0)}%</td>
+                          <td className="px-3 py-2 text-right font-mono text-zinc-200">{dg.entryScore.toFixed(1)}</td>
+                          <td className="px-3 py-2">
+                            <div className="text-amber-300">{dg.standbyReason}</div>
+                            <div className="text-zinc-500 text-[10px]">{dg.detail}</div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             )}

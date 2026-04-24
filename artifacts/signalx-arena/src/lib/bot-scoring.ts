@@ -11,7 +11,11 @@ import type { BotScore } from './bot-fleet';
 const RECENT_TRADE_WINDOW = 25;
 
 /** Build a single BotScore for one bot using its trade history slice. */
-export function scoreOneBot(bot: Bot, trades: Trade[]): BotScore {
+export function scoreOneBot(
+  bot: Bot,
+  trades: Trade[],
+  getCurrentPrice?: (symbol: string) => number,
+): BotScore {
   const own = trades.filter(t => t.botId === bot.id);
   const recent = own.slice(-RECENT_TRADE_WINDOW);
 
@@ -19,7 +23,14 @@ export function scoreOneBot(bot: Bot, trades: Trade[]): BotScore {
   const recentWinRate = recent.length > 0 ? recentWins / recent.length : 0;
 
   // ROI relative to starting balance, clamped to [-100, +100].
-  const pnl = bot.balance - bot.startingBalance;
+  // Use total value (cash + marked position) so open positions are scored
+  // truthfully instead of appearing as losses while capital is deployed.
+  const markPrice = getCurrentPrice?.(bot.symbol);
+  const positionMark = Number.isFinite(markPrice) && (markPrice ?? 0) > 0
+    ? (markPrice as number)
+    : bot.avgEntryPrice;
+  const totalValue = bot.balance + bot.position * positionMark;
+  const pnl = totalValue - bot.startingBalance;
   const roi = bot.startingBalance > 0 ? (pnl / bot.startingBalance) * 100 : 0;
   const roiNorm = Math.max(0, Math.min(100, 50 + roi)); // 50 = break-even
 
@@ -59,8 +70,12 @@ export function scoreOneBot(bot: Bot, trades: Trade[]): BotScore {
 }
 
 /** Build BotScore[] for all bots in one pass. */
-export function scoreAllBots(bots: Bot[], trades: Trade[]): BotScore[] {
-  return bots.map(b => scoreOneBot(b, trades));
+export function scoreAllBots(
+  bots: Bot[],
+  trades: Trade[],
+  getCurrentPrice?: (symbol: string) => number,
+): BotScore[] {
+  return bots.map(b => scoreOneBot(b, trades, getCurrentPrice));
 }
 
 function round1(n: number): number {

@@ -13,7 +13,27 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // Mock the api-client BEFORE importing the engine so isBackendReachable
 // always resolves true and no real network call is attempted.
 vi.mock('./api-client.js', () => ({
-  apiClient:           { getPrice: vi.fn(async () => ({ ok: false, error: 'mocked' })) },
+  apiClient: {
+    getPrice: vi.fn(async () => ({ ok: true, data: { price: 0.5 } })),
+    getSymbolRules: vi.fn(async () => ({
+      ok: true,
+      data: {
+        rules: {
+          symbol: 'XRPUSDT',
+          minQty: 0.0001,
+          maxQty: 1e9,
+          stepSize: 0.0001,
+          minNotional: 10,
+          tickSize: 0.0001,
+          quoteCurrency: 'USDT',
+          baseCurrency: 'XRP',
+          filterSource: 'live',
+        },
+      },
+    })),
+    getBalances: vi.fn(async () => ({ ok: true, data: { balances: [] } })),
+    placeOrder: vi.fn(async () => ({ ok: false, error: 'not expected in upfront-sell test' })),
+  },
   isBackendReachable:  vi.fn(async () => true),
 }));
 
@@ -83,10 +103,11 @@ describe('execution-engine — upfront SELL min-notional gate', () => {
     expect(dust?.reason).toContain(REJECT.OWNED_QTY_BELOW_MIN_NOTIONAL);
     expect(dust?.reason).toMatch(/minNotional/i);
 
-    // The actual order-placement network call (apiClient.getPrice et al.) must
-    // never be invoked — the upfront gate short-circuits before any market call.
+    // Fresh market quote is fetched before sizing/validation, but order
+    // submission must still be short-circuited by the upfront dust gate.
     const { apiClient } = await import('./api-client.js');
-    expect((apiClient.getPrice as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(0);
+    expect((apiClient.getPrice as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(1);
+    expect((apiClient.placeOrder as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(0);
   });
 
   it('does NOT bump the per-symbol cooldown counter when blocked by the upfront gate (cooldown_active spam fix)', async () => {
