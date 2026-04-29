@@ -107,6 +107,30 @@ export interface OrderTestResult {
   raw?:          unknown;
 }
 
+export interface CandleBar {
+  ts:       number;
+  open:     number;
+  high:     number;
+  low:      number;
+  close:    number;
+  volume:   number;
+}
+
+export interface MarketSnapshot {
+  symbol:          string;
+  price:           number;
+  bestBid:         number;
+  bestAsk:         number;
+  spreadPct:       number;
+  volatilityPct:   number;
+  volumeNow:       number;
+  volumeAvg:       number;
+  candles1m:       CandleBar[];
+  candles3m:       CandleBar[];
+  candles5m:       CandleBar[];
+  fetchedAt:       number;
+}
+
 export interface OrderRequest {
   symbol:   string;
   side:     OrderSide;
@@ -229,6 +253,11 @@ export interface ExchangeAdapter {
   getOrderHistory(creds: ExchangeCredentials, symbol?: string, limit?: number): Promise<OrderResult[]>;
   getOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<OrderResult | null>;
   getPrice(symbol: string): Promise<number>;  // public ticker price (no auth required)
+  /**
+   * Optional public market snapshot used by the Smart Scalper gate.
+   * Adapters that do not implement this return unsupported from the route.
+   */
+  getMarketSnapshot?(symbol: string): Promise<MarketSnapshot>;
   normalizeSymbol(symbol: string): string;  // e.g. "BTC" → "BTCUSDT" for Binance
   ping(): Promise<number>;  // latency ms
   /**

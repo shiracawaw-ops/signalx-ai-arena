@@ -399,6 +399,25 @@ export const apiClient = {
     return request(`${BACKEND}/exchange/${exchange}/price/${encodeURIComponent(symbol)}`);
   },
 
+  async getMarketSnapshot(
+    exchange: string,
+    symbol: string,
+  ): Promise<ApiResult<{
+    snapshot: {
+      symbol: string;
+      price: number;
+      timestamp: number;
+      spreadPct: number;
+      candles: {
+        '1m': Array<{ open: number; high: number; low: number; close: number; volume: number; ts: number }>;
+        '3m': Array<{ open: number; high: number; low: number; close: number; volume: number; ts: number }>;
+        '5m': Array<{ open: number; high: number; low: number; close: number; volume: number; ts: number }>;
+      };
+    };
+  }>> {
+    return request(`${BACKEND}/exchange/${exchange}/market/snapshot/${encodeURIComponent(symbol)}`);
+  },
+
   async listExchanges(): Promise<string[]> {
     const r = await request<{ exchanges: string[] }>(`${BACKEND}/exchange`);
     return r.ok ? (r.data.exchanges ?? []) : [];
@@ -532,4 +551,25 @@ export interface SelfTestResult {
   steps:        DiagnosticStep[];
   summary:      string;
   timestamp:    number;
+}
+
+export interface MarketSnapshotCandle {
+  ts:     number;
+  open:   number;
+  high:   number;
+  low:    number;
+  close:  number;
+  volume: number;
+}
+
+export interface MarketSnapshot {
+  symbol: string;
+  price: number;
+  spreadPct: number;
+  timestamp: number;
+  candles: {
+    '1m': MarketSnapshotCandle[];
+    '3m': MarketSnapshotCandle[];
+    '5m': MarketSnapshotCandle[];
+  };
 }

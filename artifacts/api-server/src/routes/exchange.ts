@@ -266,6 +266,38 @@ router.get('/exchange/:exchange/price/:symbol', async (req, res) => {
   } catch (e) { serverError(res, ex, e); }
 });
 
+// GET /api/exchange/:exchange/market/snapshot/:symbol — lightweight scalper context
+// used by the frontend smart-entry gate (price + 1m/3m/5m candles + spread hint).
+router.get('/exchange/:exchange/market/snapshot/:symbol', async (req, res) => {
+  const ex      = requireExchange(req, res); if (!ex) return;
+  const symbol  = String(req.params['symbol'] ?? '');
+  if (!symbol) return badRequest(res, 'Missing symbol');
+  const adapter = getAdapter(ex)!;
+  try {
+    const ext = adapter as unknown as {
+      getMarketSnapshot?: (symbol: string) => Promise<unknown>;
+      getPrice: (symbol: string) => Promise<number>;
+    };
+    if (typeof ext.getMarketSnapshot === 'function') {
+      const snapshot = await ext.getMarketSnapshot(symbol);
+      return res.json({ ok: true, exchange: ex, symbol, snapshot });
+    }
+    const price = await ext.getPrice(symbol);
+    return res.json({
+      ok: true,
+      exchange: ex,
+      symbol,
+      snapshot: {
+        symbol,
+        price,
+        timestamp: Date.now(),
+        spreadPct: 0,
+        candles: { '1m': [], '3m': [], '5m': [] },
+      },
+    });
+  } catch (e) { serverError(res, ex, e); }
+});
+
 // POST /api/exchange/:exchange/diagnostic — run a full transparent permission/IP check
 // Currently only the Binance adapter implements this richly; for other adapters
 // we synthesize a best-effort report from validateCredentials so the UI panel

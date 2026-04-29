@@ -53,6 +53,16 @@ export function getOwned(exchange: string, baseAsset: string): number {
   return LEDGER.get(key(exchange, baseAsset))?.qty ?? 0;
 }
 
+/** Entry VWAP from the local ledger (0 if unknown). */
+export function getEntryPrice(exchange: string, baseAsset: string): number {
+  return LEDGER.get(key(exchange, baseAsset))?.avgEntry ?? 0;
+}
+
+/** Last fill timestamp from the local ledger (0 if unknown). */
+export function getLastFilledAt(exchange: string, baseAsset: string): number {
+  return LEDGER.get(key(exchange, baseAsset))?.lastFilledAt ?? 0;
+}
+
 /** Has this position been opened in-session within the freshness window? */
 export function isFreshlyOpened(exchange: string, baseAsset: string, withinMs = 30_000): boolean {
   const e = LEDGER.get(key(exchange, baseAsset));

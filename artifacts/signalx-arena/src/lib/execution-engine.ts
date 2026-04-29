@@ -9,13 +9,13 @@
 import { exchangeMode }    from './exchange-mode.js';
 import type { ExchangeCredentials } from './exchange-mode.js';
 import { tradeConfig }     from './trade-config.js';
-import { executionLog, REJECT } from './execution-log.js';
+import { executionLog, REJECT, type ExecutionEntry } from './execution-log.js';
 import { apiClient, isBackendReachable } from './api-client.js';
 import { validateRisk }    from './risk-manager.js';
 import type { SymbolRules as RiskSymbolRules } from './risk-manager.js';
 import { preflight, noteRejection, noteSuccess, clearShieldCooldownFor } from './rejection-shield.js';
 import type { ExchangeId } from './asset-compliance.js';
-import { recordBuy, recordSell, getOwned } from './internal-positions.js';
+import { recordBuy, recordSell, getOwned, getEntryPrice, getLastFilledAt } from './internal-positions';
 import { credentialStore } from './credential-store.js';
 import {
   checkBotAllocation,
@@ -30,9 +30,20 @@ import { botDoctorStore }   from './bot-doctor-store.js';
 import { pipelineCache }    from './pipeline-cache.js';
 import { resolveCompliance } from './asset-compliance.js';
 import { STABLE_ASSETS, stripStableSuffix } from './stable-assets.js';
+import { botFleet } from './bot-fleet.js';
+import { AUTOPILOT_CONFIDENCE_FLOOR } from './autopilot.js';
+import {
+  MIN_CASH_RESERVE_PCT,
+  SCALPER_ALLOWED_SYMBOLS,
+  evaluateScalperOpportunity,
+  type SmartScalperSnapshot,
+} from './smart-scalper.js';
+import {
+  evaluateBotStop,
+  selectReplacementBot,
+} from './smart-bot-replacement.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
-
 export interface Signal {
   id:       string;
   symbol:   string;
@@ -119,6 +130,190 @@ function resetDailyCounterIfNeeded() {
 // ── Pre-order safety guards ────────────────────────────────────────────────────
 
 const STALE_PRICE_MS = 30_000; // 30 seconds
+const MAX_PRICE_DRIFT_RATIO = 0.05;
+const MAX_TRADES_PER_SYMBOL_HOUR = 12;
+const MAX_CAPITAL_USAGE_PCT = 25;
+const MAX_ACTIVE_REAL_BOTS = 1;
+
+interface SymbolTradeStat {
+  ts: number;
+  side: 'buy' | 'sell';
+  qualityWeak?: boolean;
+}
+const symbolTradeMemory = new Map<string, SymbolTradeStat[]>();
+const symbolLastWeakReject = new Map<string, number>();
+
+function symbolMemKey(exchange: string, symbol: string): string {
+  return `${exchange}:${symbol.toUpperCase()}`;
+}
+
+function trimSymbolStats(list: SymbolTradeStat[], now = Date.now()): SymbolTradeStat[] {
+  return list.filter(e => now - e.ts <= 60 * 60 * 1000);
+}
+
+function noteSymbolAttempt(exchange: string, symbol: string, side: 'buy' | 'sell', qualityWeak = false): void {
+  const key = symbolMemKey(exchange, symbol);
+  const now = Date.now();
+  const next = trimSymbolStats([...(symbolTradeMemory.get(key) ?? []), { ts: now, side, qualityWeak }], now);
+  symbolTradeMemory.set(key, next);
+  if (qualityWeak) symbolLastWeakReject.set(key, now);
+}
+
+function symbolTradesLastHour(exchange: string, symbol: string): number {
+  const key = symbolMemKey(exchange, symbol);
+  const list = trimSymbolStats(symbolTradeMemory.get(key) ?? []);
+  symbolTradeMemory.set(key, list);
+  return list.length;
+}
+
+function weakSignalLoop(exchange: string, symbol: string): boolean {
+  const key = symbolMemKey(exchange, symbol);
+  const ts = symbolLastWeakReject.get(key) ?? 0;
+  return ts > 0 && Date.now() - ts < 60_000;
+}
+
+function hasBuySellLoop(exchange: string, symbol: string, side: 'buy' | 'sell'): boolean {
+  const key = symbolMemKey(exchange, symbol);
+  const list = trimSymbolStats(symbolTradeMemory.get(key) ?? []);
+  symbolTradeMemory.set(key, list);
+  if (list.length < 2) return false;
+  const a = list[list.length - 1];
+  const b = list[list.length - 2];
+  return !!a && !!b && a.side !== b.side && a.side !== side;
+}
+
+function recentRejectBreakdown(botId: string): {
+  spamRejectsRecent: number;
+  riskBreakRejectsRecent: number;
+  badEntryRejectsRecent: number;
+} {
+  const recent = botActivityStore.snapshot().bots[botId]?.recent ?? [];
+  const rejects = recent.filter(r => r.kind === 'reject');
+  const byReason = (re: RegExp) => rejects.filter(r => re.test(r.reason ?? '')).length;
+  return {
+    spamRejectsRecent: byReason(/cooldown|duplicate|stale|max_symbol_trades|repeated_weak_signal/i),
+    riskBreakRejectsRecent: byReason(/cash_reserve|capital_usage|max_active_real_bots|emergency_stop|price_drift|min_notional|invalid_order_size|insufficient_balance/i),
+    badEntryRejectsRecent: byReason(/confidence_weak|no_breakout|momentum_not_confirmed|rsi|low_trade_quality|spread_too_high|market_noisy_or_spike|position_already_open/i),
+  };
+}
+
+function maybeReplaceStoppedBot(stoppedBotId: string | undefined, stopReason: string): void {
+  if (!stoppedBotId) return;
+  const rp = realProfitStore.snapshot();
+  const candidates = Object.entries(rp.perBot).map(([botId, s]) => {
+    const settledTrades = s.wins + s.losses;
+    const net = s.realizedPnlUSD - s.feesPaidUSD;
+    const winRate = settledTrades > 0 ? s.wins / settledTrades : 0;
+    const recent = botActivityStore.snapshot().bots[botId]?.recent ?? [];
+    const rejects = recent.filter(r => r.kind === 'reject').length;
+    const submitted = recent.filter(r => r.kind === 'attempt' || r.kind === 'success' || r.kind === 'reject').length;
+    const rejectionRate = submitted > 0 ? rejects / submitted : 0;
+    const breakdown = recentRejectBreakdown(botId);
+    return {
+      botId,
+      trades: settledTrades,
+      realizedNetPnlUSD: net,
+      recentWinRate: winRate,
+      rejectionRate,
+      last10Net: s.last10Net ?? [],
+      ...breakdown,
+    };
+  });
+  const best = selectReplacementBot(candidates, stoppedBotId);
+  if (!best) {
+    executionLog.add({
+      mode: exchangeMode.get().mode,
+      exchange: exchangeMode.get().exchange,
+      symbol: 'USDT',
+      side: 'buy',
+      orderType: 'market',
+      quantity: 0,
+      price: 0,
+      amountUSD: 0,
+      status: 'rejected',
+      rejectReason: REJECT.NO_QUALIFIED_REPLACEMENT,
+      rejectionDetail: 'No qualified bot available — real trading paused safely.',
+      signalId: `replace_none_${Date.now()}`,
+    });
+    return;
+  }
+
+  botDoctorStore.unbench(best.botId);
+  executionLog.add({
+    mode: exchangeMode.get().mode,
+    exchange: exchangeMode.get().exchange,
+    symbol: 'USDT',
+    side: 'buy',
+    orderType: 'market',
+    quantity: 0,
+    price: 0,
+    amountUSD: 0,
+    status: 'executed',
+    rejectReason: REJECT.REAL_BOT_STOPPED,
+    rejectionDetail:
+      `stoppedBotId=${stoppedBotId} stopReason=${stopReason} replacementBotId=${best.botId} replacementScore=${best.score.toFixed(4)} ` +
+      `oldPerformance=stopped newPerformance=net:${best.realizedNetPnlUSD.toFixed(2)} winRate:${(best.recentWinRate * 100).toFixed(1)} ` +
+      `rejection:${(best.rejectionRate * 100).toFixed(1)}% confidence:${best.confidence.toFixed(1)}`,
+    signalId: `replace_${stoppedBotId}_${best.botId}_${Date.now()}`,
+  });
+}
+
+function ensureSafeDefaults(exchange: string): void {
+  const cfg = tradeConfig.get(exchange);
+  const safeAllowed = [...SCALPER_ALLOWED_SYMBOLS].map(s => s.toUpperCase());
+  const normalizedAllowed = cfg.allowedSymbols.map(s => s.toUpperCase());
+  const mergedAllowed = Array.from(new Set([...safeAllowed, ...normalizedAllowed]));
+  const patch: Partial<typeof cfg> = {};
+  if (cfg.cooldownSeconds < 30) patch.cooldownSeconds = 30;
+  if (cfg.takeProfitPct <= 0 || cfg.takeProfitPct > 1.2) patch.takeProfitPct = 1.2;
+  if (cfg.stopLossPct <= 0 || cfg.stopLossPct > 0.6) patch.stopLossPct = 0.6;
+  if (cfg.maxOpenPositions === 0 || cfg.maxOpenPositions > 2) patch.maxOpenPositions = 2;
+  if (cfg.allowedSymbols.length === 0 || cfg.allowedSymbols.some(s => !safeAllowed.includes(s.toUpperCase()))) {
+    patch.allowedSymbols = mergedAllowed;
+  }
+  if (Object.keys(patch).length > 0) {
+    tradeConfig.set(exchange, patch);
+  }
+}
+
+function executionPriceFields(
+  signal: Signal,
+  pricingPrice: number,
+  source: string,
+  normalizedSymbol = signal.symbol.toUpperCase(),
+  quoteTimestamp = Date.now(),
+): Pick<ExecutionEntry,
+  'price' | 'requestedSymbol' | 'normalizedSymbol' | 'priceSource' | 'fetchedMarketPrice' | 'quoteTimestamp' | 'finalNotional'
+> {
+  return {
+    price: pricingPrice,
+    requestedSymbol: signal.symbol,
+    normalizedSymbol,
+    priceSource: source,
+    fetchedMarketPrice: pricingPrice,
+    quoteTimestamp,
+    finalNotional: 0,
+  };
+}
+
+function toRejectCodeFromScalperReason(reason: string): string {
+  if (reason.startsWith('low_trade_quality')) return REJECT.LOW_TRADE_QUALITY;
+  switch (reason) {
+    case 'duplicate_signal': return REJECT.DUPLICATE_SIGNAL;
+    case 'cooldown_active': return REJECT.COOLDOWN_ACTIVE;
+    case 'repeated_weak_signal': return REJECT.REPEATED_WEAK_SIGNAL;
+    case 'max_symbol_trades_per_hour': return REJECT.MAX_SYMBOL_TRADES_PER_HOUR;
+    case 'spread_too_high': return REJECT.SPREAD_TOO_HIGH;
+    case 'market_noisy_or_spike': return REJECT.MARKET_NOISY_OR_SPIKE;
+    case 'position_already_open': return REJECT.POSITION_ALREADY_OPEN;
+    case 'confidence_weak': return REJECT.CONFIDENCE_WEAK;
+    case 'no_breakout': return REJECT.NO_BREAKOUT;
+    case 'momentum_not_confirmed': return REJECT.MOMENTUM_NOT_CONFIRMED;
+    case 'early_exit_locked': return REJECT.EARLY_EXIT_LOCKED;
+    case 'no_sell_exit_signal': return REJECT.NO_SELL_EXIT_SIGNAL;
+    default: return REJECT.LOW_TRADE_QUALITY;
+  }
+}
 
 function isPriceStale(signal: Signal): boolean {
   return Date.now() - signal.ts > STALE_PRICE_MS;
@@ -135,8 +330,11 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
 
   const modeState = exchangeMode.get();
   const exchange  = modeState.exchange;
-  const config    = tradeConfig.get(exchange);
   const mode      = modeState.mode;
+  if (mode === 'real' || mode === 'testnet') {
+    ensureSafeDefaults(exchange);
+  }
+  const config    = tradeConfig.get(exchange);
 
   // ── Universal pre-flight guards (all modes) ───────────────────────────────
 
@@ -353,6 +551,48 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     clearShieldCooldownFor(exchange, signal.symbol);
   }
 
+  // 6d. Live quote source of truth for every real/testnet attempt.
+  let normalizedSymbol = signal.symbol.toUpperCase();
+  let pricingPrice = signal.price;
+  let priceSource = 'signal_fallback';
+  let quoteTimestamp = Date.now();
+  try {
+    const quote = await apiClient.getPrice(exchange, signal.symbol);
+    if (quote.ok) {
+      const q = (quote.data as { price?: number }).price ?? 0;
+      if (Number.isFinite(q) && q > 0) {
+        pricingPrice = q;
+        priceSource = 'exchange_live_ticker';
+        quoteTimestamp = Date.now();
+      }
+    }
+  } catch {
+    /* fallback to signal price */
+  }
+  try {
+    const compl = resolveCompliance(signal.symbol, exchange as ExchangeId);
+    if (compl.ok) normalizedSymbol = compl.exchangeSymbol;
+  } catch { /* keep default */ }
+  if (!(pricingPrice > 0)) {
+    return reject(signal, exchange, mode, REJECT.PRICE_UNAVAILABLE, `No live price available for ${signal.symbol}.`);
+  }
+  if (signal.price > 0) {
+    const drift = Math.abs(pricingPrice - signal.price) / signal.price;
+    if (drift > MAX_PRICE_DRIFT_RATIO) {
+      return reject(
+        signal,
+        exchange,
+        mode,
+        REJECT.PRICE_DRIFT_TOO_LARGE,
+        `Internal price ${signal.price} drifted ${(drift * 100).toFixed(2)}% from live ${pricingPrice} (max ${(MAX_PRICE_DRIFT_RATIO * 100).toFixed(2)}%).`,
+        {
+          ...executionPriceFields(signal, pricingPrice, priceSource),
+          quoteTimestamp,
+        },
+      );
+    }
+  }
+
   // 6c. Rejection-Prevention Shield — pre-flight gate (compliance + cache + cooldown)
   try {
     const shield = await preflight({
@@ -360,7 +600,7 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
       arenaSymbol: signal.symbol,
       side:        signal.side,
       amountUSD:   config.tradeAmountUSD,
-      refPrice:    signal.price,
+      refPrice:    pricingPrice,
       credentials,
       signalAgeMs: Math.max(0, Date.now() - signal.ts),
       ...(signal.confidence !== undefined ? { confidence: signal.confidence } : {}),
@@ -440,6 +680,43 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     }
   }
 
+  // 8a. Capital protection (real mode only): keep at least 30% cash reserve,
+  // never deploy >25% of quote cash in one order, and run at most one active
+  // real bot until the fleet proves stable performance.
+  if (mode === 'real' && signal.side === 'buy') {
+    const reserve = availableQuote * (MIN_CASH_RESERVE_PCT / 100);
+    const spendable = Math.max(0, availableQuote - reserve);
+    if (spendable < config.tradeAmountUSD) {
+      return reject(
+        signal,
+        exchange,
+        mode,
+        REJECT.CASH_RESERVE_PROTECTION,
+        `Cash reserve protection: keep ${MIN_CASH_RESERVE_PCT}% in ${symbolRules.quoteCurrency ?? 'USDT'} (spendable $${spendable.toFixed(2)}, requested $${config.tradeAmountUSD.toFixed(2)}).`,
+      );
+    }
+    const maxPerOrder = availableQuote * (MAX_CAPITAL_USAGE_PCT / 100);
+    if (config.tradeAmountUSD > maxPerOrder) {
+      return reject(
+        signal,
+        exchange,
+        mode,
+        REJECT.CAPITAL_USAGE_EXCEEDED,
+        `Capital usage cap exceeded: requested $${config.tradeAmountUSD.toFixed(2)} > ${MAX_CAPITAL_USAGE_PCT}% of quote balance ($${maxPerOrder.toFixed(2)}).`,
+      );
+    }
+    const fleetCfg = botFleet.get();
+    if (fleetCfg.activeRealBots > MAX_ACTIVE_REAL_BOTS) {
+      return reject(
+        signal,
+        exchange,
+        mode,
+        REJECT.MAX_ACTIVE_REAL_BOTS,
+        `Safe mode: max active real bots is ${MAX_ACTIVE_REAL_BOTS}. Current fleet config requests ${fleetCfg.activeRealBots}.`,
+      );
+    }
+  }
+
   // 8b. Per-bot capital allocation check (Phase 4 — Option 3 fixed cap).
   // Cap = tradeAmountUSD × maxOpenPositions; closing-SELLs are not gated
   // because they REDUCE commitment, not add to it.
@@ -459,12 +736,152 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     }
   }
 
+  // 9a. Smart scalper decision gate (pre-trade quality + anti-spam + exits).
+  let scalperVerdict: ReturnType<typeof evaluateScalperOpportunity> | null = null;
+  let scalperSnapshot: SmartScalperSnapshot | undefined;
+  try {
+    const snapRes = await apiClient.getMarketSnapshot(exchange, signal.symbol);
+    if (snapRes.ok) {
+      const raw = (snapRes.data as { snapshot?: {
+        symbol?: string;
+        price?: number;
+        timestamp?: number;
+        spreadPct?: number;
+        candles?: {
+          '1m'?: Array<{ ts: number; open: number; high: number; low: number; close: number; volume: number }>;
+          '3m'?: Array<{ ts: number; open: number; high: number; low: number; close: number; volume: number }>;
+          '5m'?: Array<{ ts: number; open: number; high: number; low: number; close: number; volume: number }>;
+        };
+      } }).snapshot;
+      const toLite = (
+        rows: Array<{ ts: number; open: number; high: number; low: number; close: number; volume: number }> | undefined,
+      ) => (rows ?? []).map(c => ({
+        time: c.ts, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
+      }));
+      scalperSnapshot = {
+        symbol: String(raw?.symbol ?? signal.symbol).toUpperCase(),
+        price: Number(raw?.price ?? pricingPrice) || pricingPrice,
+        timestamp: Number(raw?.timestamp ?? Date.now()) || Date.now(),
+        spreadPct: Number(raw?.spreadPct ?? 0) || 0,
+        candles: {
+          '1m': toLite(raw?.candles?.['1m']),
+          '3m': toLite(raw?.candles?.['3m']),
+          '5m': toLite(raw?.candles?.['5m']),
+        },
+      };
+    }
+  } catch {
+    /* snapshot optional */
+  }
+  if (scalperSnapshot) {
+    const symbolHourCount = symbolTradesLastHour(exchange, signal.symbol);
+    const baseEntry = getEntryPrice(exchange, baseTk);
+    const openedAt = getLastFilledAt(exchange, baseTk);
+    scalperVerdict = evaluateScalperOpportunity({
+      symbol: signal.symbol,
+      side: signal.side,
+      signalPrice: pricingPrice,
+      notionalUSD: config.tradeAmountUSD,
+      confidence: signal.confidence ?? AUTOPILOT_CONFIDENCE_FLOOR,
+      snapshot: scalperSnapshot,
+      cooldownActive: gate.blocked && !isClosingSell,
+      duplicateSignal: recentSignals.includes(signal.id),
+      hasOpenPosition: availableBase > 0,
+      hourlyTradesOnSymbol: symbolHourCount,
+      maxTradesPerSymbolHour: MAX_TRADES_PER_SYMBOL_HOUR,
+      weakSignalLoop: weakSignalLoop(exchange, signal.symbol),
+      justOpenedAt: openedAt,
+      takeProfitPct: config.takeProfitPct > 0 ? config.takeProfitPct : 1.2,
+      stopLossPct: config.stopLossPct > 0 ? config.stopLossPct : 0.6,
+      trailingStopPct: 0.4,
+      positionEntryPrice: baseEntry > 0 ? baseEntry : undefined,
+      symbolRulesMinNotional: symbolRules.minNotional,
+      recentRejects: signal.botId ? Math.round(botActivityStore.rejectionRate(signal.botId) * 10) : 0,
+    });
+    if (!scalperVerdict.pass) {
+      const rejectCode = toRejectCodeFromScalperReason(scalperVerdict.reason);
+      noteSymbolAttempt(exchange, signal.symbol, signal.side, true);
+      const d = scalperVerdict.diagnostics;
+      return reject(
+        signal,
+        exchange,
+        mode,
+        rejectCode,
+        `Smart scalper blocked ${signal.side.toUpperCase()} ${signal.symbol}: ${scalperVerdict.reason}`,
+        {
+          ...executionPriceFields(signal, pricingPrice, priceSource, normalizedSymbol),
+          quoteTimestamp,
+          finalNotional: config.tradeAmountUSD,
+          scalperReason: scalperVerdict.reason,
+          scalperConfidence: scalperVerdict.confidence,
+          scalperRsi: d.rsi,
+          scalperEmaStatus: `${d.emaShortAbovePrice ? 'price>emaS' : 'price<=emaS'} / ${d.emaTrendUp ? 'emaS>emaL' : 'emaS<=emaL'}`,
+          scalperVolumeStatus: d.volumeAboveAvg ? 'above_avg' : 'below_avg',
+          scalperSpreadPct: scalperSnapshot.spreadPct,
+          scalperCooldown: d.cooldownActive,
+          scalperSnapshotTs: scalperSnapshot.timestamp,
+        },
+      );
+    }
+  }
+  noteSymbolAttempt(exchange, signal.symbol, signal.side, false);
+
+  // 9b. Capital protection
+  if (signal.side === 'buy') {
+    const quoteTotal = availableQuote;
+    const keepCash = quoteTotal * (MIN_CASH_RESERVE_PCT / 100);
+    const after = quoteTotal - config.tradeAmountUSD;
+    if (quoteTotal > 0 && after < keepCash) {
+      return reject(
+        signal,
+        exchange,
+        mode,
+        REJECT.CASH_RESERVE_PROTECTION,
+        `Cash reserve protection: buy would leave ${after.toFixed(2)} USDT below ${(MIN_CASH_RESERVE_PCT).toFixed(0)}% reserve (${keepCash.toFixed(2)}).`,
+        {
+          ...executionPriceFields(signal, pricingPrice, priceSource, normalizedSymbol),
+          quoteTimestamp,
+          finalNotional: config.tradeAmountUSD,
+        },
+      );
+    }
+    const usage = quoteTotal > 0 ? (config.tradeAmountUSD / quoteTotal) * 100 : 100;
+    if (usage > MAX_CAPITAL_USAGE_PCT) {
+      return reject(
+        signal,
+        exchange,
+        mode,
+        REJECT.CAPITAL_USAGE_EXCEEDED,
+        `Capital usage ${usage.toFixed(1)}% exceeds max ${MAX_CAPITAL_USAGE_PCT}% per trade.`,
+        {
+          ...executionPriceFields(signal, pricingPrice, priceSource, normalizedSymbol),
+          quoteTimestamp,
+          finalNotional: config.tradeAmountUSD,
+        },
+      );
+    }
+    if (openPositionCount >= MAX_ACTIVE_REAL_BOTS) {
+      return reject(
+        signal,
+        exchange,
+        mode,
+        REJECT.MAX_ACTIVE_REAL_BOTS,
+        `Max active real bots (${MAX_ACTIVE_REAL_BOTS}) reached.`,
+        {
+          ...executionPriceFields(signal, pricingPrice, priceSource, normalizedSymbol),
+          quoteTimestamp,
+          finalNotional: config.tradeAmountUSD,
+        },
+      );
+    }
+  }
+
   // 9. Risk check
   const risk = validateRisk({
     exchange,
     symbol:           signal.symbol,
     side:             signal.side,
-    price:            signal.price,
+    price:            pricingPrice,
     amountUSD:        config.tradeAmountUSD,
     availableQuote,
     availableBase,
@@ -509,6 +926,89 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
 
   const isTestnet = mode === 'testnet';
 
+  let preflightSnapshot: SmartScalperSnapshot | undefined;
+  if (mode === 'real' || mode === 'testnet') {
+    try {
+      const snapRes = await apiClient.getMarketSnapshot(exchange, signal.symbol);
+      if (snapRes.ok) {
+        const raw = (snapRes.data as { snapshot?: {
+          symbol?: string;
+          price?: number;
+          timestamp?: number;
+          spreadPct?: number;
+          candles?: {
+            '1m'?: Array<{ ts: number; open: number; high: number; low: number; close: number; volume: number }>;
+            '3m'?: Array<{ ts: number; open: number; high: number; low: number; close: number; volume: number }>;
+            '5m'?: Array<{ ts: number; open: number; high: number; low: number; close: number; volume: number }>;
+          };
+        } }).snapshot;
+        if (raw) {
+          const toLite = (
+            rows: Array<{ ts: number; open: number; high: number; low: number; close: number; volume: number }> | undefined,
+          ) => (rows ?? []).map(c => ({
+            time: c.ts, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
+          }));
+          preflightSnapshot = {
+            symbol: String(raw.symbol ?? signal.symbol).toUpperCase(),
+            price: Number(raw.price ?? pricingPrice) || pricingPrice,
+            timestamp: Number(raw.timestamp ?? Date.now()) || Date.now(),
+            spreadPct: Number(raw.spreadPct ?? 0) || 0,
+            candles: {
+              '1m': toLite(raw.candles?.['1m']),
+              '3m': toLite(raw.candles?.['3m']),
+              '5m': toLite(raw.candles?.['5m']),
+            },
+          };
+        }
+      }
+    } catch {
+      preflightSnapshot = undefined;
+    }
+  }
+  const tradesOnSymbolHour = symbolTradesLastHour(exchange, normalizedSymbol);
+  const weakLoop = weakSignalLoop(exchange, normalizedSymbol);
+  const hasOpenOnSymbol = availableBase > 0;
+
+  if (preflightSnapshot) {
+    const scalperResult = evaluateScalperOpportunity({
+      symbol: normalizedSymbol,
+      side: signal.side,
+      signalPrice: pricingPrice,
+      notionalUSD: config.tradeAmountUSD,
+      confidence: signal.confidence ?? 0,
+      snapshot: preflightSnapshot,
+      cooldownActive: gate.blocked,
+      duplicateSignal: recentSignals.includes(signal.id),
+      hasOpenPosition: hasOpenOnSymbol,
+      hourlyTradesOnSymbol: tradesOnSymbolHour,
+      maxTradesPerSymbolHour: MAX_TRADES_PER_SYMBOL_HOUR,
+      weakSignalLoop: weakLoop || hasBuySellLoop(exchange, normalizedSymbol, signal.side),
+      justOpenedAt: getLastFilledAt(exchange, baseTk),
+      takeProfitPct: config.takeProfitPct,
+      stopLossPct: config.stopLossPct,
+      trailingStopPct: 0.4,
+      positionEntryPrice: getEntryPrice(exchange, baseTk),
+      symbolRulesMinNotional: symbolRules.minNotional,
+      recentRejects: signal.botId ? Math.round(botActivityStore.rejectionRate(signal.botId) * 10) : 0,
+    });
+    if (!scalperResult.pass) {
+      const code = toRejectCodeFromScalperReason(scalperResult.reason);
+      noteSymbolAttempt(exchange, normalizedSymbol, signal.side, true);
+      return reject(signal, exchange, mode, code, `Smart scalper blocked: ${scalperResult.reason}`, {
+        ...executionPriceFields(signal, pricingPrice, priceSource, normalizedSymbol, quoteTimestamp),
+        finalNotional: config.tradeAmountUSD,
+        scalperReason: scalperResult.reason,
+        scalperConfidence: scalperResult.confidence,
+        scalperRsi: scalperResult.diagnostics.rsi,
+        scalperEmaStatus: `${scalperResult.diagnostics.emaShortAbovePrice ? 'price>emaS' : 'price<=emaS'}|${scalperResult.diagnostics.emaTrendUp ? 'emaS>emaL' : 'emaS<=emaL'}`,
+        scalperVolumeStatus: scalperResult.diagnostics.volumeAboveAvg ? 'volume_above_avg' : 'volume_below_avg',
+        scalperSpreadPct: preflightSnapshot.spreadPct,
+        scalperCooldown: scalperResult.diagnostics.cooldownActive,
+        scalperSnapshotTs: preflightSnapshot.timestamp,
+      });
+    }
+  }
+
   const pending = executionLog.add({
     mode,
     exchange,
@@ -516,7 +1016,6 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     side:      signal.side,
     orderType: config.orderType,
     quantity:  risk.quantity!,
-    price:     risk.price!,
     amountUSD: config.tradeAmountUSD,
     status:    'executing',
     signalId:  signal.id,
@@ -527,6 +1026,10 @@ export async function executeSignal(signal: Signal): Promise<EngineResult> {
     minNotional: risk.minNotional,
     stepSize:    risk.stepSize,
     rulesSource: risk.filterSource,
+    ...executionPriceFields(signal, pricingPrice, priceSource, normalizedSymbol, quoteTimestamp),
+    finalNotional: (risk.quantity ?? 0) * (risk.price ?? pricingPrice),
+    scalperSpreadPct: preflightSnapshot?.spreadPct,
+    scalperSnapshotTs: preflightSnapshot?.timestamp,
   });
 
   const t0 = Date.now();
@@ -664,6 +1167,7 @@ function reject(
   mode: 'demo' | 'paper' | 'testnet' | 'real',
   reason: string,
   detail: string,
+  extras?: Partial<ExecutionEntry>,
 ): EngineResult {
   const entry = executionLog.add({
     mode,
@@ -677,6 +1181,7 @@ function reject(
     status:        'rejected',
     rejectReason:  reason,
     signalId:      signal.id,
+    ...(extras ?? {}),
   });
   console.warn(`[engine][${mode}] REJECTED — ${reason}: ${detail}`);
   if (signal.botId && (mode === 'real' || mode === 'testnet')) {
@@ -692,6 +1197,7 @@ function reject(
   // Bot Doctor: classify + (in AUTO_FIX/FULL_ACTIVE) auto-bench. Real mode
   // only — testnet rejects must not bench the user's real-trading bots.
   if (mode === 'real') {
+    noteSymbolAttempt(exchange, signal.symbol, signal.side);
     try {
       const rate = signal.botId ? botActivityStore.rejectionRate(signal.botId) : 0;
       const recent = signal.botId
@@ -708,6 +1214,24 @@ function reject(
         exchange,
         baseAsset:       baseTicker(signal.symbol),
       });
+      if (signal.botId && botDoctorStore.canDeepAct()) {
+        const perBot = realProfitStore.snapshot().perBot[signal.botId];
+        const net = perBot ? perBot.realizedPnlUSD - perBot.feesPaidUSD : 0;
+        const breakdown = recentRejectBreakdown(signal.botId);
+        const stop = evaluateBotStop({
+          netPnlUSD: net,
+          rejectionRate: rate,
+          last10Net: perBot?.last10Net ?? [],
+          spamRejectsRecent: breakdown.spamRejectsRecent,
+          riskBreakRejectsRecent: breakdown.riskBreakRejectsRecent,
+          badEntryRejectsRecent: breakdown.badEntryRejectsRecent,
+        });
+        if (stop.stop) {
+          const why = stop.reasons.join(' | ');
+          botDoctorStore.bench(signal.botId, 'underperforming_real', why, 30 * 60_000);
+          void maybeReplaceStoppedBot(signal.botId, why);
+        }
+      }
     } catch { /* doctor must never throw */ }
   }
   return { ok: false, logId: entry.id, rejectReason: reason, detail };

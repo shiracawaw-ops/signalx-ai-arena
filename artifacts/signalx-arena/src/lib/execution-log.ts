@@ -35,6 +35,21 @@ export interface ExecutionEntry {
   stepSize?:       number;
   rejectionDetail?: string;
   rulesSource?:    string;        // "live" | "cached" | "stub"
+  // ── Price provenance / scalper diagnostics ──────────────────────────────────
+  requestedSymbol?:    string;
+  normalizedSymbol?:   string;
+  priceSource?:        string;
+  fetchedMarketPrice?: number;
+  quoteTimestamp?:     number;
+  finalNotional?:      number;
+  scalperReason?:      string;
+  scalperConfidence?:  number;
+  scalperRsi?:         number;
+  scalperEmaStatus?:   string;
+  scalperVolumeStatus?: string;
+  scalperSpreadPct?:   number;
+  scalperCooldown?:    boolean;
+  scalperSnapshotTs?:  number;
 }
 
 const STORAGE_KEY = 'sx_execution_log_v1';
@@ -151,6 +166,22 @@ export const REJECT = {
   EDGE_BELOW_FEES:            'edge_below_fees',
   // ── Phase 4 per-bot allocation gate ───────────────────────────────────────
   BOT_ALLOCATION_EXCEEDED:    'bot_allocation_exceeded',
+  // ── Smart scalper + anti-spam / capital protection ────────────────────────
+  SPREAD_TOO_HIGH:            'spread_too_high',
+  MARKET_NOISY_OR_SPIKE:      'market_noisy_or_spike',
+  REPEATED_WEAK_SIGNAL:       'repeated_weak_signal',
+  MAX_SYMBOL_TRADES_PER_HOUR: 'max_symbol_trades_per_hour',
+  POSITION_ALREADY_OPEN:      'position_already_open',
+  CONFIDENCE_WEAK:            'confidence_weak',
+  NO_BREAKOUT:                'no_breakout',
+  MOMENTUM_NOT_CONFIRMED:     'momentum_not_confirmed',
+  EARLY_EXIT_LOCKED:          'early_exit_locked',
+  NO_SELL_EXIT_SIGNAL:        'no_sell_exit_signal',
+  CASH_RESERVE_PROTECTION:    'cash_reserve_protection',
+  CAPITAL_USAGE_EXCEEDED:     'capital_usage_exceeded',
+  MAX_ACTIVE_REAL_BOTS:       'max_active_real_bots',
+  REAL_BOT_STOPPED:           'real_bot_stopped',
+  NO_QUALIFIED_REPLACEMENT:   'no_qualified_replacement',
 } as const;
 
 export type RejectReason = typeof REJECT[keyof typeof REJECT];
