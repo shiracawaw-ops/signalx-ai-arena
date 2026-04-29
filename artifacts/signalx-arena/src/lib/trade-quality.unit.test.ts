@@ -116,7 +116,7 @@ describe('scoreTradeQuality — failing & veto cases', () => {
 });
 
 describe('scoreTradeQuality — component breakdown', () => {
-  it('always exposes the six named components in a stable order', () => {
+  it('always exposes the named components in stable order', () => {
     const v = scoreTradeQuality({
       notional: 25, refPrice: 100, signalAgeMs: 0,
       rules: RULES_5, exchange: 'binance',
@@ -128,15 +128,21 @@ describe('scoreTradeQuality — component breakdown', () => {
       'cooldown_penalty',
       'confidence',
       'edge_after_fees',
+      'spread_quality',
+      'volatility_sanity',
+      'momentum_confirmation',
+      'volume_confirmation',
     ]);
   });
 
-  it('component weights sum to 1.0 (so the composite is a true weighted avg)', () => {
+  it('component weights sum to 1.3 and normalize in composite', () => {
     const v = scoreTradeQuality({
       notional: 25, refPrice: 100, signalAgeMs: 0,
       rules: RULES_5, exchange: 'binance',
     });
     const total = v.components.reduce((s, c) => s + c.weight, 0);
-    expect(total).toBeCloseTo(1.0, 6);
+    expect(total).toBeCloseTo(1.3, 6);
+    const normalized = v.components.reduce((s, c) => s + (c.weight / total), 0);
+    expect(normalized).toBeCloseTo(1.0, 6);
   });
 });

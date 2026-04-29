@@ -206,11 +206,11 @@ function detectIssuesFor(
   }
 
   // 8. Under-performing real bot.
-  if (realStat && realStat.trades >= 5 && realStat.realizedNetUSD < 0) {
+  if (realStat && realStat.trades >= 3 && (realStat.realizedNetUSD <= -25 || realStat.losses >= 3)) {
     const lossUsd = Math.abs(realStat.realizedNetUSD);
     issues.push({
       code: 'UNDERPERFORMING_REAL',
-      level: lossUsd > 50 ? 'critical' : 'warning',
+      level: (lossUsd > 25 || realStat.losses >= 3) ? 'critical' : 'warning',
       title: `Net realized loss: -$${lossUsd.toFixed(2)}`,
       description: `${realStat.trades} closed trades, ${realStat.wins} wins / ${realStat.losses} losses.`,
       recommendation: 'Strategy is losing real money. Bench bot and consider cloning the champion strategy.',

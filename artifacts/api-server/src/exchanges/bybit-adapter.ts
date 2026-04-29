@@ -1,7 +1,21 @@
 // ─── Bybit REST Adapter (Unified v5) ─────────────────────────────────────────
 import { hmacSHA256, safeFetch, stubSymbolRules, toUsdtPair } from './base-adapter.js';
 import { ExchangeOperationError, withUsdtValue, enrichBalancesWithUsdtValue } from './exchange-error.js';
-import type { ExchangeAdapter, ExchangeCredentials, ConnectResult, Permission, Balance, BalanceScope, BalanceSummary, SymbolRules, OrderRequest, OrderResult, DustSweepResult } from './types.js';
+import type {
+  ExchangeAdapter,
+  ExchangeCredentials,
+  ConnectResult,
+  Permission,
+  Balance,
+  BalanceScope,
+  BalanceSummary,
+  SymbolRules,
+  OrderRequest,
+  OrderResult,
+  DustSweepResult,
+  CandleSnapshot,
+  MarketSnapshot,
+} from './types.js';
 
 const BASE         = 'https://api.bybit.com';
 const TESTNET_BASE = 'https://api-testnet.bybit.com';
@@ -604,6 +618,53 @@ export class BybitAdapter implements ExchangeAdapter {
     return parseFloat(item['lastPrice'] ?? '0');
   }
 
+  async getMarketSnapshot(symbol: string): Promise<MarketSnapshot> {
+    const sym = this.normalizeSymbol(symbol);
+    const [price, one, three, five] = await Promise.all([
+      this.getPrice(sym),
+      this.fetchCandles(sym, '1', 120),
+      this.fetchCandles(sym, '3', 120),
+      this.fetchCandles(sym, '5', 120),
+    ]);
+    const spreadPct = estimateSpreadPct(one, price);
+    return {
+      symbol: sym,
+      price,
+      timestamp: Date.now(),
+      spreadPct,
+      candles: {
+        '1m': one,
+        '3m': three,
+        '5m': five,
+      },
+    };
+  }
+
+  private async fetchCandles(symbol: string, interval: '1' | '3' | '5', limit: number): Promise<CandleSnapshot[]> {
+    const capped = Math.max(10, Math.min(200, Math.floor(limit)));
+    const r = await safeFetch(
+      `${BASE}/v5/market/kline?category=spot&symbol=${symbol}&interval=${interval}&limit=${capped}`,
+      {},
+      'bybit',
+    );
+    if (!r.ok) return [];
+    const list = ((r.data as Record<string, Record<string, unknown[]>>)?.['result']?.['list'] ?? []) as Array<Array<string>>;
+    const out: CandleSnapshot[] = [];
+    for (const row of list) {
+      const ts = Number(row[0] ?? 0);
+      const open = Number(row[1] ?? 0);
+      const high = Number(row[2] ?? 0);
+      const low = Number(row[3] ?? 0);
+      const close = Number(row[4] ?? 0);
+      const volume = Number(row[5] ?? 0);
+      if (!(ts > 0 && open > 0 && high > 0 && low > 0 && close > 0)) continue;
+      out.push({ ts, open, high, low, close, volume: Number.isFinite(volume) ? volume : 0 });
+    }
+    // Bybit returns newest-first; scalper logic expects oldest-first.
+    out.sort((a, b) => a.ts - b.ts);
+    return out;
+  }
+
   async cancelOrder(creds: ExchangeCredentials, orderId: string, symbol?: string): Promise<boolean> {
     if (!symbol) return false;
     const base = creds.testnet ? TESTNET_BASE : BASE;
@@ -933,4 +994,13 @@ export class BybitAdapter implements ExchangeAdapter {
     const o    = list[0];
     return o ? parseOrder(o as Record<string, unknown>) : null;
   }
+}
+
+function estimateSpreadPct(candles: CandleSnapshot[], price: number): number {
+  if (!(price > 0) || candles.length === 0) return 0;
+  const last = candles[candles.length - 1]!;
+  // Spot ticker endpoint doesn't expose bid/ask in this adapter path.
+  // Use latest candle micro-range as a conservative spread proxy.
+  const proxy = Math.max(0, (last.high - last.low) / price);
+  return proxy * 100;
 }

@@ -53,6 +53,8 @@ export interface BotRealStat {
   trades:         number;
   wins:           number;
   losses:         number;
+  rejected?:      number;
+  last10Net?:     number[];
 }
 
 export interface ClosedRealTrade {
@@ -196,6 +198,7 @@ class RealProfitStore {
           trades:   1,
           win:      netRealized > 0 ? 1 : 0,
           loss:     netRealized > 0 ? 0 : 1,
+          net:      netRealized,
         });
       }
       if (netRealized > 0) this.state.winsClosed   += 1;
@@ -271,18 +274,35 @@ class RealProfitStore {
     this.notify();
   }
 
-  private bumpBot(botId: string, p: { realized?: number; fees?: number; trades?: number; win?: number; loss?: number }) {
-    const cur = this.state.perBot[botId] ?? { realizedPnlUSD: 0, feesPaidUSD: 0, trades: 0, wins: 0, losses: 0 };
+  private bumpBot(botId: string, p: { realized?: number; fees?: number; trades?: number; win?: number; loss?: number; net?: number }) {
+    const cur = this.state.perBot[botId] ?? { realizedPnlUSD: 0, feesPaidUSD: 0, trades: 0, wins: 0, losses: 0, last10Net: [] };
     cur.realizedPnlUSD += p.realized ?? 0;
     cur.feesPaidUSD    += p.fees     ?? 0;
     cur.trades         += p.trades   ?? 0;
     cur.wins           += p.win      ?? 0;
     cur.losses         += p.loss     ?? 0;
+    if (typeof p.net === 'number' && Number.isFinite(p.net)) {
+      const prev = cur.last10Net ?? [];
+      cur.last10Net = [p.net, ...prev].slice(0, 10);
+    }
     this.state.perBot[botId] = cur;
   }
 }
 
 export const realProfitStore = new RealProfitStore();
+
+export function upsertBotRealtimeStat(botId: string, patch: Partial<BotRealStat>): void {
+  const snap = realProfitStore.snapshot();
+  const cur = snap.perBot[botId] ?? { realizedPnlUSD: 0, feesPaidUSD: 0, trades: 0, wins: 0, losses: 0, rejected: 0, last10Net: [] };
+  const next: BotRealStat = {
+    ...cur,
+    ...patch,
+    rejected: patch.rejected ?? cur.rejected ?? 0,
+    last10Net: patch.last10Net ?? cur.last10Net ?? [],
+  };
+  (snap.perBot as Record<string, BotRealStat>)[botId] = next;
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(snap)); } catch { /* storage full */ }
+}
 
 export function useRealProfit(): RealProfitState {
   const [s, setS] = useState<RealProfitState>(() => realProfitStore.snapshot());

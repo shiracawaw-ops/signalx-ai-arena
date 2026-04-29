@@ -33,6 +33,11 @@ export interface AutoPilotDecision {
   timestamp:      number;
 }
 
+// Shared confidence floor used by AutoPilot selection and the smart-scalper
+// gate in execution-engine so both paths enforce the same minimum signal
+// quality before permitting new entries.
+export const AUTOPILOT_CONFIDENCE_FLOOR = 50;
+
 export interface DecisionLogEntry {
   id:        string;
   timestamp: number;
@@ -201,7 +206,6 @@ export function computeAutoPilotDecision(
   // expose `topBots` for the UI, but the SELECTED bot (and therefore the
   // dispatch action) is gated. Floor of 50 chosen to match the "good"
   // health threshold (pnlPct >= 0 → score weighting >= 50-ish).
-  const AUTOPILOT_CONFIDENCE_FLOOR = 50;
   const topBots     = evaluations.slice(0, 3);
   const qualifying  = evaluations.filter(e => e.confidence >= AUTOPILOT_CONFIDENCE_FLOOR);
   const selectedBot = qualifying[0] ?? null;

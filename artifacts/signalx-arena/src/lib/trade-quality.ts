@@ -37,6 +37,10 @@ export interface TradeQualityInput {
   expectedEdgeBps?: number;           // optional caller-supplied edge in bps (1bp = 0.01%)
   confidence?:     number;            // optional caller-supplied confidence 0..100
   exchange?:       string;            // venue id, used to pick taker-fee assumption
+  spreadPct?:      number;            // optional live spread percentage
+  volatilityPct?:  number;            // optional recent volatility percentage
+  momentumScore?:  number;            // optional normalized momentum score 0..1
+  volumeRatio?:    number;            // optional ratio currentVol / avgVol
 }
 
 export interface TradeQualityComponent {
@@ -184,6 +188,59 @@ export function scoreTradeQuality(input: TradeQualityInput): TradeQualityVerdict
     }
   }
   components.push({ id: 'edge_after_fees', score: edgeScore, weight: 0.10, detail: edgeDetail });
+
+  // 7. Spread quality — tighter spread is better for scalping entries.
+  const spreadPct = Number.isFinite(input.spreadPct) ? Math.max(0, input.spreadPct ?? 0) : undefined;
+  const spreadScore = spreadPct === undefined ? 0.7 : ramp(spreadPct, 0.05, 0.40);
+  components.push({
+    id: 'spread_quality',
+    score: spreadScore,
+    weight: 0.08,
+    detail: spreadPct === undefined
+      ? 'no spread snapshot supplied; neutral 0.7'
+      : `spread ${spreadPct.toFixed(3)}% (target ≤ 0.05%, hard-fail near 0.40%)`,
+  });
+  if (spreadPct !== undefined && spreadPct > 0.60) {
+    vetoes.push(`Spread ${spreadPct.toFixed(3)}% is too high for scalping.`);
+  }
+
+  // 8. Volatility sanity — reject extreme spikes, penalize dead-flat noise.
+  const volPct = Number.isFinite(input.volatilityPct) ? Math.max(0, input.volatilityPct ?? 0) : undefined;
+  const volatilityScore = volPct === undefined
+    ? 0.7
+    : clamp01(1 - Math.abs(volPct - 0.45) / 0.55);
+  components.push({
+    id: 'volatility_sanity',
+    score: volatilityScore,
+    weight: 0.06,
+    detail: volPct === undefined
+      ? 'no volatility snapshot supplied; neutral 0.7'
+      : `volatility ${volPct.toFixed(3)}% (sweet-spot around 0.45%)`,
+  });
+  if (volPct !== undefined && volPct > 2.5) {
+    vetoes.push(`Volatility spike ${volPct.toFixed(2)}% exceeds scalper ceiling.`);
+  }
+
+  // 9. Momentum + volume confirmation (optional, from smart-scalper precheck).
+  const momentumScore = Number.isFinite(input.momentumScore) ? clamp01(input.momentumScore ?? 0) : 0.7;
+  components.push({
+    id: 'momentum_confirmation',
+    score: momentumScore,
+    weight: 0.08,
+    detail: Number.isFinite(input.momentumScore)
+      ? `momentum score ${(momentumScore * 100).toFixed(0)}%`
+      : 'no momentum score supplied; neutral 0.7',
+  });
+  const volumeRatio = Number.isFinite(input.volumeRatio) ? Math.max(0, input.volumeRatio ?? 0) : undefined;
+  const volumeScore = volumeRatio === undefined ? 0.7 : ramp(volumeRatio, 1.6, 0.7);
+  components.push({
+    id: 'volume_confirmation',
+    score: volumeScore,
+    weight: 0.08,
+    detail: volumeRatio === undefined
+      ? 'no volume ratio supplied; neutral 0.7'
+      : `volume ratio ${volumeRatio.toFixed(2)}x vs baseline`,
+  });
 
   // ── Composite ────────────────────────────────────────────────────────────
   const totalWeight = components.reduce((s, c) => s + c.weight, 0);
